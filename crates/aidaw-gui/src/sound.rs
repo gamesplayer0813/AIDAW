@@ -8,6 +8,7 @@ use aidaw_engine::{output_device_names, Engine};
 use eframe::egui::{self, Color32, RichText};
 
 use crate::app::App;
+use crate::i18n::{tr, trf};
 
 pub fn log(line: &str) {
     let Some(path) = std::env::current_exe()
@@ -65,53 +66,53 @@ pub fn meter(ui: &mut egui::Ui, peak: f32) -> egui::Response {
 
 pub fn show_window(ctx: &egui::Context, app: &mut App, open: &mut bool) {
     let mut switch_to: Option<String> = None;
-    egui::Window::new("🔊 Sound").open(open).resizable(false).default_width(420.0).show(ctx, |ui| {
+    egui::Window::new(tr("🔊 Sound")).id(egui::Id::new("sound_window")).open(open).resizable(false).default_width(420.0).show(ctx, |ui| {
         match &app.engine {
             Some(e) => {
                 let d = e.diagnostics();
-                ui.label(RichText::new(format!("Playing through: {}", e.device_name())).strong());
+                ui.label(RichText::new(trf("Playing through: {}", &[&e.device_name()])).strong());
                 ui.weak(e.format());
                 if d.callbacks == 0 {
-                    ui.colored_label(Color32::LIGHT_RED, "⚠ The sound device is not running (it never asked for audio). Try another device below.");
+                    ui.colored_label(Color32::LIGHT_RED, tr("⚠ The sound device is not running (it never asked for audio). Try another device below."));
                 } else {
-                    ui.colored_label(Color32::LIGHT_GREEN, format!("✔ Sound device is running ({} buffers so far)", d.callbacks));
+                    ui.colored_label(Color32::LIGHT_GREEN, trf("✔ Sound device is running ({} buffers so far)", &[&d.callbacks]));
                 }
                 if let Some(err) = &d.error {
-                    ui.colored_label(Color32::LIGHT_RED, format!("Device error: {err}"));
+                    ui.colored_label(Color32::LIGHT_RED, trf("Device error: {}", &[err]));
                 }
                 ui.horizontal(|ui| {
-                    ui.label("Output level");
+                    ui.label(tr("Output level"));
                     meter(ui, d.peak);
                 });
                 ui.add_space(4.0);
-                if ui.button(RichText::new("🔔 Play a test beep").strong()).clicked() {
+                if ui.button(RichText::new(tr("🔔 Play a test beep")).strong()).clicked() {
                     e.test_tone();
                 }
-                ui.weak("Meter moves but you hear nothing? Check the Windows volume (speaker icon in the taskbar), that the right speakers/headphones are the default, and that they aren't muted.");
+                ui.weak(tr("Meter moves but you hear nothing? Check the Windows volume (speaker icon in the taskbar), that the right speakers/headphones are the default, and that they aren't muted."));
             }
             None => {
-                ui.colored_label(Color32::LIGHT_RED, RichText::new("🔇 AIDAW couldn't open any sound device.").strong());
+                ui.colored_label(Color32::LIGHT_RED, RichText::new(tr("🔇 AIDAW couldn't open any sound device.")).strong());
                 if let Some(err) = &app.engine_error {
                     ui.add(egui::Label::new(RichText::new(err).monospace().small()).wrap());
                 }
             }
         }
         ui.separator();
-        ui.label("Choose speakers / headphones:");
+        ui.label(tr("Choose speakers / headphones:"));
         if app.device_names.is_empty() {
             app.device_names = output_device_names();
         }
         let current = app.engine.as_ref().map(|e| e.device_name().to_string());
         for (i, name) in app.device_names.iter().enumerate() {
-            let label = if i == 0 { format!("{name}  (Windows default)") } else { name.clone() };
+            let label = if i == 0 { trf("{}  (Windows default)", &[name]) } else { name.clone() };
             if ui.selectable_label(current.as_deref() == Some(name.as_str()), label).clicked() {
                 switch_to = Some(name.clone());
             }
         }
         if app.device_names.is_empty() {
-            ui.weak("No output devices found. Plug in speakers or headphones.");
+            ui.weak(tr("No output devices found. Plug in speakers or headphones."));
         }
-        if ui.button("⟳ Refresh list").clicked() {
+        if ui.button(tr("⟳ Refresh list")).clicked() {
             app.device_names = output_device_names();
         }
     });

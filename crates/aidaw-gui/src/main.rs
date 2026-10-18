@@ -2,6 +2,7 @@
 
 mod app;
 mod arrange;
+mod i18n;
 mod inspector;
 mod mode;
 mod onboarding;

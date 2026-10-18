@@ -1000,7 +1000,7 @@ static PRESETS: &[Preset] = &[
     Preset {
         id: "wind",
         name: "💨 Wind",
-        hint: "Whooshing noise. The note picks nothing; length does.",
+        hint: "Whooshing noise. Pitch doesn't matter, note length does.",
         category: C::Fx,
         aliases: &["noise", "whoosh", "white_noise"],
         instrument: synth(Synth {

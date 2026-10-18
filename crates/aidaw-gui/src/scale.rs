@@ -1,5 +1,7 @@
 //! Musical keys: highlight and optionally "stay in key" so random clicks still sound good.
 
+use crate::i18n::tr;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Scale {
     Off,
@@ -26,12 +28,12 @@ impl Scale {
 
     pub fn label(self) -> &'static str {
         match self {
-            Scale::Off => "Any notes",
-            Scale::Major => "Major (happy)",
-            Scale::Minor => "Minor (sad)",
-            Scale::Pentatonic => "Pentatonic (can't go wrong)",
-            Scale::MinorPentatonic => "Minor pentatonic",
-            Scale::Blues => "Blues",
+            Scale::Off => tr("Any notes"),
+            Scale::Major => tr("Major (happy)"),
+            Scale::Minor => tr("Minor (sad)"),
+            Scale::Pentatonic => tr("Pentatonic (can't go wrong)"),
+            Scale::MinorPentatonic => tr("Minor pentatonic"),
+            Scale::Blues => tr("Blues"),
         }
     }
 

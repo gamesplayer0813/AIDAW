@@ -8,6 +8,7 @@ use aidaw_core::{Instrument, Project};
 use eframe::egui::{self, Align2, Color32, Id, LayerId, Order, RichText, Stroke, StrokeKind};
 
 use crate::app::App;
+use crate::i18n::{tr, trf};
 
 pub const DEMO_SONG: &str = include_str!("../../../examples/demo.aidaw.json");
 
@@ -147,7 +148,7 @@ pub struct Tutorial {
 
 impl Tutorial {
     pub fn start(app: &mut App) -> Tutorial {
-        app.load_project(demo_project(), None, "Tutorial: demo song loaded");
+        app.load_project(demo_project(), None, tr("Tutorial: demo song loaded"));
         app.selected_clip = None;
         app.selected_note = None;
         Tutorial {
@@ -199,7 +200,7 @@ pub fn show_tutorial(ctx: &egui::Context, app: &mut App, tut: &mut Tutorial) -> 
 
     let mut open = true;
     let mut finish = false;
-    egui::Window::new(RichText::new("🎓 Tutorial").strong())
+    egui::Window::new(RichText::new(tr("🎓 Tutorial")).strong())
         .id(Id::new("tutorial_window"))
         // Keep the window away from whatever the step asks you to click.
         .anchor(
@@ -220,35 +221,35 @@ pub fn show_tutorial(ctx: &egui::Context, app: &mut App, tut: &mut Tutorial) -> 
         .open(&mut open)
         .show(ctx, |ui| {
             ui.set_max_width(330.0);
-            ui.label(RichText::new(format!("Step {} of {}", tut.step + 1, STEPS.len())).weak());
+            ui.label(RichText::new(trf("Step {} of {}", &[&(tut.step + 1), &STEPS.len()])).weak());
             ui.add(
                 egui::ProgressBar::new((tut.step + 1) as f32 / STEPS.len() as f32)
                     .desired_height(4.0),
             );
             ui.add_space(4.0);
-            ui.label(RichText::new(step.title).heading());
+            ui.label(RichText::new(tr(step.title)).heading());
             ui.add_space(4.0);
-            ui.label(step.body);
+            ui.label(tr(step.body));
             ui.add_space(8.0);
             if done {
                 ui.label(
-                    RichText::new("✔ Nice!")
+                    RichText::new(tr("✔ Nice!"))
                         .color(Color32::LIGHT_GREEN)
                         .strong()
                         .size(18.0),
                 );
             }
             ui.horizontal(|ui| {
-                if tut.step > 0 && ui.button("◀ Back").clicked() {
+                if tut.step > 0 && ui.button(tr("◀ Back")).clicked() {
                     tut.go(app, tut.step - 1);
                 }
                 let last = tut.step + 1 == STEPS.len();
                 let next_label = if last {
-                    "Finish 🎉"
+                    tr("Finish 🎉")
                 } else if tut.step == 0 || matches!(step.target, "key") {
-                    "Next ▶"
+                    tr("Next ▶")
                 } else {
-                    "Skip this step ▶"
+                    tr("Skip this step ▶")
                 };
                 let next = egui::Button::new(RichText::new(next_label).strong());
                 if ui.add(next).clicked() {
@@ -263,7 +264,7 @@ pub fn show_tutorial(ctx: &egui::Context, app: &mut App, tut: &mut Tutorial) -> 
     if finish {
         app.settings.tutorial_done = true;
         app.settings.save();
-        app.status = "Tutorial finished. Have fun making music!".into();
+        app.status = tr("Tutorial finished. Have fun making music!").into();
         return false;
     }
     open
@@ -284,11 +285,14 @@ pub fn show_welcome(ctx: &egui::Context, app: &mut App) -> WelcomeChoice {
     let mut choice = WelcomeChoice::None;
     egui::Modal::new(Id::new("welcome")).show(ctx, |ui| {
         ui.set_width(440.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+            crate::mode::lang_switch(ui, app);
+        });
         ui.vertical_centered(|ui| {
-            ui.add_space(8.0);
-            ui.label(RichText::new("Welcome to AIDAW 👋").size(28.0).strong());
+            ui.label(RichText::new(tr("Welcome to AIDAW 👋")).size(28.0).strong());
             ui.label(
-                RichText::new("Make music with an AI partner. No experience needed.").size(15.0),
+                RichText::new(tr("Make music with an AI partner. No experience needed."))
+                    .size(15.0),
             );
             ui.add_space(16.0);
             let big = |text: &str, sub: &str| {
@@ -297,8 +301,8 @@ pub fn show_welcome(ctx: &egui::Context, app: &mut App) -> WelcomeChoice {
             };
             if ui
                 .add(big(
-                    "🎓  Show me how (2-minute tutorial)",
-                    "Best if this is your first time",
+                    tr("🎓  Show me how (2-minute tutorial)"),
+                    tr("Best if this is your first time"),
                 ))
                 .clicked()
             {
@@ -307,8 +311,8 @@ pub fn show_welcome(ctx: &egui::Context, app: &mut App) -> WelcomeChoice {
             ui.add_space(6.0);
             if ui
                 .add(big(
-                    "🎵  Play the demo song",
-                    "Hear what an AI made, then change it",
+                    tr("🎵  Play the demo song"),
+                    tr("Hear what an AI made, then change it"),
                 ))
                 .clicked()
             {
@@ -317,8 +321,8 @@ pub fn show_welcome(ctx: &egui::Context, app: &mut App) -> WelcomeChoice {
             ui.add_space(6.0);
             if ui
                 .add(big(
-                    "✨  Start a new song",
-                    "An empty song with piano and drums",
+                    tr("✨  Start a new song"),
+                    tr("An empty song with piano and drums"),
                 ))
                 .clicked()
             {
@@ -327,8 +331,8 @@ pub fn show_welcome(ctx: &egui::Context, app: &mut App) -> WelcomeChoice {
             ui.add_space(6.0);
             if ui
                 .add(big(
-                    "💬  Let an AI make music for me",
-                    "Connect Claude in 3 steps",
+                    tr("💬  Let an AI make music for me"),
+                    tr("Connect Claude in 3 steps"),
                 ))
                 .clicked()
             {
@@ -336,22 +340,24 @@ pub fn show_welcome(ctx: &egui::Context, app: &mut App) -> WelcomeChoice {
             }
             ui.add_space(10.0);
             ui.label(
-                RichText::new("You can switch between 🐣 Easy and 🔧 Pro any time (top left).")
-                    .weak(),
+                RichText::new(tr(
+                    "You can switch between 🐣 Easy and 🔧 Pro any time (top left).",
+                ))
+                .weak(),
             );
             ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if ui
                     .checkbox(
                         &mut app.settings.show_welcome,
-                        "Show this when AIDAW starts",
+                        tr("Show this when AIDAW starts"),
                     )
                     .changed()
                 {
                     app.settings.save();
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Close").clicked() {
+                    if ui.button(tr("Close")).clicked() {
                         choice = WelcomeChoice::Close;
                     }
                 });
@@ -375,31 +381,32 @@ pub fn show_ai_help(ctx: &egui::Context, app: &mut App, open: &mut bool) {
         })
     });
     let mut save_clicked = false;
-    egui::Window::new("💬 Let AI make music")
+    egui::Window::new(tr("💬 Let AI make music"))
+        .id(Id::new("ai_help_window"))
         .open(open)
         .collapsible(false)
         .default_width(520.0)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            ui.label("AIDAW lets an AI assistant write music straight into your song. You watch it appear here and can change anything it makes. Claude is the easiest to set up (below); other AI apps work too.");
+            ui.label(tr("AIDAW lets an AI assistant write music straight into your song. You watch it appear here and can change anything it makes. Claude is the easiest to set up (below); other AI apps work too."));
             ui.add_space(8.0);
 
-            ui.label(RichText::new("Step 1: Save your song").strong());
+            ui.label(RichText::new(tr("Step 1: Save your song")).strong());
             match &app.path {
                 Some(p) => {
-                    ui.label(RichText::new(format!("✔ Saved as {}", p.display())).color(Color32::LIGHT_GREEN));
+                    ui.label(RichText::new(trf("✔ Saved as {}", &[&p.display()])).color(Color32::LIGHT_GREEN));
                 }
                 None => {
-                    ui.label("The AI works on a song file, so save it first.");
-                    if ui.button("💾 Save song…").clicked() {
+                    ui.label(tr("The AI works on a song file, so save it first."));
+                    if ui.button(tr("💾 Save song…")).clicked() {
                         save_clicked = true;
                     }
                 }
             }
             ui.add_space(8.0);
 
-            ui.label(RichText::new("Step 2: Tell Claude Desktop about AIDAW").strong());
-            ui.label("Copy this, then in Claude Desktop open Settings › Developer › Edit Config, paste it into claude_desktop_config.json, save, and restart Claude Desktop.");
+            ui.label(RichText::new(tr("Step 2: Tell Claude Desktop about AIDAW")).strong());
+            ui.label(tr("Copy this, then in Claude Desktop open Settings › Developer › Edit Config, paste it into claude_desktop_config.json, save, and restart Claude Desktop."));
             let config = config_snippet(mcp_exe.as_deref(), app.path.as_deref());
             ui.add(
                 egui::TextEdit::multiline(&mut config.as_str())
@@ -408,36 +415,37 @@ pub fn show_ai_help(ctx: &egui::Context, app: &mut App, open: &mut bool) {
                     .desired_width(f32::INFINITY),
             );
             ui.horizontal(|ui| {
-                if ui.button("📋 Copy").clicked() {
+                if ui.button(tr("📋 Copy")).clicked() {
                     ui.ctx().copy_text(config.clone());
-                    app.status = "Copied! Paste it into Claude Desktop's config file.".into();
+                    app.status = tr("Copied! Paste it into Claude Desktop's config file.").into();
                 }
-                if cfg!(windows) && ui.button("📂 Open Claude config folder").clicked() {
+                if cfg!(windows) && ui.button(tr("📂 Open Claude config folder")).clicked() {
                     if let Some(appdata) = std::env::var_os("APPDATA") {
                         let dir = std::path::PathBuf::from(appdata).join("Claude");
                         let _ = std::process::Command::new("explorer").arg(dir).spawn();
                     }
                 }
             });
-            ui.weak("Already have other servers in that file? Add just the \"aidaw\": {…} part inside your existing \"mcpServers\".");
+            ui.weak(tr("Already have other servers in that file? Add just the \"aidaw\": {…} part inside your existing \"mcpServers\"."));
             ui.add_space(8.0);
 
-            ui.label(RichText::new("Step 3: Ask for music").strong());
-            ui.label("Keep this window open and ask Claude something like:");
+            ui.label(RichText::new(tr("Step 3: Ask for music")).strong());
+            ui.label(tr("Keep this window open and ask Claude something like:"));
             for example in [
-                "“Make a chill lo-fi beat at 85 BPM with piano chords, bass and drums.”",
-                "“Add a happy melody on a new track over bars 5 to 8.”",
-                "“The drums are too busy. Make them simpler.”",
+                tr("“Make a chill lo-fi beat at 85 BPM with piano chords, bass and drums.”"),
+                tr("“Add a happy melody on a new track over bars 5 to 8.”"),
+                tr("“The drums are too busy. Make them simpler.”"),
             ] {
                 ui.label(RichText::new(example).italics());
             }
             ui.add_space(4.0);
-            ui.label("Don't like what it did? Press Ctrl+Z here to undo it.");
+            ui.label(tr("Don't like what it did? Press Ctrl+Z here to undo it."));
             ui.add_space(8.0);
-            egui::CollapsingHeader::new("Using a different AI (Cursor, ChatGPT, Gemini, Ollama, …)")
+            egui::CollapsingHeader::new(tr("Using a different AI (Cursor, ChatGPT, Gemini, Ollama, …)"))
+                .id_salt("other_ai")
                 .show(ui, |ui| {
-                    ui.label("Any app that supports MCP servers (Cursor, Windsurf, Cline, Claude Code…) uses the same aidaw-mcp program as above.");
-                    ui.label("For other AIs, aidaw-mcp also works as a plain command. An AI that can run commands can use it directly, for example:");
+                    ui.label(tr("Any app that supports MCP servers (Cursor, Windsurf, Cline, Claude Code…) uses the same aidaw-mcp program as above."));
+                    ui.label(tr("For other AIs, aidaw-mcp also works as a plain command. An AI that can run commands can use it directly, for example:"));
                     let exe = mcp_exe
                         .as_ref()
                         .map(|p| p.display().to_string())
@@ -456,10 +464,10 @@ pub fn show_ai_help(ctx: &egui::Context, app: &mut App, open: &mut bool) {
                             .desired_rows(3)
                             .desired_width(f32::INFINITY),
                     );
-                    if ui.button("📋 Copy").clicked() {
+                    if ui.button(tr("📋 Copy")).clicked() {
                         ui.ctx().copy_text(cmd.clone());
                     }
-                    ui.weak("'guide' prints a cheat sheet to paste into any chat AI. 'tools --format openai' prints function definitions for ChatGPT-style APIs. Full instructions: LLM_GUIDE.md next to aidaw.exe.");
+                    ui.weak(tr("'guide' prints a cheat sheet to paste into any chat AI. 'tools --format openai' prints function definitions for ChatGPT-style APIs. Full instructions: LLM_GUIDE.md next to aidaw.exe."));
                 });
         });
     if save_clicked {
@@ -473,7 +481,7 @@ fn config_snippet(mcp_exe: Option<&std::path::Path>, project: Option<&std::path:
         .unwrap_or_else(|| "C:\\path\\to\\aidaw-mcp.exe".into());
     let project = project
         .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "(save your song first)".into());
+        .unwrap_or_else(|| tr("(save your song first)").into());
     // Written by hand (not via serde_json) to keep "command" before "args".
     let q = |v: &str| serde_json::to_string(v).unwrap_or_default();
     format!(
@@ -486,7 +494,8 @@ fn config_snippet(mcp_exe: Option<&std::path::Path>, project: Option<&std::path:
 // ---- shortcuts -----------------------------------------------------------------
 
 pub fn show_shortcuts(ctx: &egui::Context, open: &mut bool) {
-    egui::Window::new("⌨ Keyboard & mouse")
+    egui::Window::new(tr("⌨ Keyboard & mouse"))
+        .id(Id::new("shortcuts_window"))
         .open(open)
         .resizable(false)
         .show(ctx, |ui| {
@@ -496,18 +505,21 @@ pub fn show_shortcuts(ctx: &egui::Context, open: &mut bool) {
                 .striped(true)
                 .show(ui, |ui| {
                     for (keys, what) in [
-                        ("Space", "Play / pause"),
-                        ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
-                        ("Ctrl+S", "Save"),
-                        ("Click the bar numbers", "Jump to that point in the song"),
-                        ("Double-click a track row", "New clip"),
-                        ("Drag a clip / its right edge", "Move / make longer"),
-                        ("Click the piano roll grid", "Add a note"),
-                        ("Drag a note / its right edge", "Move / make longer"),
-                        ("Right-click a note", "Delete it"),
-                        ("Hold or slide on piano keys", "Hear notes"),
-                        ("Delete", "Delete the selected note or clip"),
-                        ("Ctrl+mouse wheel", "Zoom the piano roll"),
+                        (tr("Space"), tr("Play / pause")),
+                        ("Ctrl+Z / Ctrl+Y", tr("Undo / redo")),
+                        ("Ctrl+S", tr("Save")),
+                        (
+                            tr("Click the bar numbers"),
+                            tr("Jump to that point in the song"),
+                        ),
+                        (tr("Double-click a track row"), tr("New clip")),
+                        (tr("Drag a clip / its right edge"), tr("Move / make longer")),
+                        (tr("Click the piano roll grid"), tr("Add a note")),
+                        (tr("Drag a note / its right edge"), tr("Move / make longer")),
+                        (tr("Right-click a note"), tr("Delete it")),
+                        (tr("Hold or slide on piano keys"), tr("Hear notes")),
+                        (tr("Delete"), tr("Delete the selected note or clip")),
+                        (tr("Ctrl+mouse wheel"), tr("Zoom the piano roll")),
                     ] {
                         ui.label(RichText::new(keys).monospace().strong());
                         ui.label(what);

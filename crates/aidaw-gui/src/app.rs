@@ -11,6 +11,7 @@ use aidaw_core::{io as pio, render, Project};
 use aidaw_engine::Engine;
 use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, Rect, RichText};
 
+use crate::i18n::{self, tr, trf};
 use crate::onboarding::{self, Tutorial, WelcomeChoice};
 use crate::scale::Scale;
 use crate::settings::Settings;
@@ -78,6 +79,11 @@ pub struct App {
     tutorial: Option<Tutorial>,
     /// Screen areas of key widgets, recorded each frame so the tutorial can point at them.
     pub ui_rects: HashMap<&'static str, Rect>,
+    /// Widths of the top bar's menu, transport and right-hand groups last frame.
+    top_bar_widths: [f32; 3],
+    /// Share of the height the piano roll takes, and the height it was taken of.
+    roll_share: f32,
+    roll_room_h: f32,
     /// Event counters the tutorial watches.
     pub ev_note_drags: u32,
     pub ev_undos: u32,
@@ -93,18 +99,18 @@ pub struct App {
 /// A blank song that is ready to draw in: a piano track and a drum track,
 /// each with one empty 4-bar clip.
 fn starter_project() -> Project {
-    let mut p = Project::new("My Song", 110.0);
+    let mut p = Project::new(tr("My Song"), 110.0);
     let keys = presets::find("soft_keys").expect("preset");
     let drums = presets::find("drum_kit").expect("preset");
     let ops = vec![
         Op::AddTrack {
-            name: "Piano".into(),
+            name: tr("Piano").into(),
             instrument: Some(keys.instrument.clone()),
             gain: None,
             pan: None,
         },
         Op::AddTrack {
-            name: "Drums".into(),
+            name: tr("Drums").into(),
             instrument: Some(drums.instrument.clone()),
             gain: None,
             pan: None,
@@ -113,14 +119,14 @@ fn starter_project() -> Project {
             track_id: "t1".into(),
             start: 0.0,
             length: 16.0,
-            name: Some("Melody".into()),
+            name: Some(tr("Melody").into()),
             notes: Vec::new(),
         },
         Op::AddClip {
             track_id: "t2".into(),
             start: 0.0,
             length: 16.0,
-            name: Some("Beat".into()),
+            name: Some(tr("Beat").into()),
             notes: Vec::new(),
         },
     ];
@@ -141,21 +147,25 @@ struct ExportJob {
 
 impl App {
     pub fn new(path: Option<PathBuf>) -> Self {
+        let settings = Settings::load();
+        i18n::set(settings.lang.unwrap_or_else(i18n::system));
         let (project, status) = match &path {
             Some(p) if p.exists() => match pio::load(p) {
-                Ok(proj) => (proj, format!("Opened {}", p.display())),
-                Err(e) => (starter_project(), format!("Failed to open: {e:#}")),
+                Ok(proj) => (proj, trf("Opened {}", &[&p.display()])),
+                Err(e) => (
+                    starter_project(),
+                    trf("Failed to open: {}", &[&format!("{e:#}")]),
+                ),
             },
             Some(p) => (
                 starter_project(),
-                format!("New project, will save to {}", p.display()),
+                trf("New project, will save to {}", &[&p.display()]),
             ),
             None => (
                 starter_project(),
-                "Welcome! Not sure where to start? Open ❓ Help › Tutorial.".into(),
+                tr("Welcome! Not sure where to start? Open ❓ Help › Tutorial.").into(),
             ),
         };
-        let settings = Settings::load();
         let show_welcome = path.is_none() && settings.show_welcome;
         let opened = Engine::new(&project).map_err(|e| format!("{e:#}"));
         crate::sound::log_engine(&opened);
@@ -200,6 +210,9 @@ impl App {
             show_shortcuts: false,
             tutorial: None,
             ui_rects: HashMap::new(),
+            top_bar_widths: [0.0; 3],
+            roll_share: 0.5,
+            roll_room_h: 0.0,
             ev_note_drags: 0,
             ev_undos: 0,
             held_key: None,
@@ -307,7 +320,7 @@ impl App {
             }
             None => {
                 self.status =
-                    "No sound device. Opening the Sound window so you can pick one.".into();
+                    tr("No sound device. Opening the Sound window so you can pick one.").into();
                 self.show_sound = true;
             }
         }
@@ -324,13 +337,13 @@ impl App {
         crate::sound::log_engine(&opened);
         match opened {
             Ok(e) => {
-                self.status = format!("Sound now plays through {}", e.device_name());
+                self.status = trf("Sound now plays through {}", &[&e.device_name()]);
                 e.test_tone();
                 self.engine = Some(e);
                 self.engine_error = None;
             }
             Err(err) => {
-                self.status = "Couldn't open that sound device".into();
+                self.status = tr("Couldn't open that sound device").into();
                 self.engine_error = Some(err);
             }
         }
@@ -357,7 +370,8 @@ impl App {
             ));
             if d.callbacks == 0 || d.error.is_some() {
                 self.status =
-                    "The sound device isn't running. Pick another one in the Sound window.".into();
+                    tr("The sound device isn't running. Pick another one in the Sound window.")
+                        .into();
                 self.show_sound = true;
             }
         }
@@ -402,7 +416,7 @@ impl App {
         match edit::apply(&mut self.project, op) {
             Ok(v) => Some(v),
             Err(e) => {
-                self.status = format!("Edit failed: {e:#}");
+                self.status = trf("Edit failed: {}", &[&format!("{e:#}")]);
                 None
             }
         }
@@ -454,7 +468,7 @@ impl App {
             self.redo.push(std::mem::replace(&mut self.project, prev));
             self.on_project_changed();
             self.ev_undos += 1;
-            self.status = "Undone (Ctrl+Y to redo)".into();
+            self.status = tr("Undone (Ctrl+Y to redo)").into();
         }
     }
 
@@ -462,7 +476,7 @@ impl App {
         if let Some(next) = self.redo.pop() {
             self.undo.push(std::mem::replace(&mut self.project, next));
             self.on_project_changed();
-            self.status = "Redo".into();
+            self.status = tr("Redone").into();
         }
     }
 
@@ -481,15 +495,16 @@ impl App {
             if let Ok(theirs) = pio::load(&path) {
                 if theirs != self.project {
                     self.push_undo(theirs);
-                    self.status =
-                        "The AI changed the song while you were editing; kept your version (Ctrl+Z shows the AI's)"
-                            .into();
+                    self.status = tr(
+                        "The AI changed the song while you were editing; kept your version (Ctrl+Z shows the AI's)",
+                    )
+                    .into();
                 }
             }
         }
         match pio::save(&self.project, &path) {
             Ok(()) => self.disk_mtime = mtime(&path),
-            Err(e) => self.status = format!("Save failed: {e:#}"),
+            Err(e) => self.status = trf("Save failed: {}", &[&format!("{e:#}")]),
         }
     }
 
@@ -519,22 +534,22 @@ impl App {
                 if self.selected_clip.is_none() {
                     self.select_first_clip();
                 }
-                self.status = "Reloaded external change (Ctrl+Z to revert)".into();
+                self.status = tr("Reloaded external change (Ctrl+Z to revert)").into();
             }
         }
     }
 
     fn open_dialog(&mut self) {
         if let Some(p) = rfd::FileDialog::new()
-            .add_filter("AIDAW project", &["json"])
+            .add_filter(tr("AIDAW project"), &["json"])
             .pick_file()
         {
             match pio::load(&p) {
                 Ok(proj) => {
-                    let status = format!("Opened {}", p.display());
+                    let status = trf("Opened {}", &[&p.display()]);
                     self.load_project(proj, Some(p), &status);
                 }
-                Err(e) => self.status = format!("Open failed: {e:#}"),
+                Err(e) => self.status = trf("Open failed: {}", &[&format!("{e:#}")]),
             }
         }
     }
@@ -542,11 +557,14 @@ impl App {
     pub fn save_as_dialog(&mut self) {
         let name = format!("{}.{}", self.project.name, pio::EXTENSION);
         if let Some(p) = rfd::FileDialog::new()
-            .add_filter("AIDAW project", &["json"])
+            .add_filter(tr("AIDAW project"), &["json"])
             .set_file_name(name)
             .save_file()
         {
-            self.status = format!("Saving to {} (AI tools can now use this file)", p.display());
+            self.status = trf(
+                "Saving to {} (AI tools can now use this file)",
+                &[&p.display()],
+            );
             self.path = Some(p);
             self.save_now();
         }
@@ -554,12 +572,12 @@ impl App {
 
     fn export_wav_dialog(&mut self) {
         if self.export.is_some() {
-            self.status = "An export is already running".into();
+            self.status = tr("An export is already running").into();
             return;
         }
         let name = format!("{}.wav", self.project.name);
         if let Some(p) = rfd::FileDialog::new()
-            .add_filter("WAV audio", &["wav"])
+            .add_filter(tr("WAV audio"), &["wav"])
             .set_file_name(name)
             .save_file()
         {
@@ -585,7 +603,7 @@ impl App {
                 progress,
                 result: rx,
             });
-            self.status = "Exporting audio… 0%".into();
+            self.status = trf("Exporting audio… {}%", &[&0]);
         }
     }
 
@@ -593,11 +611,15 @@ impl App {
     fn poll_export(&mut self) {
         let Some(job) = &self.export else { return };
         let outcome = match job.result.try_recv() {
-            Ok(Ok(secs)) => Some(format!("Exported {secs:.1}s to {}", job.path.display())),
-            Ok(Err(e)) => Some(format!("Export failed: {e}")),
-            Err(mpsc::TryRecvError::Disconnected) => {
-                Some("Export failed: the export stopped unexpectedly".into())
-            }
+            Ok(Ok(secs)) => Some(trf(
+                "Exported {}s to {}",
+                &[&format!("{secs:.1}"), &job.path.display()],
+            )),
+            Ok(Err(e)) => Some(trf("Export failed: {}", &[&e])),
+            Err(mpsc::TryRecvError::Disconnected) => Some(trf(
+                "Export failed: {}",
+                &[&tr("the export stopped unexpectedly")],
+            )),
             Err(mpsc::TryRecvError::Empty) => None,
         };
         match outcome {
@@ -607,7 +629,7 @@ impl App {
             }
             None => {
                 let pct = job.progress.load(Ordering::Relaxed) / 10;
-                self.status = format!("Exporting audio… {pct}%");
+                self.status = trf("Exporting audio… {}%", &[&pct]);
             }
         }
     }
@@ -633,7 +655,7 @@ impl App {
         if ctx.input_mut(|i| i.consume_shortcut(&save)) {
             if self.path.is_some() {
                 self.save_now();
-                self.status = "Saved".into();
+                self.status = tr("Saved").into();
             } else {
                 self.save_as_dialog();
             }
@@ -647,67 +669,62 @@ impl App {
         egui::TopBottomPanel::top("menu")
             .frame(theme::chrome_frame())
             .show(ctx, |ui| {
+                // One row when everything fits, two rows in a narrow window.
+                // Group widths are measured each frame and used for the next.
+                let [menus_w, transport_w, right_w] = self.top_bar_widths;
+                let one_row =
+                    menus_w + transport_w + right_w + 40.0 <= ui.available_width();
+                let mut widths = [0.0; 3];
                 ui.horizontal(|ui| {
-                    crate::mode::switch(ui, self);
-                    ui.add_space(6.0);
-                    self.menus(ui);
-                    ui.add_space(10.0);
-                    self.transport(ui);
-                    if self.pro() {
-                        ui.add_space(4.0);
-                        ui.label(RichText::new("Grid").color(theme::TEXT_DIM)).on_hover_text(
-                            "Notes and clips snap to this grid. 1/16 is a good default; 1/4 = one beat.",
-                        );
-                        egui::ComboBox::from_id_salt("snap")
-                            .width(70.0)
-                            .selected_text(snap_label(self.snap))
-                            .show_ui(ui, |ui| {
-                                for s in [1.0, 0.5, 0.25, 0.125, 1.0 / 3.0, 1.0 / 6.0] {
-                                    ui.selectable_value(&mut self.snap, s, snap_label(s));
-                                }
-                            });
+                    widths[0] = ui
+                        .horizontal(|ui| {
+                            crate::mode::switch(ui, self);
+                            ui.add_space(6.0);
+                            self.menus(ui);
+                        })
+                        .response
+                        .rect
+                        .width();
+                    if one_row {
+                        ui.add_space(10.0);
+                        widths[1] = ui.horizontal(|ui| self.transport_row(ui)).response.rect.width();
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        self.sound_button(ui);
-                        ui.add_space(4.0);
-                        let ai = theme::hero_button(
-                            ui,
-                            "✨ Ask AI",
-                            theme::ACCENT,
-                            egui::vec2(108.0, 34.0),
-                        )
-                        .on_hover_text(
-                            "Let an AI assistant (Claude, ChatGPT, …) write music into this song",
-                        );
-                        if ai.clicked() {
-                            self.show_ai_help = true;
-                        }
-                        self.ui_rects.insert("ai", ai.rect);
-                        if self.path.is_none()
-                            && ui
-                                .button(RichText::new("💾 Not saved. Click to save").color(theme::WARN))
-                                .on_hover_text("Save your song to a file. AI tools work on this file too.")
-                                .clicked()
-                        {
-                            self.save_as_dialog();
-                        }
+                        widths[2] = ui
+                            .horizontal(|ui| {
+                                self.sound_button(ui);
+                                crate::mode::lang_switch(ui, self);
+                                ui.add_space(4.0);
+                                let ai = theme::hero_button(
+                                    ui,
+                                    tr("✨ Ask AI"),
+                                    theme::ACCENT,
+                                    egui::vec2(108.0, 34.0),
+                                )
+                                .on_hover_text(tr(
+                                    "Let an AI assistant (Claude, ChatGPT, …) write music into this song",
+                                ));
+                                if ai.clicked() {
+                                    self.show_ai_help = true;
+                                }
+                                self.ui_rects.insert("ai", ai.rect);
+                            })
+                            .response
+                            .rect
+                            .width();
                     });
                 });
+                if !one_row {
+                    ui.add_space(4.0);
+                    widths[1] = ui.horizontal(|ui| self.transport_row(ui)).response.rect.width();
+                }
+                self.top_bar_widths = widths;
             });
         egui::TopBottomPanel::bottom("status")
             .frame(theme::chrome_frame().inner_margin(egui::Margin::symmetric(12, 5)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    let failed = [
-                        "Failed",
-                        "Edit failed",
-                        "Save failed",
-                        "Open failed",
-                        "Export failed",
-                        "Couldn't",
-                    ]
-                    .iter()
-                    .any(|p| self.status.starts_with(p));
+                    let failed = i18n::is_failure(&self.status);
                     let dot = if failed {
                         theme::DANGER
                     } else if self.is_playing() {
@@ -727,20 +744,22 @@ impl App {
                         if let (Some(p), true) = (&self.path, self.pro()) {
                             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
                             ui.label(RichText::new(format!("⟳ {name}")).size(12.0).color(theme::TEXT_DIM))
-                                .on_hover_text(
+                                .on_hover_text(tr(
                                     "The project file the AI edits through aidaw-mcp; changes appear here live.",
-                                );
+                                ));
                             ui.label(RichText::new("·").color(theme::TEXT_FAINT));
                         }
                         let text = if self.pro() {
-                            format!(
+                            trf(
                                 "grid {} · key {} {}",
-                                snap_label(self.snap),
-                                crate::scale::ROOTS[self.scale_root as usize % 12],
-                                self.scale.label()
+                                &[
+                                    &snap_label(self.snap),
+                                    &crate::scale::ROOTS[self.scale_root as usize % 12],
+                                    &self.scale.label(),
+                                ],
                             )
                         } else {
-                            "🐣 Easy mode · switch to 🔧 Pro (top left) for more controls".into()
+                            tr("🐣 Easy mode · switch to 🔧 Pro (top left) for more controls").into()
                         };
                         ui.label(RichText::new(text).size(12.0).color(theme::TEXT_FAINT));
                     });
@@ -749,20 +768,20 @@ impl App {
     }
 
     fn menus(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button("📁 File", |ui| {
-            if ui.button("New song").clicked() {
+        ui.menu_button(tr("📁 File"), |ui| {
+            if ui.button(tr("New song")).clicked() {
                 self.load_project(
                     starter_project(),
                     None,
-                    "New song. Click in the piano roll to add notes!",
+                    tr("New song. Click in the piano roll to add notes!"),
                 );
                 ui.close_menu();
             }
-            if ui.button("Open…").clicked() {
+            if ui.button(tr("Open…")).clicked() {
                 ui.close_menu();
                 self.open_dialog();
             }
-            if ui.button("Save As…  (Ctrl+S)").clicked() {
+            if ui.button(tr("Save As…  (Ctrl+S)")).clicked() {
                 ui.close_menu();
                 self.save_as_dialog();
             }
@@ -770,36 +789,36 @@ impl App {
                 .add_enabled(
                     self.export.is_none(),
                     egui::Button::new(if self.pro() {
-                        "Export as WAV audio…"
+                        tr("Export as WAV audio…")
                     } else {
-                        "Save as audio file…"
+                        tr("Save as audio file…")
                     }),
                 )
-                .on_hover_text("Make an audio file you can share or put in other apps")
+                .on_hover_text(tr("Make an audio file you can share or put in other apps"))
                 .clicked()
             {
                 ui.close_menu();
                 self.export_wav_dialog();
             }
         });
-        let help = ui.menu_button("❓ Help", |ui| {
-            if ui.button("🎓 Tutorial (2 minutes)").clicked() {
+        let help = ui.menu_button(tr("❓ Help"), |ui| {
+            if ui.button(tr("🎓 Tutorial (2 minutes)")).clicked() {
                 self.start_tutorial();
                 ui.close_menu();
             }
-            if ui.button("✨ Let AI make music…").clicked() {
+            if ui.button(tr("✨ Let AI make music…")).clicked() {
                 self.show_ai_help = true;
                 ui.close_menu();
             }
-            if ui.button("🔊 Sound settings / no sound?").clicked() {
+            if ui.button(tr("🔊 Sound settings / no sound?")).clicked() {
                 self.show_sound = true;
                 ui.close_menu();
             }
-            if ui.button("⌨ Keyboard & mouse").clicked() {
+            if ui.button(tr("⌨ Keyboard & mouse")).clicked() {
                 self.show_shortcuts = true;
                 ui.close_menu();
             }
-            if ui.button("👋 Welcome screen").clicked() {
+            if ui.button(tr("👋 Welcome screen")).clicked() {
                 self.show_welcome = true;
                 ui.close_menu();
             }
@@ -807,18 +826,50 @@ impl App {
         self.ui_rects.insert("help", help.response.rect);
         // Undo is the beginner's safety net, so it is a real button, not hidden in a menu.
         if ui
-            .add_enabled(!self.undo.is_empty(), egui::Button::new("↩ Undo"))
-            .on_hover_text("Take back the last change (Ctrl+Z). Works for AI changes too.")
+            .add_enabled(!self.undo.is_empty(), egui::Button::new(tr("↩ Undo")))
+            .on_hover_text(tr(
+                "Take back the last change (Ctrl+Z). Works for AI changes too.",
+            ))
             .clicked()
         {
             self.queued_history = Some(false);
         }
         if ui
-            .add_enabled(!self.redo.is_empty(), egui::Button::new("↪ Redo"))
-            .on_hover_text("Redo (Ctrl+Y)")
+            .add_enabled(!self.redo.is_empty(), egui::Button::new(tr("↪ Redo")))
+            .on_hover_text(tr("Redo (Ctrl+Y)"))
             .clicked()
         {
             self.queued_history = Some(true);
+        }
+    }
+
+    /// Transport, the Pro grid picker and the "not saved" reminder.
+    fn transport_row(&mut self, ui: &mut egui::Ui) {
+        self.transport(ui);
+        if self.pro() {
+            ui.add_space(4.0);
+            ui.label(RichText::new(tr("Grid")).color(theme::TEXT_DIM))
+                .on_hover_text(tr(
+                    "Notes and clips snap to this grid. 1/16 is a good default; 1/4 = one beat.",
+                ));
+            egui::ComboBox::from_id_salt("snap")
+                .width(70.0)
+                .selected_text(snap_label(self.snap))
+                .show_ui(ui, |ui| {
+                    for s in [1.0, 0.5, 0.25, 0.125, 1.0 / 3.0, 1.0 / 6.0] {
+                        ui.selectable_value(&mut self.snap, s, snap_label(s));
+                    }
+                });
+        }
+        if self.path.is_none()
+            && ui
+                .button(RichText::new(tr("💾 Not saved. Click to save")).color(theme::WARN))
+                .on_hover_text(tr(
+                    "Save your song to a file. AI tools work on this file too.",
+                ))
+                .clicked()
+        {
+            self.save_as_dialog();
         }
     }
 
@@ -831,18 +882,22 @@ impl App {
                     .corner_radius(17)
                     .min_size(egui::vec2(34.0, 34.0)),
             )
-            .on_hover_text("Stop and go back to the start")
+            .on_hover_text(tr("Stop and go back to the start"))
             .clicked()
         {
             self.stop();
         }
         let play = theme::hero_button(
             ui,
-            if playing { "⏸  Pause" } else { "▶  Play" },
+            if playing {
+                tr("⏸  Pause")
+            } else {
+                tr("▶  Play")
+            },
             if playing { theme::PAUSE } else { theme::PLAY },
             egui::vec2(104.0, 34.0),
         )
-        .on_hover_text("Play or pause the song (Space bar)");
+        .on_hover_text(tr("Play or pause the song (Space bar)"));
         if play.clicked() {
             self.toggle_play();
         }
@@ -870,20 +925,20 @@ impl App {
                         .font(egui::FontId::monospace(19.0))
                         .color(theme::CYAN)
                 };
-                caption(ui, "BAR");
+                caption(ui, tr("BAR"));
                 let pos = if pro {
                     format!("{bar:>3}.{beat}")
                 } else {
                     format!("{bar:>3}")
                 };
                 ui.label(lcd(pos))
-                    .on_hover_text("Where the song is playing: bar number . beat");
+                    .on_hover_text(tr("Where the song is playing: bar number . beat"));
                 let (r, _) = ui.allocate_exact_size(egui::vec2(1.0, 22.0), egui::Sense::hover());
                 ui.painter().rect_filled(r, 0.0, theme::BORDER);
-                caption(ui, if pro { "BPM" } else { "SPEED" }).on_hover_text(if pro {
-                    "Tempo in beats per minute. 70 = slow ballad, 110 = pop, 170 = drum & bass."
+                caption(ui, if pro { "BPM" } else { tr("SPEED") }).on_hover_text(if pro {
+                    tr("Tempo in beats per minute. 70 = slow ballad, 110 = pop, 170 = drum & bass.")
                 } else {
-                    "How fast the song plays (beats per minute).\n70 = slow and calm · 110 = pop · 140+ = fast and energetic."
+                    tr("How fast the song plays (beats per minute).\n70 = slow and calm · 110 = pop · 140+ = fast and energetic.")
                 });
                 let mut bpm = self.project.bpm;
                 ui.scope(|ui| {
@@ -907,7 +962,7 @@ impl App {
                                 .speed(0.2)
                                 .fixed_decimals(0),
                         )
-                        .on_hover_text("Drag left/right or click to type")
+                        .on_hover_text(tr("Drag left/right or click to type"))
                         .changed()
                     {
                         self.project.bpm = bpm;
@@ -919,10 +974,10 @@ impl App {
                             .corner_radius(11)
                             .min_size(egui::vec2(22.0, 22.0))
                     };
-                    if ui.add(small("−")).on_hover_text("Slower").clicked() {
+                    if ui.add(small("−")).on_hover_text(tr("Slower")).clicked() {
                         bpm = (bpm - 5.0).round().max(20.0);
                     }
-                    if ui.add(small("+")).on_hover_text("Faster").clicked() {
+                    if ui.add(small("+")).on_hover_text(tr("Faster")).clicked() {
                         bpm = (bpm + 5.0).round().min(400.0);
                     }
                 }
@@ -936,15 +991,18 @@ impl App {
         match &self.engine {
             Some(e) => {
                 let peak = e.diagnostics().peak;
-                crate::sound::meter(ui, peak).on_hover_text("Output level");
+                crate::sound::meter(ui, peak).on_hover_text(tr("Output level"));
                 let label = if self.pro() {
-                    format!("🔊 {}", e.device_name())
+                    let name = e.device_name();
+                    let short: String = name.chars().take(20).collect();
+                    let ell = if short.len() < name.len() { "…" } else { "" };
+                    format!("🔊 {short}{ell}")
                 } else {
-                    "🔊 Sound".to_string()
+                    tr("🔊 Sound").to_string()
                 };
                 if ui
                     .button(label)
-                    .on_hover_text("Sound settings: pick speakers, play a test beep")
+                    .on_hover_text(tr("Sound settings: pick speakers, play a test beep"))
                     .clicked()
                 {
                     self.show_sound = true;
@@ -954,7 +1012,7 @@ impl App {
                 if ui
                     .add(
                         egui::Button::new(
-                            RichText::new("🔇 No sound. Click to fix").color(theme::DANGER),
+                            RichText::new(tr("🔇 No sound. Click to fix")).color(theme::DANGER),
                         )
                         .fill(theme::alpha(theme::DANGER, 30))
                         .stroke(egui::Stroke::new(1.0_f32, theme::alpha(theme::DANGER, 120))),
@@ -981,7 +1039,7 @@ fn snap_label(s: f64) -> String {
         .iter()
         .find(|(v, _)| (v - s).abs() < 1e-9)
         .map(|(_, l)| l.to_string())
-        .unwrap_or_else(|| format!("{s} beat"))
+        .unwrap_or_else(|| trf("{} beat", &[&s]))
 }
 
 impl eframe::App for App {
@@ -997,20 +1055,36 @@ impl eframe::App for App {
         let frame_start = self.project.clone();
 
         self.top_bar(ctx);
+        // Panel sizes follow the window, so a small window still shows the
+        // song, the notes and the side bar without anything overlapping.
+        let room = ctx.available_rect();
         egui::SidePanel::left("inspector")
             .frame(theme::panel_frame())
             .resizable(true)
-            .default_width(290.0)
+            .default_width((room.width() * 0.22).clamp(240.0, 300.0))
+            .min_width(220.0)
+            .max_width((room.width() * 0.4).max(220.0))
             .show(ctx, |ui| {
                 crate::inspector::show(ui, self);
             });
-        egui::TopBottomPanel::bottom("piano_roll")
+        // The piano roll keeps its share of the height when the window is
+        // resized; dragging its edge changes that share.
+        let h = room.height();
+        let mut roll = egui::TopBottomPanel::bottom("piano_roll")
             .frame(theme::panel_frame())
             .resizable(true)
-            .default_height(400.0)
-            .show(ctx, |ui| {
-                crate::piano_roll::show(ui, self);
-            });
+            .min_height(150.0)
+            .max_height((h - 170.0).max(150.0));
+        if (h - self.roll_room_h).abs() > 0.5 {
+            roll = roll.exact_height((self.roll_share * h).clamp(150.0, (h - 170.0).max(150.0)));
+        }
+        let shown = roll.show(ctx, |ui| {
+            crate::piano_roll::show(ui, self);
+        });
+        if (h - self.roll_room_h).abs() <= 0.5 && h > 0.0 {
+            self.roll_share = shown.response.rect.height() / h;
+        }
+        self.roll_room_h = h;
         egui::CentralPanel::default()
             .frame(theme::panel_frame())
             .show(ctx, |ui| {
@@ -1067,7 +1141,7 @@ impl App {
                     self.load_project(
                         onboarding::demo_project(),
                         None,
-                        "Demo song loaded. Change anything you like!",
+                        tr("Demo song loaded. Change anything you like!"),
                     );
                     self.toggle_play();
                 }
@@ -1076,7 +1150,7 @@ impl App {
                     self.load_project(
                         starter_project(),
                         None,
-                        "New song. Click in the piano roll to add notes!",
+                        tr("New song. Click in the piano roll to add notes!"),
                     );
                 }
                 WelcomeChoice::AiHelp => {
@@ -1111,7 +1185,7 @@ impl App {
 
     /// Add a track using a friendly preset and select it.
     pub fn add_track(&mut self, preset: &presets::Preset) {
-        let base = presets::plain_name(preset.name);
+        let base = presets::plain_name(tr(preset.name));
         let same = self
             .project
             .tracks
@@ -1147,7 +1221,7 @@ impl App {
             track_id: track_id.into(),
             start,
             length,
-            name: Some(format!("Part {}", parts + 1)),
+            name: Some(trf("Part {}", &[&(parts + 1)])),
             notes: Vec::new(),
         };
         if let Some(v) = self.run_op(op) {
