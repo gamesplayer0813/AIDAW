@@ -61,7 +61,7 @@ impl Engine {
                     data.fill(0.0);
                     return;
                 };
-                if !s.playing {
+                if !s.playing && s.seq.active_voices() == 0 {
                     data.fill(0.0);
                     return;
                 }
@@ -70,10 +70,15 @@ impl Engine {
                     project,
                     seq,
                     position,
-                    ..
+                    playing,
                 } = &mut *s;
-                seq.process(project, &mut stereo);
-                *position = seq.position();
+                if *playing {
+                    seq.process(project, &mut stereo);
+                    *position = seq.position();
+                } else {
+                    // Stopped, but note previews are still ringing.
+                    seq.process_voices(project, &mut stereo);
+                }
                 for (f, out) in data.chunks_mut(channels).enumerate() {
                     for (c, sample) in out.iter_mut().enumerate() {
                         *sample = match (channels, c) {
@@ -129,6 +134,14 @@ impl Engine {
         if let Ok(mut s) = self.shared.lock() {
             s.seq.seek(beat);
             s.position = beat.max(0.0);
+        }
+    }
+
+    /// Audition a note on a track's instrument (works while stopped).
+    pub fn preview(&self, track: usize, pitch: u8) {
+        if let Ok(mut s) = self.shared.lock() {
+            let Shared { project, seq, .. } = &mut *s;
+            seq.preview(project, track, pitch);
         }
     }
 

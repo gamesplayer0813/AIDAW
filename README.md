@@ -42,6 +42,10 @@ CI（GitHub Actions, `windows-latest`）每次 PR 都会构建并上传这两个
 
 ### GUI
 
+第一次打开会出现欢迎页：可以选 **2 分钟互动教程**（一步步教你播放、画音符、改音色，做对了自动进入下一步）、播放 demo、新建空白歌曲，或者按 3 步把 Claude 接进来。之后随时可以在 **❓ Help** 菜单里重新打开。
+
+新手友好设计：乐器用预设选（Soft Keys / Bass / Warm Pad / Drum Kit …，高级参数折叠起来），点钢琴键能直接试听，画音符时能听到声音；**Key + Stay in key** 会高亮调内音并把音符自动吸附过去，乱点也好听；每个按钮都有悬停说明。
+
 ```powershell
 aidaw.exe examples\demo.aidaw.json
 ```

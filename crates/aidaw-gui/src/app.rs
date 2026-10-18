@@ -1,12 +1,18 @@
 //! Application state, file sync with the AI, undo/redo and the top-level layout.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
 use aidaw_core::edit::{self, Op};
-use aidaw_core::{io as pio, render, Instrument, Project};
+use aidaw_core::{io as pio, render, Project};
 use aidaw_engine::Engine;
-use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers};
+use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, Rect, RichText};
+
+use crate::onboarding::{self, Tutorial, WelcomeChoice};
+use crate::presets;
+use crate::scale::Scale;
+use crate::settings::Settings;
 
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(400);
@@ -67,15 +73,58 @@ pub struct App {
     last_poll: Instant,
     save_at: Option<Instant>,
     pub status: String,
+
+    // ---- beginner help ----
+    pub settings: Settings,
+    show_welcome: bool,
+    pub show_ai_help: bool,
+    show_shortcuts: bool,
+    tutorial: Option<Tutorial>,
+    /// Screen areas of key widgets, recorded each frame so the tutorial can point at them.
+    pub ui_rects: HashMap<&'static str, Rect>,
+    /// Event counters the tutorial watches.
+    pub ev_note_drags: u32,
+    pub ev_undos: u32,
+
+    // ---- key / scale helper ----
+    pub scale_root: u8,
+    pub scale: Scale,
+    pub scale_lock: bool,
 }
 
+/// A blank song that is ready to draw in: a piano track and a drum track,
+/// each with one empty 4-bar clip.
 fn starter_project() -> Project {
-    let mut p = Project::new("Untitled", 120.0);
-    let ops: Vec<Op> = serde_json::from_value(serde_json::json!([
-        {"op": "add_track", "name": "Lead", "instrument": {"type": "synth", "waveform": "saw"}},
-        {"op": "add_track", "name": "Drums", "instrument": {"type": "drums"}}
-    ]))
-    .expect("static ops");
+    let mut p = Project::new("My Song", 110.0);
+    let [keys, .., drums] = presets::all();
+    let ops = vec![
+        Op::AddTrack {
+            name: "Piano".into(),
+            instrument: Some(keys.instrument),
+            gain: None,
+            pan: None,
+        },
+        Op::AddTrack {
+            name: "Drums".into(),
+            instrument: Some(drums.instrument),
+            gain: None,
+            pan: None,
+        },
+        Op::AddClip {
+            track_id: "t1".into(),
+            start: 0.0,
+            length: 16.0,
+            name: Some("Melody".into()),
+            notes: Vec::new(),
+        },
+        Op::AddClip {
+            track_id: "t2".into(),
+            start: 0.0,
+            length: 16.0,
+            name: Some("Beat".into()),
+            notes: Vec::new(),
+        },
+    ];
     edit::apply_all(&mut p, ops).expect("static ops apply");
     p
 }
@@ -97,9 +146,11 @@ impl App {
             ),
             None => (
                 starter_project(),
-                "Untitled project (use File > Save As to enable AI sync)".into(),
+                "Welcome! Not sure where to start? Open ❓ Help › Tutorial.".into(),
             ),
         };
+        let settings = Settings::load();
+        let show_welcome = path.is_none() && settings.show_welcome;
         let (engine, engine_error) = match Engine::new(&project) {
             Ok(e) => (Some(e), None),
             Err(e) => (None, Some(format!("{e:#}"))),
@@ -131,6 +182,17 @@ impl App {
             playhead: 0.0,
             last_poll: Instant::now(),
             status,
+            settings,
+            show_welcome,
+            show_ai_help: false,
+            show_shortcuts: false,
+            tutorial: None,
+            ui_rects: HashMap::new(),
+            ev_note_drags: 0,
+            ev_undos: 0,
+            scale_root: 0,
+            scale: Scale::Major,
+            scale_lock: true,
         };
         app.select_first_clip();
         app
@@ -146,6 +208,47 @@ impl App {
             self.selected_track = Some(t.id.clone());
             self.selected_clip = Some(c.id.clone());
             self.roll_scroll_to_notes = true;
+        }
+    }
+
+    /// Replace the current song (the old one stays on the undo stack).
+    pub fn load_project(&mut self, project: Project, path: Option<PathBuf>, status: &str) {
+        let old = std::mem::replace(&mut self.project, project);
+        self.push_undo(old);
+        self.disk_mtime = path.as_deref().and_then(mtime);
+        self.path = path;
+        self.selected_clip = None;
+        self.selected_note = None;
+        self.stop();
+        self.on_project_changed();
+        self.save_at = None;
+        self.select_first_clip();
+        self.status = status.into();
+    }
+
+    /// Hear one note on a track's sound, even while stopped.
+    pub fn preview_note(&self, track_index: usize, pitch: u8) {
+        if let Some(e) = &self.engine {
+            e.set_project(&self.project);
+            e.preview(track_index, pitch);
+        }
+    }
+
+    /// Whether the key helper applies to this track (it never applies to drums).
+    pub fn scale_active(&self, track_index: usize) -> bool {
+        self.scale != Scale::Off
+            && self
+                .project
+                .tracks
+                .get(track_index)
+                .is_some_and(|t| !t.instrument.is_drums())
+    }
+
+    pub fn fit_pitch(&self, track_index: usize, pitch: u8) -> u8 {
+        if self.scale_lock && self.scale_active(track_index) {
+            self.scale.snap(self.scale_root, pitch)
+        } else {
+            pitch
         }
     }
 
@@ -246,7 +349,8 @@ impl App {
         if let Some(prev) = self.undo.pop() {
             self.redo.push(std::mem::replace(&mut self.project, prev));
             self.on_project_changed();
-            self.status = "Undo".into();
+            self.ev_undos += 1;
+            self.status = "Undone (Ctrl+Y to redo)".into();
         }
     }
 
@@ -307,21 +411,15 @@ impl App {
         {
             match pio::load(&p) {
                 Ok(proj) => {
-                    self.project = proj;
-                    self.disk_mtime = mtime(&p);
-                    self.status = format!("Opened {}", p.display());
-                    self.path = Some(p);
-                    self.selected_clip = None;
-                    self.on_project_changed();
-                    self.save_at = None;
-                    self.select_first_clip();
+                    let status = format!("Opened {}", p.display());
+                    self.load_project(proj, Some(p), &status);
                 }
                 Err(e) => self.status = format!("Open failed: {e:#}"),
             }
         }
     }
 
-    fn save_as_dialog(&mut self) {
+    pub fn save_as_dialog(&mut self) {
         let name = format!("{}.{}", self.project.name, pio::EXTENSION);
         if let Some(p) = rfd::FileDialog::new()
             .add_filter("AIDAW project", &["json"])
@@ -388,23 +486,27 @@ impl App {
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
-                    if ui.button("New").clicked() {
-                        self.project = starter_project();
-                        self.path = None;
-                        self.disk_mtime = None;
-                        self.selected_clip = None;
-                        self.on_project_changed();
+                    if ui.button("New song").clicked() {
+                        self.load_project(
+                            starter_project(),
+                            None,
+                            "New song. Click in the piano roll to add notes!",
+                        );
                         ui.close_menu();
                     }
                     if ui.button("Open…").clicked() {
                         ui.close_menu();
                         self.open_dialog();
                     }
-                    if ui.button("Save As…").clicked() {
+                    if ui.button("Save As…  (Ctrl+S)").clicked() {
                         ui.close_menu();
                         self.save_as_dialog();
                     }
-                    if ui.button("Export WAV…").clicked() {
+                    if ui
+                        .button("Export as WAV audio…")
+                        .on_hover_text("Make an audio file you can share or put in other apps")
+                        .clicked()
+                    {
                         ui.close_menu();
                         self.export_wav_dialog();
                     }
@@ -425,23 +527,65 @@ impl App {
                         ui.close_menu();
                     }
                 });
+                let help = ui.menu_button(RichText::new("❓ Help").strong(), |ui| {
+                    if ui.button("🎓 Tutorial (2 minutes)").clicked() {
+                        self.start_tutorial();
+                        ui.close_menu();
+                    }
+                    if ui.button("💬 Let AI make music…").clicked() {
+                        self.show_ai_help = true;
+                        ui.close_menu();
+                    }
+                    if ui.button("⌨ Keyboard & mouse").clicked() {
+                        self.show_shortcuts = true;
+                        ui.close_menu();
+                    }
+                    if ui.button("👋 Welcome screen").clicked() {
+                        self.show_welcome = true;
+                        ui.close_menu();
+                    }
+                });
+                self.ui_rects.insert("help", help.response.rect);
                 ui.separator();
                 let playing = self.is_playing();
-                if ui
-                    .button(if playing { "⏸ Pause" } else { "▶ Play" })
-                    .clicked()
-                {
+                let play = ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new(if playing { "⏸  Pause" } else { "▶  Play" })
+                                .size(17.0)
+                                .strong(),
+                        )
+                        .fill(if playing {
+                            Color32::from_rgb(120, 70, 30)
+                        } else {
+                            Color32::from_rgb(40, 110, 60)
+                        })
+                        .min_size(egui::vec2(96.0, 28.0)),
+                    )
+                    .on_hover_text("Play or pause the song (Space bar)");
+                if play.clicked() {
                     self.toggle_play();
                 }
-                if ui.button("⏹ Stop").clicked() {
+                self.ui_rects.insert("play", play.rect);
+                if ui
+                    .add(
+                        egui::Button::new(RichText::new("⏹").size(17.0))
+                            .min_size(egui::vec2(32.0, 28.0)),
+                    )
+                    .on_hover_text("Stop and go back to the start")
+                    .clicked()
+                {
                     self.stop();
                 }
                 let bpb = self.project.beats_per_bar.max(1) as f64;
                 let bar = (self.playhead / bpb).floor() as i64 + 1;
                 let beat = (self.playhead % bpb).floor() as i64 + 1;
-                ui.monospace(format!("{bar:>3}.{beat}"));
+                ui.monospace(format!("bar {bar:>3}.{beat}"))
+                    .on_hover_text("Where the song is playing: bar number . beat");
                 ui.separator();
-                ui.label("BPM");
+                ui.label("Speed (BPM)").on_hover_text(
+                    "Tempo in beats per minute. 70 = slow ballad, 110 = pop, 170 = drum & bass.",
+                );
                 let mut bpm = self.project.bpm;
                 if ui
                     .add(
@@ -454,7 +598,9 @@ impl App {
                 {
                     self.project.bpm = bpm;
                 }
-                ui.label("Snap");
+                ui.label("Grid").on_hover_text(
+                    "Notes and clips snap to this grid. 1/16 is a good default; 1/4 = one beat.",
+                );
                 egui::ComboBox::from_id_salt("snap")
                     .selected_text(snap_label(self.snap))
                     .show_ui(ui, |ui| {
@@ -467,7 +613,7 @@ impl App {
                     Some(p) => {
                         format!("⟳ {}", p.file_name().and_then(|n| n.to_str()).unwrap_or(""))
                     }
-                    None => "not saved".into(),
+                    None => "⚠ not saved yet".into(),
                 };
                 ui.label(sync).on_hover_text(
                     "The project file the AI edits through aidaw-mcp; changes appear here live.",
@@ -476,9 +622,11 @@ impl App {
                     (Some(e), _) => {
                         ui.weak(format!("🔊 {} @ {} Hz", e.device_name(), e.sample_rate()))
                     }
-                    (None, Some(err)) => {
-                        ui.colored_label(Color32::LIGHT_RED, format!("No audio: {err}"))
-                    }
+                    (None, Some(err)) => ui
+                        .colored_label(Color32::LIGHT_RED, "🔇 No sound device found")
+                        .on_hover_text(format!(
+                            "Plug in speakers or headphones and restart AIDAW.\n\n{err}"
+                        )),
                     _ => ui.label(""),
                 };
             });
@@ -534,6 +682,8 @@ impl eframe::App for App {
             crate::arrange::show(ui, self);
         });
 
+        self.overlays(ctx);
+
         if self.project != frame_start {
             if self.pending_undo.is_none() {
                 self.pending_undo = Some(frame_start);
@@ -560,30 +710,97 @@ impl eframe::App for App {
 }
 
 impl App {
-    pub fn add_track(&mut self, drums: bool) {
-        let n = self.project.tracks.len() + 1;
-        let (name, instrument) = if drums {
-            (format!("Drums {n}"), Instrument::Drums)
+    fn start_tutorial(&mut self) {
+        self.show_welcome = false;
+        self.tutorial = Some(Tutorial::start(self));
+    }
+
+    /// Welcome screen, tutorial and help windows, drawn on top of everything.
+    fn overlays(&mut self, ctx: &egui::Context) {
+        if self.show_welcome {
+            match onboarding::show_welcome(ctx, self) {
+                WelcomeChoice::None => {}
+                WelcomeChoice::Tutorial => self.start_tutorial(),
+                WelcomeChoice::Demo => {
+                    self.show_welcome = false;
+                    self.load_project(
+                        onboarding::demo_project(),
+                        None,
+                        "Demo song loaded. Change anything you like!",
+                    );
+                    self.toggle_play();
+                }
+                WelcomeChoice::Blank => {
+                    self.show_welcome = false;
+                    self.load_project(
+                        starter_project(),
+                        None,
+                        "New song. Click in the piano roll to add notes!",
+                    );
+                }
+                WelcomeChoice::AiHelp => {
+                    self.show_welcome = false;
+                    self.show_ai_help = true;
+                }
+                WelcomeChoice::Close => self.show_welcome = false,
+            }
+        }
+        if let Some(mut tut) = self.tutorial.take() {
+            if onboarding::show_tutorial(ctx, self, &mut tut) {
+                self.tutorial = Some(tut);
+            }
+        }
+        if self.show_ai_help {
+            let mut open = true;
+            onboarding::show_ai_help(ctx, self, &mut open);
+            self.show_ai_help &= open;
+        }
+        if self.show_shortcuts {
+            let mut open = true;
+            onboarding::show_shortcuts(ctx, &mut open);
+            self.show_shortcuts = open;
+        }
+    }
+
+    /// Add a track using a friendly preset and select it.
+    pub fn add_track(&mut self, preset: &presets::Preset) {
+        let base = presets::plain_name(preset.name);
+        let same = self
+            .project
+            .tracks
+            .iter()
+            .filter(|t| t.name.starts_with(base))
+            .count();
+        let name = if same == 0 {
+            base.to_string()
         } else {
-            (format!("Synth {n}"), Instrument::default_synth())
+            format!("{base} {}", same + 1)
         };
         if let Some(v) = self.run_op(Op::AddTrack {
             name,
-            instrument: Some(instrument),
+            instrument: Some(preset.instrument.clone()),
             gain: None,
             pan: None,
         }) {
-            self.selected_track = v["track_id"].as_str().map(String::from);
+            let id = v["track_id"].as_str().map(String::from);
+            // Give the new track an empty clip so there is something to draw in right away.
+            if let Some(id) = &id {
+                let start = self.playhead.max(0.0);
+                let bpb = self.project.beats_per_bar.max(1) as f64;
+                self.add_clip(id, (start / bpb).floor() * bpb);
+            }
+            self.selected_track = id;
         }
     }
 
     pub fn add_clip(&mut self, track_id: &str, start: f64) {
-        let length = self.project.beats_per_bar.max(1) as f64;
+        let length = self.project.beats_per_bar.max(1) as f64 * 4.0;
+        let parts = self.project.track(track_id).map_or(0, |t| t.clips.len());
         let op = Op::AddClip {
             track_id: track_id.into(),
             start,
             length,
-            name: None,
+            name: Some(format!("Part {}", parts + 1)),
             notes: Vec::new(),
         };
         if let Some(v) = self.run_op(op) {

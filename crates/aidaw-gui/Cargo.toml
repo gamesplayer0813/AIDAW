@@ -13,6 +13,7 @@ path = "src/main.rs"
 aidaw-core.workspace = true
 aidaw-engine.workspace = true
 anyhow.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 eframe = "0.31"
 rfd = "0.15"

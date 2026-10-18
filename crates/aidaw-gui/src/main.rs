@@ -4,7 +4,11 @@ mod app;
 mod arrange;
 mod fonts;
 mod inspector;
+mod onboarding;
 mod piano_roll;
+mod presets;
+mod scale;
+mod settings;
 
 use std::path::PathBuf;
 

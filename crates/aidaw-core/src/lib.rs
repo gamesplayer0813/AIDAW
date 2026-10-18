@@ -97,6 +97,17 @@ mod tests {
     }
 
     #[test]
+    fn preview_sounds_without_moving_playhead() {
+        let p = demo();
+        let mut seq = render::Sequencer::new(22_050);
+        seq.preview(&p, 0, 60);
+        let mut buf = vec![0.0f32; 2048];
+        seq.process_voices(&p, &mut buf);
+        assert!(buf.iter().any(|s| s.abs() > 0.01));
+        assert_eq!(seq.position(), 0.0);
+    }
+
+    #[test]
     fn solo_isolates_track() {
         let mut p = demo();
         p.tracks[1].solo = true;

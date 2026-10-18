@@ -36,15 +36,16 @@ enum Hit {
 
 pub fn show(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
-        ui.heading("Arrangement");
+        ui.heading("Song").on_hover_text(
+            "Each row is one instrument (a track). The coloured blocks are clips: pieces of music.\nClick a clip to edit its notes in the piano roll below.",
+        );
         ui.add(
             egui::Slider::new(&mut app.arrange_zoom, 8.0..=120.0)
                 .logarithmic(true)
+                .show_value(false)
                 .text("zoom"),
         );
-        ui.weak(
-            "double-click a row to add a clip · drag to move · drag edge to resize · Del to delete",
-        );
+        ui.weak("click a clip to edit it · double-click an empty spot for a new clip · drag to move · drag the right edge to make longer");
     });
 
     let bpb = app.project.beats_per_bar.max(1) as f64;
@@ -62,6 +63,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         .show(ui, |ui| {
             let (resp, painter) =
                 ui.allocate_painter(size.max(ui.available_size()), Sense::click_and_drag());
+            app.ui_rects
+                .insert("arrange", ui.clip_rect().intersect(resp.rect));
             let origin = resp.rect.min;
             let x_of = |beat: f64| origin.x + HEADER_W + beat as f32 * bw;
             let beat_of = |x: f32| ((x - origin.x - HEADER_W) / bw) as f64;
@@ -166,6 +169,28 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                         visuals.strong_text_color(),
                     );
                 }
+            }
+
+            // Friendly hint in rows that have nothing in them yet.
+            for (i, track) in app.project.tracks.iter().enumerate() {
+                if track.clips.is_empty() {
+                    painter.text(
+                        pos2(x_of(0.0) + 10.0, row_top(i) + ROW_H / 2.0),
+                        Align2::LEFT_CENTER,
+                        "Double-click here to add a clip",
+                        FontId::proportional(13.0),
+                        visuals.weak_text_color(),
+                    );
+                }
+            }
+            if rows == 0 {
+                painter.text(
+                    pos2(origin.x + 20.0, origin.y + RULER_H + 24.0),
+                    Align2::LEFT_CENTER,
+                    "No tracks yet. Click ➕ Add instrument on the left.",
+                    FontId::proportional(15.0),
+                    visuals.text_color(),
+                );
             }
 
             // Track headers (drawn last so they cover clips scrolled under them).

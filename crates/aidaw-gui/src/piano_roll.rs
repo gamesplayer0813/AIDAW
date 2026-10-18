@@ -5,9 +5,12 @@
 
 use aidaw_core::edit::Op;
 use aidaw_core::{pitch, Note};
-use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Rect, Sense, Stroke, StrokeKind};
+use eframe::egui::{
+    self, pos2, vec2, Align2, Color32, FontId, Rect, RichText, Sense, Stroke, StrokeKind,
+};
 
 use crate::app::{track_color, App, Drag};
+use crate::scale::{Scale, ROOTS};
 
 const KEYS_W: f32 = 52.0;
 const RULER_H: f32 = 20.0;
@@ -15,7 +18,7 @@ const EDGE: f32 = 6.0;
 
 enum Hit {
     Ruler(f64),
-    Keys,
+    Keys(u8),
     NoteBody { index: usize, offset: f64 },
     NoteEdge { index: usize },
     Grid { beat: f64, pitch: u8 },
@@ -23,8 +26,13 @@ enum Hit {
 
 pub fn show(ui: &mut egui::Ui, app: &mut App) {
     let Some(clip_id) = app.selected_clip.clone() else {
+        app.ui_rects.insert("piano", ui.max_rect());
         ui.centered_and_justified(|ui| {
-            ui.weak("Select or double-click to create a clip in the arrangement to edit its notes")
+            ui.label(
+                RichText::new("👆 Click a coloured clip above to see and edit its notes here.\nNo clips yet? Double-click an empty spot in a track row.")
+                    .size(15.0)
+                    .weak(),
+            )
         });
         return;
     };
@@ -38,7 +46,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         return;
     };
 
-    toolbar(ui, app, &clip_id);
+    toolbar(ui, app, &clip_id, track_index);
     ui.separator();
 
     let kh = app.roll_key_height;
@@ -72,6 +80,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             ui.allocate_painter(size.max(ui.available_size()), Sense::click_and_drag());
         let origin = resp.rect.min;
         let visible = ui.clip_rect();
+        app.ui_rects.insert("piano", visible.intersect(resp.rect));
+        let in_key = |p: u8| !app.scale_active(track_index) || app.scale.contains(app.scale_root, p);
+        let scale_on = app.scale_active(track_index);
         let keys_left = visible.left().max(origin.x);
         let ruler_top = visible.top().max(origin.y);
         let x_of = |beat: f64| origin.x + KEYS_W + beat as f32 * bw;
@@ -90,7 +101,14 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 pos2(origin.x + KEYS_W, y_of(p)),
                 vec2(resp.rect.width(), kh),
             );
-            if pitch::is_black_key(p) {
+            if scale_on {
+                // Light up the rows that are in the chosen key.
+                if in_key(p) {
+                    painter.rect_filled(r, 0.0, color.gamma_multiply(0.07));
+                } else {
+                    painter.rect_filled(r, 0.0, Color32::from_black_alpha(90));
+                }
+            } else if pitch::is_black_key(p) {
                 painter.rect_filled(r, 0.0, Color32::from_black_alpha(60));
             }
             if p % 12 == 0 {
@@ -211,6 +229,13 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     Stroke::new(1.0_f32, Color32::from_gray(150)),
                 );
             }
+            if scale_on && in_key(p) {
+                painter.circle_filled(
+                    pos2(r.right() - 5.0 - if is_drums { 0.0 } else { 26.0 }, r.center().y),
+                    2.5,
+                    color,
+                );
+            }
             let label = if is_drums {
                 drum_label(p).map(String::from)
             } else {
@@ -232,13 +257,26 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             visuals.panel_fill,
         );
 
+        if clip.notes.is_empty() {
+            let hint = if is_drums {
+                "Click in the grid to add drum hits.\nTry Kick on beats 1 and 3, Snare on 2 and 4, Hi-hat everywhere!"
+            } else {
+                "This clip is empty. Click anywhere in the grid to add a note!\nClick the piano keys on the left to hear them first."
+            };
+            let center = pos2(
+                (visible.left() + KEYS_W + visible.right()) / 2.0,
+                visible.top() + RULER_H + 40.0,
+            );
+            painter.text(center, Align2::CENTER_TOP, hint, FontId::proportional(15.0), visuals.text_color());
+        }
+
         // ---- interaction ----
         let hit = |notes: &[Note], p: egui::Pos2| -> Hit {
             if p.y < ruler_top + RULER_H {
                 return Hit::Ruler(beat_of(p.x).max(0.0));
             }
             if p.x < keys_left + KEYS_W {
-                return Hit::Keys;
+                return Hit::Keys(pitch_of(p.y) as u8);
             }
             let pitch_ = pitch_of(p.y) as u8;
             let beat = beat_of(p.x);
@@ -289,11 +327,11 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     }
                     Hit::Grid { beat, pitch: p } => {
                         // Drag on empty grid: create a note and immediately resize it.
-                        let index = add_note(app, &clip_id, app.snap_floor(beat).max(0.0), p);
+                        let index = add_note(app, &clip_id, track_index, app.snap_floor(beat).max(0.0), p);
                         app.drag = index.map(|index| Drag::ResizeNote { index });
                     }
                     Hit::Ruler(b) => app.seek(clip.start + b),
-                    Hit::Keys => {}
+                    Hit::Keys(_) => {}
                 }
             }
         }
@@ -304,14 +342,19 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 match app.drag.clone() {
                     Some(Drag::MoveNote { index, grab_offset }) => {
                         let start = snapped_move(grab_offset);
-                        let pitch_ = pitch_of(p.y) as u8;
+                        let pitch_ = app.fit_pitch(track_index, pitch_of(p.y) as u8);
+                        let mut moved_pitch = false;
                         if let Some(n) = app
                             .project
                             .clip_mut(&clip_id)
                             .and_then(|c| c.notes.get_mut(index))
                         {
                             n.start = start;
+                            moved_pitch = n.pitch != pitch_;
                             n.pitch = pitch_;
+                        }
+                        if moved_pitch {
+                            app.preview_note(track_index, pitch_);
                         }
                     }
                     Some(Drag::ResizeNote { index }) => {
@@ -335,6 +378,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             }
         }
         if resp.drag_stopped() {
+            if matches!(app.drag, Some(Drag::MoveNote { .. } | Drag::ResizeNote { .. })) {
+                app.ev_note_drags += 1;
+            }
             app.drag = None;
         }
 
@@ -348,10 +394,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                         }
                     }
                     Hit::Grid { beat, pitch: p } => {
-                        add_note(app, &clip_id, app.snap_floor(beat).max(0.0), p);
+                        add_note(app, &clip_id, track_index, app.snap_floor(beat).max(0.0), p);
                     }
                     Hit::Ruler(b) => app.seek(clip.start + b),
-                    Hit::Keys => {}
+                    Hit::Keys(p) => app.preview_note(track_index, p),
                 }
             }
         }
@@ -378,7 +424,15 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
     });
 }
 
-fn add_note(app: &mut App, clip_id: &str, start: f64, pitch_: u8) -> Option<usize> {
+fn add_note(
+    app: &mut App,
+    clip_id: &str,
+    track_index: usize,
+    start: f64,
+    pitch_: u8,
+) -> Option<usize> {
+    let pitch_ = app.fit_pitch(track_index, pitch_);
+    app.preview_note(track_index, pitch_);
     let duration = if app.last_note_length > 0.0 {
         app.last_note_length
     } else {
@@ -414,9 +468,11 @@ fn remove_note(app: &mut App, clip_id: &str, index: usize) {
     app.selected_note = None;
 }
 
-fn toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str) {
+fn toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usize) {
     ui.horizontal(|ui| {
-        ui.heading("Piano roll");
+        ui.heading("Piano roll").on_hover_text(
+            "Each row is a piano key (low at the bottom, high at the top). Left to right is time.",
+        );
         if let Some(c) = app.project.clip_mut(clip_id) {
             ui.label("Clip");
             ui.add(
@@ -424,7 +480,8 @@ fn toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str) {
                     .hint_text(c.id.clone())
                     .desired_width(110.0),
             );
-            ui.label("Length");
+            ui.label("Length")
+                .on_hover_text("How long this clip is. 4 beats = 1 bar.");
             ui.add(
                 egui::DragValue::new(&mut c.length)
                     .range(0.25..=1024.0)
@@ -433,16 +490,26 @@ fn toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str) {
             );
         }
         ui.separator();
-        ui.label("Transpose");
-        for (label, st) in [("-12", -12), ("-1", -1), ("+1", 1), ("+12", 12)] {
-            if ui.small_button(label).clicked() {
+        ui.label("Move all notes")
+            .on_hover_text("Transpose: shift every note in this clip up or down");
+        for (label, st, tip) in [
+            ("⏬", -12, "Down one octave"),
+            ("🔽", -1, "Down a little (one semitone)"),
+            ("🔼", 1, "Up a little (one semitone)"),
+            ("⏫", 12, "Up one octave"),
+        ] {
+            if ui.small_button(label).on_hover_text(tip).clicked() {
                 app.run_op(Op::TransposeClip {
                     clip_id: clip_id.into(),
                     semitones: st,
                 });
             }
         }
-        if ui.small_button("Clear").clicked() {
+        if ui
+            .small_button("🗑 Clear")
+            .on_hover_text("Remove every note in this clip (Ctrl+Z to undo)")
+            .clicked()
+        {
             app.run_op(Op::RemoveNotes {
                 clip_id: clip_id.into(),
                 from: None,
@@ -459,9 +526,10 @@ fn toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str) {
                 .and_then(|c| c.notes.get_mut(i))
         }) {
             ui.label(format!("Note {}", pitch::name(n.pitch)));
-            ui.label("Vel");
+            ui.label("Loudness")
+                .on_hover_text("Velocity: how hard the note is played");
             ui.add(egui::Slider::new(&mut n.velocity, 1..=127));
-            ui.label("Len");
+            ui.label("Length").on_hover_text("Note length in beats");
             ui.add(
                 egui::DragValue::new(&mut n.duration)
                     .range(0.01..=256.0)
@@ -470,12 +538,45 @@ fn toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str) {
         }
     });
     ui.horizontal(|ui| {
+        let drums = app.project.tracks.get(track_index).is_some_and(|t| t.instrument.is_drums());
+        let key = ui.scope(|ui| {
+            ui.add_enabled_ui(!drums, |ui| {
+                ui.label("🎵 Key").on_hover_text(
+                    "Notes in the same key sound good together. Lit-up rows are in the key.",
+                );
+                egui::ComboBox::from_id_salt("scale_root")
+                    .width(48.0)
+                    .selected_text(ROOTS[app.scale_root as usize % 12])
+                    .show_ui(ui, |ui| {
+                        for (i, r) in ROOTS.iter().enumerate() {
+                            ui.selectable_value(&mut app.scale_root, i as u8, *r);
+                        }
+                    });
+                egui::ComboBox::from_id_salt("scale")
+                    .width(190.0)
+                    .selected_text(app.scale.label())
+                    .show_ui(ui, |ui| {
+                        for sc in Scale::ALL {
+                            ui.selectable_value(&mut app.scale, sc, sc.label());
+                        }
+                    });
+                ui.add_enabled(
+                    app.scale != Scale::Off,
+                    egui::Checkbox::new(&mut app.scale_lock, "Stay in key"),
+                )
+                .on_hover_text("New and moved notes jump to the nearest note in the key, so it always sounds right.");
+            })
+            .response
+            .on_disabled_hover_text("Drums don't have a key");
+        });
+        app.ui_rects.insert("key", key.response.rect);
+        ui.separator();
         ui.label("Zoom");
         ui.add(egui::Slider::new(&mut app.roll_zoom, 20.0..=400.0).logarithmic(true).show_value(false));
         ui.label("Height");
         ui.add(egui::Slider::new(&mut app.roll_key_height, 8.0..=24.0).show_value(false));
-        ui.weak("click grid to add · drag to move · drag edge to resize · right-click / Del to delete · Ctrl+wheel to zoom");
     });
+    ui.weak("click the grid to add a note · drag to move · drag the right edge to lengthen · right-click to delete · click piano keys to hear them");
 }
 
 fn drum_label(p: u8) -> Option<&'static str> {

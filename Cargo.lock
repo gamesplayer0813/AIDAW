@@ -166,6 +166,7 @@ dependencies = [
  "anyhow",
  "eframe",
  "rfd",
+ "serde",
  "serde_json",
 ]
 

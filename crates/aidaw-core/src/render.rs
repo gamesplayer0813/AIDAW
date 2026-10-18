@@ -119,6 +119,25 @@ impl Sequencer {
 
     /// Render `out.len() / 2` stereo frames (interleaved L/R) and advance the playhead.
     pub fn process(&mut self, project: &Project, out: &mut [f32]) {
+        self.render_block(project, out, true);
+    }
+
+    /// Render only the voices already sounding (e.g. note previews) without
+    /// triggering clip notes or moving the playhead. Used while stopped.
+    pub fn process_voices(&mut self, project: &Project, out: &mut [f32]) {
+        self.render_block(project, out, false);
+    }
+
+    /// Start a short one-off note on `track`'s instrument, for auditioning.
+    pub fn preview(&mut self, project: &Project, track: usize, pitch_: u8) {
+        let Some(t) = project.tracks.get(track) else {
+            return;
+        };
+        let gate = (self.sample_rate * 0.35) as u64;
+        self.spawn(track, &t.instrument, pitch_, 100, 0, gate);
+    }
+
+    fn render_block(&mut self, project: &Project, out: &mut [f32], advance: bool) {
         out.fill(0.0);
         let frames = out.len() / 2;
         if frames == 0 {
@@ -127,7 +146,9 @@ impl Sequencer {
         let frames_per_beat = self.sample_rate as f64 * project.seconds_per_beat();
         let b0 = self.position;
         let b1 = b0 + frames as f64 / frames_per_beat;
-        self.spawn_notes(project, b0, b1, frames_per_beat);
+        if advance {
+            self.spawn_notes(project, b0, b1, frames_per_beat);
+        }
 
         let sr = self.sample_rate;
         let audible: Vec<(f32, f32, bool)> = project
@@ -166,7 +187,9 @@ impl Sequencer {
         for s in out.iter_mut() {
             *s = (*s * master).tanh();
         }
-        self.position = b1;
+        if advance {
+            self.position = b1;
+        }
     }
 
     fn spawn_notes(&mut self, project: &Project, b0: f64, b1: f64, frames_per_beat: f64) {
