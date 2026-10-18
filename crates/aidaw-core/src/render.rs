@@ -3,9 +3,12 @@
 //! is exactly what the human hears in the GUI.
 //!
 //! Sound-quality and safety notes:
-//! - Saw/square oscillators are band-limited with polyBLEP; saws use two
-//!   slightly detuned oscillators for a fuller tone, and the synth filter is
-//!   a 12 dB/oct low-pass.
+//! - Saw/square/pulse oscillators are band-limited with polyBLEP; saws use
+//!   two slightly detuned oscillators for a fuller tone (up to five with
+//!   `unison`), and the synth filter is a 12 dB/oct low-pass (a resonant
+//!   state-variable filter once resonance or the filter envelope is on).
+//! - Drum kits share one set of drum models; each kit retunes and colours
+//!   them (pitch, decay, drive, bit-crush, darkening).
 //! - Voices never start or stop abruptly: stolen voices, choked hi-hats and
 //!   voices cut by a seek/stop fade out over a few milliseconds, and drum
 //!   tails are faded before the voice is freed.
@@ -22,7 +25,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::model::{Instrument, Project, Waveform};
+use crate::model::{DrumKit, Instrument, Project, Synth, Waveform};
 use crate::pitch;
 
 /// Voices above this count start stealing (with a short fade).
@@ -46,6 +49,9 @@ const METAL_FREQS: [f32; 6] = [205.3, 304.4, 369.6, 522.7, 540.0, 800.0];
 /// Detune ratio of the second saw oscillator (about 7 cents).
 const SAW_DETUNE: f32 = 1.004;
 
+/// Upper limit of the synth's unison stack.
+const MAX_UNISON: usize = 5;
+
 #[derive(Clone, Copy, PartialEq)]
 enum Drum {
     Kick,
@@ -55,63 +61,461 @@ enum Drum {
     OpenHat,
     Tom(f32),
     Crash,
+    Splash,
+    Ride,
+    RideBell,
+    Rim,
+    Cowbell,
+    Tambourine,
+    Shaker,
+    /// Bongos, congas and timbales: (pitch in Hz, decay in seconds).
+    Hand(f32, f32),
+    /// Claves and wood blocks: (pitch in Hz, decay in seconds).
+    Wood(f32, f32),
+    Agogo(f32),
+    /// The orchestral triangle: decay in seconds (muted or open).
+    Triangle(f32),
 }
 
 impl Drum {
-    fn from_note(p: u8) -> Drum {
+    fn from_note(p: u8, kit: &Kit) -> Drum {
         match p {
             35 | 36 => Drum::Kick,
+            37 => Drum::Rim,
             38 | 40 => Drum::Snare,
             39 => Drum::Clap,
             42 | 44 => Drum::ClosedHat,
             46 => Drum::OpenHat,
-            49 | 51 | 52 | 55 | 57 | 59 => Drum::Crash,
-            41 | 43 => Drum::Tom(80.0),
-            45 | 47 => Drum::Tom(110.0),
-            48 | 50 => Drum::Tom(150.0),
+            49 | 52 | 57 => Drum::Crash,
+            55 => Drum::Splash,
+            51 | 59 => Drum::Ride,
+            53 => Drum::RideBell,
+            41 | 43 => Drum::Tom(80.0 * kit.tom_mul),
+            45 | 47 => Drum::Tom(110.0 * kit.tom_mul),
+            48 | 50 => Drum::Tom(150.0 * kit.tom_mul),
+            54 => Drum::Tambourine,
+            56 => Drum::Cowbell,
+            60 => Drum::Hand(420.0, 0.07),
+            61 => Drum::Hand(300.0, 0.09),
+            62 => Drum::Hand(340.0, 0.04),
+            63 => Drum::Hand(330.0, 0.16),
+            64 => Drum::Hand(220.0, 0.2),
+            65 => Drum::Hand(560.0, 0.13),
+            66 => Drum::Hand(390.0, 0.16),
+            67 => Drum::Agogo(930.0),
+            68 => Drum::Agogo(700.0),
+            69 | 70 | 82 => Drum::Shaker,
+            75 => Drum::Wood(2500.0, 0.025),
+            76 => Drum::Wood(1150.0, 0.035),
+            77 => Drum::Wood(850.0, 0.04),
+            80 => Drum::Triangle(0.1),
+            81 => Drum::Triangle(0.9),
             p => Drum::Tom(pitch::frequency(p as f32).clamp(40.0, 400.0)),
         }
     }
 
     /// Length in seconds after which the voice is freed.
-    fn length(self) -> f32 {
+    fn length(self, kit: &Kit) -> f32 {
+        let cymbal = kit.cymbal_decay / 0.6;
         match self {
-            Drum::Kick => 0.6,
-            Drum::Snare | Drum::Clap => 0.4,
-            Drum::ClosedHat => 0.15,
-            Drum::OpenHat => 0.6,
-            Drum::Tom(_) => 0.6,
-            Drum::Crash => 1.8,
+            Drum::Kick => kit.kick_len,
+            Drum::Snare | Drum::Clap => kit.snare_len,
+            Drum::ClosedHat => (kit.hat_decay * 5.0).max(0.1),
+            Drum::OpenHat => (kit.open_decay * 2.7).max(0.3),
+            Drum::Tom(_) => (kit.tom_decay * 3.0).max(0.3),
+            Drum::Crash => 1.8 * cymbal,
+            Drum::Splash => 0.9 * cymbal,
+            Drum::Ride => 2.4 * cymbal,
+            Drum::RideBell => 1.6 * cymbal,
+            Drum::Rim => 0.12,
+            Drum::Cowbell | Drum::Agogo(_) => 0.5,
+            Drum::Tambourine => 0.45,
+            Drum::Shaker => 0.22,
+            Drum::Hand(_, d) => (d * 5.0 + 0.05).min(1.2),
+            Drum::Wood(_, d) => d * 6.0 + 0.02,
+            Drum::Triangle(d) => d * 5.0 + 0.05,
         }
     }
 
     /// (high-pass, low-pass) corner frequencies of the noise/metal path.
-    fn filter_hz(self) -> (f32, f32) {
+    fn filter_hz(self, kit: &Kit) -> (f32, f32) {
         match self {
             Drum::Kick => (2_000.0, 8_000.0),
-            Drum::Snare => (1_200.0, 9_000.0),
+            Drum::Snare => (kit.snare_hp, kit.snare_lp),
             Drum::Clap => (800.0, 4_000.0),
-            Drum::ClosedHat | Drum::OpenHat => (6_500.0, 13_000.0),
-            Drum::Crash => (4_000.0, 14_000.0),
-            Drum::Tom(_) => (1_000.0, 5_000.0),
+            Drum::ClosedHat | Drum::OpenHat => (kit.hat_hp, kit.hat_lp),
+            Drum::Crash | Drum::Splash => (4_000.0, 14_000.0),
+            Drum::Ride => (5_000.0, 13_000.0),
+            Drum::RideBell => (2_500.0, 12_000.0),
+            Drum::Tom(_) | Drum::Hand(..) => (1_000.0, 5_000.0),
+            Drum::Rim => (900.0, 6_000.0),
+            Drum::Cowbell => (450.0, 4_500.0),
+            Drum::Tambourine => (5_500.0, 15_000.0),
+            Drum::Shaker => (4_500.0, 13_000.0),
+            Drum::Wood(..) | Drum::Agogo(_) | Drum::Triangle(_) => (1_000.0, 10_000.0),
         }
     }
 }
 
+/// The character of a drum kit: every kit plays the same drums, built from
+/// the same parts, but tuned and coloured differently.
+struct Kit {
+    /// Kick: final pitch, extra pitch at the hit and how fast it falls.
+    kick_base: f32,
+    kick_sweep: f32,
+    kick_sweep_time: f32,
+    kick_decay: f32,
+    kick_len: f32,
+    /// Saturation of the kick body (higher = harder, squarer).
+    kick_drive: f32,
+    /// Level of the beater click.
+    kick_click: f32,
+    /// Snare: drum-head pitch and level, wire decay and filter.
+    snare_tone: f32,
+    snare_tone_mix: f32,
+    snare_decay: f32,
+    snare_hp: f32,
+    snare_lp: f32,
+    snare_len: f32,
+    clap_decay: f32,
+    /// Hi-hats: closed and open decay, filter, and how much of the metallic
+    /// oscillator bank is mixed in (vs. plain noise).
+    hat_decay: f32,
+    open_decay: f32,
+    hat_hp: f32,
+    hat_lp: f32,
+    metal: f32,
+    tom_mul: f32,
+    tom_decay: f32,
+    cymbal_decay: f32,
+    /// Bit-crusher levels (0 = off): grit for lo-fi and electro kits.
+    crush: f32,
+    /// Final low-pass in Hz (at or above 20 kHz = off): dusty, dark kits.
+    dark: f32,
+    gain: f32,
+}
+
+static KIT_STANDARD: Kit = Kit {
+    kick_base: 48.0,
+    kick_sweep: 150.0,
+    kick_sweep_time: 0.03,
+    kick_decay: 0.22,
+    kick_len: 0.6,
+    kick_drive: 1.6,
+    kick_click: 0.4,
+    snare_tone: 180.0,
+    snare_tone_mix: 0.25,
+    snare_decay: 0.12,
+    snare_hp: 1_200.0,
+    snare_lp: 9_000.0,
+    snare_len: 0.4,
+    clap_decay: 0.12,
+    hat_decay: 0.03,
+    open_decay: 0.22,
+    hat_hp: 6_500.0,
+    hat_lp: 13_000.0,
+    metal: 1.0,
+    tom_mul: 1.0,
+    tom_decay: 0.2,
+    cymbal_decay: 0.6,
+    crush: 0.0,
+    dark: 20_000.0,
+    gain: 1.0,
+};
+
+static KIT_808: Kit = Kit {
+    kick_base: 49.0,
+    kick_sweep: 80.0,
+    kick_sweep_time: 0.05,
+    kick_decay: 0.45,
+    kick_len: 1.3,
+    kick_drive: 1.2,
+    kick_click: 0.12,
+    snare_tone: 238.0,
+    snare_tone_mix: 0.45,
+    snare_decay: 0.09,
+    snare_hp: 1_800.0,
+    snare_lp: 8_000.0,
+    snare_len: 0.35,
+    clap_decay: 0.15,
+    hat_decay: 0.025,
+    open_decay: 0.3,
+    hat_hp: 7_000.0,
+    hat_lp: 14_000.0,
+    metal: 1.5,
+    tom_mul: 0.9,
+    tom_decay: 0.35,
+    cymbal_decay: 0.9,
+    crush: 0.0,
+    dark: 20_000.0,
+    gain: 1.0,
+};
+
+static KIT_909: Kit = Kit {
+    kick_base: 54.0,
+    kick_sweep: 230.0,
+    kick_sweep_time: 0.014,
+    kick_decay: 0.18,
+    kick_len: 0.5,
+    kick_drive: 2.4,
+    kick_click: 0.8,
+    snare_tone: 200.0,
+    snare_tone_mix: 0.3,
+    snare_decay: 0.16,
+    snare_hp: 900.0,
+    snare_lp: 11_000.0,
+    snare_len: 0.45,
+    clap_decay: 0.13,
+    hat_decay: 0.04,
+    open_decay: 0.26,
+    hat_hp: 8_000.0,
+    hat_lp: 15_000.0,
+    metal: 0.6,
+    tom_mul: 1.05,
+    tom_decay: 0.22,
+    cymbal_decay: 0.8,
+    crush: 0.0,
+    dark: 20_000.0,
+    gain: 1.0,
+};
+
+static KIT_ACOUSTIC: Kit = Kit {
+    kick_base: 58.0,
+    kick_sweep: 60.0,
+    kick_sweep_time: 0.02,
+    kick_decay: 0.14,
+    kick_len: 0.45,
+    kick_drive: 1.3,
+    kick_click: 0.7,
+    snare_tone: 190.0,
+    snare_tone_mix: 0.4,
+    snare_decay: 0.18,
+    snare_hp: 700.0,
+    snare_lp: 7_000.0,
+    snare_len: 0.5,
+    clap_decay: 0.1,
+    hat_decay: 0.05,
+    open_decay: 0.35,
+    hat_hp: 5_000.0,
+    hat_lp: 11_000.0,
+    metal: 0.8,
+    tom_mul: 1.1,
+    tom_decay: 0.35,
+    cymbal_decay: 1.1,
+    crush: 0.0,
+    dark: 12_000.0,
+    gain: 1.05,
+};
+
+static KIT_LOFI: Kit = Kit {
+    kick_base: 50.0,
+    kick_sweep: 110.0,
+    kick_sweep_time: 0.03,
+    kick_decay: 0.2,
+    kick_len: 0.55,
+    kick_drive: 1.5,
+    kick_click: 0.3,
+    snare_tone: 200.0,
+    snare_tone_mix: 0.35,
+    snare_decay: 0.13,
+    snare_hp: 900.0,
+    snare_lp: 6_000.0,
+    snare_len: 0.4,
+    clap_decay: 0.12,
+    hat_decay: 0.035,
+    open_decay: 0.2,
+    hat_hp: 5_000.0,
+    hat_lp: 10_000.0,
+    metal: 0.7,
+    tom_mul: 1.0,
+    tom_decay: 0.25,
+    cymbal_decay: 0.6,
+    crush: 24.0,
+    dark: 3_800.0,
+    gain: 1.15,
+};
+
+static KIT_TRAP: Kit = Kit {
+    kick_base: 42.0,
+    kick_sweep: 120.0,
+    kick_sweep_time: 0.04,
+    kick_decay: 0.8,
+    kick_len: 1.8,
+    kick_drive: 1.5,
+    kick_click: 0.3,
+    snare_tone: 220.0,
+    snare_tone_mix: 0.3,
+    snare_decay: 0.1,
+    snare_hp: 1_500.0,
+    snare_lp: 10_000.0,
+    snare_len: 0.35,
+    clap_decay: 0.14,
+    hat_decay: 0.018,
+    open_decay: 0.25,
+    hat_hp: 8_500.0,
+    hat_lp: 16_000.0,
+    metal: 1.2,
+    tom_mul: 0.85,
+    tom_decay: 0.4,
+    cymbal_decay: 0.9,
+    crush: 0.0,
+    dark: 20_000.0,
+    gain: 1.0,
+};
+
+static KIT_ELECTRO: Kit = Kit {
+    kick_base: 52.0,
+    kick_sweep: 300.0,
+    kick_sweep_time: 0.01,
+    kick_decay: 0.2,
+    kick_len: 0.5,
+    kick_drive: 4.0,
+    kick_click: 0.7,
+    snare_tone: 160.0,
+    snare_tone_mix: 0.4,
+    snare_decay: 0.14,
+    snare_hp: 1_000.0,
+    snare_lp: 9_000.0,
+    snare_len: 0.4,
+    clap_decay: 0.16,
+    hat_decay: 0.03,
+    open_decay: 0.2,
+    hat_hp: 6_000.0,
+    hat_lp: 12_000.0,
+    metal: 1.0,
+    tom_mul: 1.2,
+    tom_decay: 0.18,
+    cymbal_decay: 0.6,
+    crush: 48.0,
+    dark: 20_000.0,
+    gain: 0.9,
+};
+
+fn kit_params(kit: DrumKit) -> &'static Kit {
+    match kit {
+        DrumKit::Standard => &KIT_STANDARD,
+        DrumKit::Tr808 => &KIT_808,
+        DrumKit::Tr909 => &KIT_909,
+        DrumKit::Acoustic => &KIT_ACOUSTIC,
+        DrumKit::Lofi => &KIT_LOFI,
+        DrumKit::Trap => &KIT_TRAP,
+        DrumKit::Electro => &KIT_ELECTRO,
+    }
+}
+
+/// A synth patch prepared for playback (clamped, with filter coefficients).
+#[derive(Clone, Copy)]
+struct SynthVoice {
+    waveform: Waveform,
+    attack: f32,
+    decay: f32,
+    sustain: f32,
+    release: f32,
+    /// The original two-pole filter (no resonance, no envelope).
+    lp_coef: f32,
+    /// Resonant state-variable filter, used when resonance or the filter
+    /// envelope is on. `k` is its damping; `g` is precomputed when the
+    /// cutoff doesn't move.
+    svf: bool,
+    k: f32,
+    g: f32,
+    cutoff: f32,
+    filter_env: f32,
+    filter_decay: f32,
+    unison: usize,
+    ratios: [f32; MAX_UNISON],
+    unison_gain: f32,
+    sub: f32,
+    noise: f32,
+    fm: f32,
+    fm_ratio: f32,
+    fm_decay: f32,
+    vibrato: f32,
+    vibrato_rate: f32,
+    pitch_env: f32,
+    pitch_decay: f32,
+    drive: f32,
+}
+
+impl SynthVoice {
+    fn new(p: &Synth, sr: f32) -> Self {
+        let cutoff = finite_or(p.cutoff, 20_000.0).clamp(20.0, 20_000.0);
+        let resonance = finite_or(p.resonance, 0.0).clamp(0.0, 1.0);
+        let filter_env = finite_or(p.filter_env, 0.0).clamp(0.0, 8.0);
+        // Two cascaded one-poles are -3 dB at ~0.644x their corner,
+        // so shift the corner up to keep the cutoff where users set it.
+        let lp_coef = one_pole_coef(cutoff / 0.6436, sr);
+        // The SVF at zero resonance is that same two-pole response; as the
+        // resonance rises the peak should sit right at the cutoff.
+        let svf_cutoff = cutoff * (1.0 / 0.6436f32).powf(1.0 - resonance.min(0.5) * 2.0);
+        let k = 2.0 - 1.9 * resonance;
+        let auto_unison = p.unison.is_none() && p.detune.is_none() && p.waveform == Waveform::Saw;
+        let detune = finite_or(p.detune.unwrap_or(14.0), 0.0).clamp(0.0, 100.0);
+        let unison = match p.unison {
+            Some(n) => (n as usize).clamp(1, MAX_UNISON),
+            None if p.waveform == Waveform::Saw => 2,
+            None if detune > 0.0 && p.detune.is_some() => 2,
+            None => 1,
+        };
+        let mut ratios = [1.0; MAX_UNISON];
+        if auto_unison {
+            ratios[1] = SAW_DETUNE;
+        } else if unison > 1 {
+            for (i, r) in ratios.iter_mut().take(unison).enumerate() {
+                let cents = -detune / 2.0 + detune * i as f32 / (unison - 1) as f32;
+                *r = (cents / 1200.0).exp2();
+            }
+        }
+        let unison_gain = match unison {
+            1 => 1.0,
+            2 => 0.62,
+            n => 0.88 / (n as f32).sqrt(),
+        };
+        SynthVoice {
+            waveform: p.waveform,
+            attack: finite_or(p.attack, 0.0).max(0.001),
+            decay: finite_or(p.decay, 0.0).max(0.001),
+            sustain: finite_or(p.sustain, 1.0).clamp(0.0, 1.0),
+            release: finite_or(p.release, 0.0).max(0.005),
+            lp_coef,
+            svf: resonance > 0.0 || filter_env > 0.0,
+            k,
+            g: svf_g(svf_cutoff, sr),
+            cutoff: svf_cutoff,
+            filter_env,
+            filter_decay: finite_or(p.filter_decay, 0.3).max(0.001),
+            unison,
+            ratios,
+            unison_gain,
+            sub: finite_or(p.sub, 0.0).clamp(0.0, 1.0),
+            noise: finite_or(p.noise, 0.0).clamp(0.0, 1.0),
+            fm: finite_or(p.fm, 0.0).clamp(0.0, 10.0),
+            fm_ratio: finite_or(p.fm_ratio, 1.0).clamp(0.0, 16.0),
+            fm_decay: finite_or(p.fm_decay, 0.0).max(0.0),
+            vibrato: finite_or(p.vibrato, 0.0).clamp(0.0, 200.0),
+            vibrato_rate: finite_or(p.vibrato_rate, 5.0).clamp(0.0, 20.0),
+            pitch_env: finite_or(p.pitch_env, 0.0).clamp(-48.0, 48.0),
+            pitch_decay: finite_or(p.pitch_decay, 0.05).max(0.001),
+            drive: finite_or(p.drive, 0.0).clamp(0.0, 1.0),
+        }
+    }
+}
+
+/// `g` coefficient of the TPT state-variable filter.
+fn svf_g(hz: f32, sr: f32) -> f32 {
+    (PI * hz.clamp(10.0, 0.45 * sr) / sr).tan()
+}
+
 #[derive(Clone, Copy)]
 enum Kind {
-    Synth {
-        waveform: Waveform,
-        attack: f32,
-        decay: f32,
-        sustain: f32,
-        release: f32,
-        lp_coef: f32,
-    },
+    Synth(SynthVoice),
     Drum {
         drum: Drum,
+        kit: &'static Kit,
         hp_coef: f32,
         lp_coef: f32,
+        /// One-pole of the kit's final darkening filter (1.0 = off).
+        dark_coef: f32,
     },
 }
 
@@ -121,7 +525,8 @@ struct Voice {
     kind: Kind,
     freq: f32,
     phase: f32,
-    /// Second oscillator (detuned saw) or metallic oscillator bank (cymbals).
+    /// Synths: unison copies (0..4), sub (4) and FM modulator (5).
+    /// Drums: extra tone oscillators, or the metallic bank (cymbals).
     phases: [f32; 6],
     vel: f32,
     /// Frames to wait before the voice starts (sample-accurate note starts).
@@ -133,7 +538,8 @@ struct Voice {
     release_from: f32,
     released_at: Option<u64>,
     env: f32,
-    /// Filter states (two low-pass poles, two high-pass poles).
+    /// Filter states (synths: two low-pass poles or the SVF; drums: band
+    /// low-pass, darkening low-pass, two high-pass poles).
     z: [f32; 4],
     done: bool,
     /// A preview note that sounds until [`Sequencer::release_held`].
@@ -413,31 +819,12 @@ impl Sequencer {
         gate: u64,
     ) {
         let sr = self.sample_rate;
-        let kind = match *inst {
-            Instrument::Synth {
-                waveform,
-                attack,
-                decay,
-                sustain,
-                release,
-                cutoff,
-            } => {
-                // Two cascaded one-poles are -3 dB at ~0.644x their corner,
-                // so shift the corner up to keep the cutoff where users set it.
-                let cutoff = if cutoff.is_finite() { cutoff } else { 20_000.0 };
-                let corner = cutoff.clamp(20.0, 20_000.0) / 0.6436;
-                Kind::Synth {
-                    waveform,
-                    attack: finite_or(attack, 0.0).max(0.001),
-                    decay: finite_or(decay, 0.0).max(0.001),
-                    sustain: finite_or(sustain, 1.0).clamp(0.0, 1.0),
-                    release: finite_or(release, 0.0).max(0.005),
-                    lp_coef: one_pole_coef(corner, sr),
-                }
-            }
-            Instrument::Drums => {
-                let drum = Drum::from_note(pitch_);
-                let (hp, lp) = drum.filter_hz();
+        let kind = match inst {
+            Instrument::Synth(p) => Kind::Synth(SynthVoice::new(p, sr)),
+            Instrument::Drums { kit } => {
+                let kit = kit_params(*kit);
+                let drum = Drum::from_note(pitch_, kit);
+                let (hp, lp) = drum.filter_hz(kit);
                 if matches!(drum, Drum::ClosedHat | Drum::OpenHat) {
                     // Hi-hat choke: a new hat cuts a ringing open hat.
                     for v in &mut self.voices {
@@ -458,8 +845,14 @@ impl Sequencer {
                 }
                 Kind::Drum {
                     drum,
+                    kit,
                     hp_coef: one_pole_coef(hp, sr),
                     lp_coef: one_pole_coef(lp, sr),
+                    dark_coef: if kit.dark >= 20_000.0 {
+                        1.0
+                    } else {
+                        one_pole_coef(kit.dark, sr)
+                    },
                 }
             }
         };
@@ -590,114 +983,295 @@ fn blep_saw(p: f32, dt: f32) -> f32 {
     2.0 * p - 1.0 - poly_blep(p, dt)
 }
 
+/// One sample of `w` at phase `p` (0..1) with phase step `dt`. `pm` is a
+/// phase offset (FM) applied to the sine and triangle.
+fn wave(w: Waveform, p: f32, dt: f32, pm: f32, rng: &mut u32) -> f32 {
+    match w {
+        Waveform::Sine => ((p + pm) * TAU).sin(),
+        Waveform::Triangle => {
+            let q = (p + pm).rem_euclid(1.0);
+            1.0 - 4.0 * (q - 0.5).abs()
+        }
+        Waveform::Saw => blep_saw(p, dt),
+        Waveform::Square => {
+            let sq = if p < 0.5 { 1.0 } else { -1.0 };
+            sq + poly_blep(p, dt) - poly_blep((p + 0.5) % 1.0, dt)
+        }
+        Waveform::Pulse => {
+            const WIDTH: f32 = 0.25;
+            let sq = if p < WIDTH { 1.0 } else { -1.0 };
+            // +0.5 removes the DC offset of a 25% pulse.
+            (sq + poly_blep(p, dt) - poly_blep((p + 1.0 - WIDTH) % 1.0, dt) + 0.5) * 0.85
+        }
+        Waveform::Noise => noise(rng) * 0.7,
+    }
+}
+
 impl Voice {
     fn next(&mut self, sr: f32, rng: &mut u32) -> f32 {
         let t = self.age as f32 / sr;
         let out = match self.kind {
-            Kind::Synth {
-                waveform,
-                attack,
-                decay,
-                sustain,
-                release,
-                lp_coef,
-            } => {
-                if self.released_at.is_none() && self.age >= self.gate {
-                    self.released_at = Some(self.age);
-                    self.release_from = self.env;
-                }
-                self.env = match self.released_at {
-                    None if t < attack => t / attack,
-                    None if t < attack + decay => 1.0 - (1.0 - sustain) * (t - attack) / decay,
-                    None => sustain,
-                    Some(at) => {
-                        let rt = (self.age - at) as f32 / sr;
-                        if rt >= release {
-                            self.done = true;
-                        }
-                        self.release_from * (1.0 - rt / release).max(0.0)
-                    }
-                };
-                let dt = (self.freq / sr).min(0.5);
-                let p = self.phase;
-                let osc = match waveform {
-                    Waveform::Sine => (p * TAU).sin(),
-                    Waveform::Triangle => 1.0 - 4.0 * (p - 0.5).abs(),
-                    Waveform::Saw => {
-                        let dt2 = (dt * SAW_DETUNE).min(0.5);
-                        let p2 = self.phases[0];
-                        self.phases[0] = (p2 + dt2) % 1.0;
-                        0.62 * (blep_saw(p, dt) + blep_saw(p2, dt2))
-                    }
-                    Waveform::Square => {
-                        let sq = if p < 0.5 { 1.0 } else { -1.0 };
-                        sq + poly_blep(p, dt) - poly_blep((p + 0.5) % 1.0, dt)
-                    }
-                };
-                self.phase = (p + dt) % 1.0;
-                // 12 dB/oct low-pass: smoother, less buzzy than a single pole.
-                self.z[0] += lp_coef * (osc - self.z[0]);
-                self.z[1] += lp_coef * (self.z[0] - self.z[1]);
-                self.z[1] * self.env * 0.3
-            }
+            Kind::Synth(sv) => self.synth(&sv, t, sr, rng),
             Kind::Drum {
                 drum,
+                kit,
                 hp_coef,
                 lp_coef,
+                dark_coef,
             } => {
-                let len = drum.length();
+                let len = drum.length(kit);
                 if t >= len {
                     self.done = true;
                 }
                 // Fade the tail so voices end at exactly zero (no click).
                 let tail = ((len - t) / DRUM_TAIL_SECONDS).clamp(0.0, 1.0);
-                let s = match drum {
-                    Drum::Kick => {
-                        // Fast pitch drop from ~200 Hz to 48 Hz, gently
-                        // saturated for punch, with a short noise click.
-                        let f = 48.0 + 150.0 * (-t / 0.03).exp() + 40.0 * (-t / 0.006).exp();
-                        self.phase = (self.phase + f / sr) % 1.0;
-                        let amp = (-t / 0.22).exp();
-                        let body = (1.6 * (self.phase * TAU).sin() * amp).tanh() * 0.8;
-                        let click = self.band(noise(rng), hp_coef, lp_coef) * (-t / 0.004).exp();
-                        body + click * 0.4
-                    }
-                    Drum::Tom(base) => {
-                        let f = base * (1.0 + 0.5 * (-t / 0.05).exp());
-                        self.phase = (self.phase + f / sr) % 1.0;
-                        let attack = self.band(noise(rng), hp_coef, lp_coef) * (-t / 0.01).exp();
-                        (self.phase * TAU).sin() * (-t / 0.2).exp() * 0.8 + attack * 0.25
-                    }
-                    Drum::Snare => {
-                        // Two drum-head modes plus band-passed noise (wires).
-                        self.phase = (self.phase + 180.0 / sr) % 1.0;
-                        self.phases[0] = (self.phases[0] + 330.0 / sr) % 1.0;
-                        let tone = ((self.phase * TAU).sin() + 0.6 * (self.phases[0] * TAU).sin())
-                            * (-t / 0.05).exp()
-                            * 0.25;
-                        let wires = self.band(noise(rng), hp_coef, lp_coef) * (-t / 0.12).exp();
-                        tone + wires * 0.8
-                    }
-                    Drum::Clap => {
-                        let mut burst = (-t / 0.12).exp() * 0.5;
-                        for o in [0.0f32, 0.01, 0.02] {
-                            if t >= o {
-                                burst += (-(t - o) / 0.012).exp();
-                            }
-                        }
-                        self.band(noise(rng), hp_coef, lp_coef) * burst * 0.45
-                    }
-                    Drum::ClosedHat => self.metal(sr, rng, hp_coef, lp_coef) * (-t / 0.03).exp(),
-                    Drum::OpenHat => {
-                        self.metal(sr, rng, hp_coef, lp_coef) * (-t / 0.22).exp() * 0.85
-                    }
-                    Drum::Crash => self.metal(sr, rng, hp_coef, lp_coef) * (-t / 0.6).exp() * 0.6,
-                };
-                s * tail
+                let mut s = self.drum(drum, kit, t, sr, rng, hp_coef, lp_coef);
+                if kit.crush > 0.0 {
+                    s = (s * kit.crush).round() / kit.crush;
+                }
+                if dark_coef < 1.0 {
+                    self.z[1] += dark_coef * (s - self.z[1]);
+                    s = self.z[1];
+                }
+                s * kit.gain * tail
             }
         };
         self.age += 1;
         out * self.vel
+    }
+
+    fn synth(&mut self, sv: &SynthVoice, t: f32, sr: f32, rng: &mut u32) -> f32 {
+        if self.released_at.is_none() && self.age >= self.gate {
+            self.released_at = Some(self.age);
+            self.release_from = self.env;
+        }
+        self.env = match self.released_at {
+            None if t < sv.attack => t / sv.attack,
+            None if t < sv.attack + sv.decay => {
+                1.0 - (1.0 - sv.sustain) * (t - sv.attack) / sv.decay
+            }
+            None => sv.sustain,
+            Some(at) => {
+                let rt = (self.age - at) as f32 / sr;
+                if rt >= sv.release {
+                    self.done = true;
+                }
+                self.release_from * (1.0 - rt / sv.release).max(0.0)
+            }
+        };
+
+        let mut freq = self.freq;
+        if sv.pitch_env != 0.0 {
+            freq *= (sv.pitch_env / 12.0 * (-t / sv.pitch_decay).exp()).exp2();
+        }
+        if sv.vibrato > 0.0 {
+            // Vibrato eases in, like a player who starts the note straight.
+            let depth = sv.vibrato * (t / 0.5).min(1.0);
+            freq *= (depth / 1200.0 * (TAU * sv.vibrato_rate * t).sin()).exp2();
+        }
+        let dt = (freq / sr).min(0.5);
+
+        let mut pm = 0.0;
+        if sv.fm > 0.0 {
+            let mdt = dt * sv.fm_ratio;
+            if mdt < 0.5 {
+                let index = if sv.fm_decay > 0.0 {
+                    sv.fm * (-t / sv.fm_decay).exp()
+                } else {
+                    sv.fm
+                };
+                let m = self.phases[5];
+                self.phases[5] = (m + mdt).fract();
+                pm = index * (m * TAU).sin() / TAU;
+            }
+        }
+
+        let mut osc = 0.0;
+        for i in 0..sv.unison {
+            let d = (dt * sv.ratios[i]).min(0.5);
+            let ph = if i == 0 {
+                &mut self.phase
+            } else {
+                &mut self.phases[i - 1]
+            };
+            let p = *ph;
+            *ph = (p + d) % 1.0;
+            osc += wave(sv.waveform, p, d, pm, rng);
+        }
+        osc *= sv.unison_gain;
+        if sv.sub > 0.0 {
+            let p = self.phases[4];
+            self.phases[4] = (p + dt * 0.5) % 1.0;
+            osc += sv.sub * (p * TAU).sin();
+        }
+        if sv.noise > 0.0 {
+            osc += sv.noise * noise(rng);
+        }
+
+        let mut y = if sv.svf {
+            let g = if sv.filter_env > 0.0 {
+                let oct = sv.filter_env * (-t / sv.filter_decay).exp();
+                svf_g(sv.cutoff * oct.exp2(), sr)
+            } else {
+                sv.g
+            };
+            // Topology-preserving state-variable low-pass (Zavalishin/Simper).
+            let a1 = 1.0 / (1.0 + g * (g + sv.k));
+            let a2 = g * a1;
+            let a3 = g * a2;
+            let v3 = osc - self.z[1];
+            let v1 = a1 * self.z[0] + a2 * v3;
+            let v2 = self.z[1] + a2 * self.z[0] + a3 * v3;
+            self.z[0] = 2.0 * v1 - self.z[0];
+            self.z[1] = 2.0 * v2 - self.z[1];
+            v2
+        } else {
+            // 12 dB/oct low-pass: smoother, less buzzy than a single pole.
+            self.z[0] += sv.lp_coef * (osc - self.z[0]);
+            self.z[1] += sv.lp_coef * (self.z[0] - self.z[1]);
+            self.z[1]
+        };
+        if sv.drive > 0.0 {
+            let g = 1.0 + 5.0 * sv.drive;
+            y = (y * g).tanh() / g.tanh();
+        }
+        y * self.env * 0.3
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn drum(
+        &mut self,
+        drum: Drum,
+        kit: &Kit,
+        t: f32,
+        sr: f32,
+        rng: &mut u32,
+        hp_coef: f32,
+        lp_coef: f32,
+    ) -> f32 {
+        let sine = |p: &mut f32, f: f32| {
+            let out = (*p * TAU).sin();
+            *p = (*p + f / sr) % 1.0;
+            out
+        };
+        match drum {
+            Drum::Kick => {
+                // Fast pitch drop to the kit's base pitch, saturated for
+                // punch, with a short noise click.
+                let f = kit.kick_base
+                    + kit.kick_sweep * (-t / kit.kick_sweep_time).exp()
+                    + 40.0 * (-t / 0.006).exp();
+                self.phase = (self.phase + f / sr) % 1.0;
+                let amp = (-t / kit.kick_decay).exp();
+                let body = (kit.kick_drive * (self.phase * TAU).sin() * amp).tanh() * 0.8;
+                let click = self.band(noise(rng), hp_coef, lp_coef) * (-t / 0.004).exp();
+                body + click * kit.kick_click
+            }
+            Drum::Tom(base) => {
+                let f = base * (1.0 + 0.5 * (-t / 0.05).exp());
+                self.phase = (self.phase + f / sr) % 1.0;
+                let attack = self.band(noise(rng), hp_coef, lp_coef) * (-t / 0.01).exp();
+                (self.phase * TAU).sin() * (-t / kit.tom_decay).exp() * 0.8 + attack * 0.25
+            }
+            Drum::Snare => {
+                // Two drum-head modes plus band-passed noise (wires).
+                let f = kit.snare_tone;
+                self.phase = (self.phase + f / sr) % 1.0;
+                self.phases[0] = (self.phases[0] + f * 1.833 / sr) % 1.0;
+                let tone = ((self.phase * TAU).sin() + 0.6 * (self.phases[0] * TAU).sin())
+                    * (-t / 0.05).exp()
+                    * kit.snare_tone_mix;
+                let wires = self.band(noise(rng), hp_coef, lp_coef) * (-t / kit.snare_decay).exp();
+                tone + wires * 0.8
+            }
+            Drum::Clap => {
+                let mut burst = (-t / kit.clap_decay).exp() * 0.5;
+                for o in [0.0f32, 0.01, 0.02] {
+                    if t >= o {
+                        burst += (-(t - o) / 0.012).exp();
+                    }
+                }
+                self.band(noise(rng), hp_coef, lp_coef) * burst * 0.45
+            }
+            Drum::ClosedHat => {
+                self.metal(sr, rng, hp_coef, lp_coef, kit.metal) * (-t / kit.hat_decay).exp()
+            }
+            Drum::OpenHat => {
+                self.metal(sr, rng, hp_coef, lp_coef, kit.metal)
+                    * (-t / kit.open_decay).exp()
+                    * 0.85
+            }
+            Drum::Crash => {
+                self.metal(sr, rng, hp_coef, lp_coef, kit.metal)
+                    * (-t / kit.cymbal_decay).exp()
+                    * 0.6
+            }
+            Drum::Splash => {
+                self.metal(sr, rng, hp_coef, lp_coef, kit.metal)
+                    * (-t / (kit.cymbal_decay * 0.4)).exp()
+                    * 0.6
+            }
+            Drum::Ride => {
+                let ping = sine(&mut self.phase, 3_150.0) * (-t / 0.7).exp() * 0.07;
+                let wash = self.metal(sr, rng, hp_coef, lp_coef, kit.metal);
+                ping + wash
+                    * ((-t / (kit.cymbal_decay * 1.6)).exp() * 0.22 + (-t / 0.01).exp() * 0.3)
+            }
+            Drum::RideBell => {
+                let bell = sine(&mut self.phase, 2_350.0) * (-t / 0.5).exp() * 0.35;
+                let wash = self.metal(sr, rng, hp_coef, lp_coef, kit.metal);
+                bell + wash * (-t / (kit.cymbal_decay * 0.8)).exp() * 0.2
+            }
+            Drum::Rim => {
+                let hi = sine(&mut self.phase, 1_700.0) * (-t / 0.012).exp();
+                let lo = sine(&mut self.phases[0], 450.0) * (-t / 0.03).exp() * 0.3;
+                let tick = self.band(noise(rng), hp_coef, lp_coef) * (-t / 0.008).exp() * 0.5;
+                (hi + lo + tick) * 0.7
+            }
+            Drum::Cowbell => {
+                // TR-808 style: two square oscillators, band-passed.
+                let mut sq = 0.0;
+                for (i, f) in [540.0f32, 800.0].into_iter().enumerate() {
+                    let p = &mut self.phases[i];
+                    *p = (*p + f / sr) % 1.0;
+                    sq += if *p < 0.5 { 0.5 } else { -0.5 };
+                }
+                let env = (-t / 0.05).exp() * 0.6 + (-t / 0.22).exp() * 0.4;
+                self.band(sq, hp_coef, lp_coef) * env * 1.4
+            }
+            Drum::Tambourine => {
+                let jingles = self.metal(sr, rng, hp_coef, lp_coef, 0.6);
+                let env = (-t / 0.005).exp() + (-t / 0.12).exp() * 0.6;
+                jingles * env * 0.55
+            }
+            Drum::Shaker => {
+                let env = (t / 0.012).min(1.0) * (-(t - 0.012).max(0.0) / 0.05).exp();
+                self.band(noise(rng), hp_coef, lp_coef) * env * 0.7
+            }
+            Drum::Hand(f, d) => {
+                let f = f * (1.0 + 0.15 * (-t / 0.02).exp());
+                let body = sine(&mut self.phase, f) * (-t / d).exp() * 0.8;
+                let over = sine(&mut self.phases[0], f * 1.52) * (-t / (d * 0.5)).exp() * 0.25;
+                let slap = self.band(noise(rng), hp_coef, lp_coef) * (-t / 0.006).exp() * 0.4;
+                body + over + slap
+            }
+            Drum::Wood(f, d) => {
+                let body = sine(&mut self.phase, f) * (-t / d).exp();
+                let over = sine(&mut self.phases[0], f * 2.7) * (-t / (d * 0.5)).exp() * 0.3;
+                (body + over) * 0.6
+            }
+            Drum::Agogo(f) => {
+                let body = sine(&mut self.phase, f) * (-t / 0.1).exp();
+                let over = sine(&mut self.phases[0], f * 2.76) * (-t / 0.05).exp() * 0.4;
+                (body + over) * 0.5
+            }
+            Drum::Triangle(d) => {
+                let a = sine(&mut self.phase, 4_200.0);
+                let b = sine(&mut self.phases[0], 6_850.0) * 0.5;
+                let c = sine(&mut self.phases[1], 9_430.0) * 0.3;
+                (a + b + c) * (-t / d).exp() * 0.3
+            }
+        }
     }
 
     /// Band-pass (two high-pass poles, one low-pass pole) of `x`.
@@ -711,14 +1285,15 @@ impl Voice {
     }
 
     /// TR-808 style metallic source: six square oscillators plus some noise,
-    /// band-passed. Less harsh than plain white noise.
-    fn metal(&mut self, sr: f32, rng: &mut u32, hp_coef: f32, lp_coef: f32) -> f32 {
+    /// band-passed. Less harsh than plain white noise. `metal` sets how much
+    /// of the square bank is heard (1.0 = the classic mix).
+    fn metal(&mut self, sr: f32, rng: &mut u32, hp_coef: f32, lp_coef: f32, metal: f32) -> f32 {
         let mut m = 0.0;
         for (p, f) in self.phases.iter_mut().zip(METAL_FREQS) {
             *p = (*p + f * 1.7 / sr) % 1.0;
             m += if *p < 0.5 { 1.0 } else { -1.0 };
         }
-        let x = m * (1.0 / 6.0) + noise(rng) * 0.5;
+        let x = m * (metal / 6.0) + noise(rng) * 0.5;
         self.band(x, hp_coef, lp_coef) * 2.2
     }
 }
@@ -990,7 +1565,9 @@ mod tests {
     fn drums_end_at_zero() {
         let mut p = demo_project();
         p.tracks.truncate(1);
-        p.tracks[0].instrument = Instrument::Drums;
+        p.tracks[0].instrument = Instrument::Drums {
+            kit: DrumKit::Standard,
+        };
         let mut seq = Sequencer::new(22_050);
         for n in [36u8, 38, 39, 42, 46, 49, 45] {
             seq.preview(&p, 0, n);
@@ -1000,5 +1577,60 @@ mod tests {
         assert_eq!(seq.active_voices(), 0);
         assert!(buf.iter().all(|s| s.is_finite()));
         assert!(peak(&buf) > 0.05);
+    }
+
+    #[test]
+    fn every_preset_sounds_and_stays_clean() {
+        let mut p = demo_project();
+        p.tracks.truncate(1);
+        let sr = 22_050;
+        for preset in crate::presets::all() {
+            p.tracks[0].instrument = preset.instrument.clone();
+            let mut seq = Sequencer::new(sr);
+            let notes: &[u8] = if preset.instrument.is_drums() {
+                &[
+                    35, 36, 37, 38, 39, 42, 46, 49, 51, 53, 54, 55, 56, 60, 63, 64, 67, 70, 75, 76,
+                    81,
+                ]
+            } else {
+                &[36, 60, 84]
+            };
+            for &n in notes {
+                seq.preview(&p, 0, n);
+            }
+            // Long enough for the slowest release (3 s decay + 2.5 s release).
+            let mut buf = vec![0.0f32; 2 * sr as usize * 7];
+            seq.process_voices(&p, &mut buf);
+            assert!(
+                buf.iter().all(|s| s.is_finite() && s.abs() < 1.0),
+                "{} misbehaves",
+                preset.id
+            );
+            assert!(
+                peak(&buf) > 0.02,
+                "{} is silent ({})",
+                preset.id,
+                peak(&buf)
+            );
+            assert_eq!(seq.active_voices(), 0, "{} never ends", preset.id);
+        }
+    }
+
+    #[test]
+    fn kits_sound_different() {
+        let mut p = demo_project();
+        p.tracks.truncate(1);
+        let render_kit = |p: &mut Project, kit: DrumKit| {
+            p.tracks[0].instrument = Instrument::Drums { kit };
+            let mut seq = Sequencer::new(22_050);
+            seq.preview(p, 0, 36);
+            let mut buf = vec![0.0f32; 2 * 4096];
+            seq.process_voices(p, &mut buf);
+            buf
+        };
+        let base = render_kit(&mut p, DrumKit::Standard);
+        for kit in &DrumKit::ALL[1..] {
+            assert_ne!(render_kit(&mut p, *kit), base, "{kit:?}");
+        }
     }
 }

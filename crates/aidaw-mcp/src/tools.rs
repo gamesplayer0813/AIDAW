@@ -24,6 +24,12 @@ TIME   Beats (1 = quarter note). 4/4 => 4 beats per bar. bar 1 = beat 0, bar 2 =
 PITCH  "C4" = 60 = middle C. Sharps "F#3", flats "Bb2". Bass lives around C2, chords around C4, melody C4-C6.
 NAMES  Tracks/clips can be given by name or id: {"track": "Bass"} or {"track": "t1"}.
 DRUMS  kick 36, snare 38, clap 39, hat 42, open_hat 46, tom_low 41, tom_mid 45, tom_high 48, crash 49, ride 51.
+       Percussion: rim 37, ride_bell 53, tambourine 54, splash 55, cowbell 56, bongo_high 60, bongo_low 61,
+       conga_mute 62, conga_high 63, conga_low 64, timbale_high 65, timbale_low 66, agogo_high 67,
+       agogo_low 68, shaker 70, claves 75, block_high 76, block_low 77, triangle 81.
+SOUNDS 78 presets in 10 groups (list_presets): keys, bass, lead, pad, pluck, bells, orchestra, retro,
+       fx, drums. Drum kits: drum_kit, drums_808, drums_909, drums_acoustic, drums_lofi, drums_trap,
+       drums_electro.
 
 PATHS  Relative paths are taken relative to the open project's folder (with no project open: the
        user's Music folder). Results print the absolute path. Only *.aidaw.json (projects) and
@@ -121,9 +127,12 @@ const fn req(name: &'static str, ty: Ty, desc: &'static str) -> Param {
 const TRACK: &str = "track name or id, e.g. \"Bass\" or \"t1\"";
 const CLIP: &str = "clip name or id, e.g. \"c1\" (ids are shown by get_project)";
 const BAR: &str = "1-based bar to start at (bar 1 = beginning of the song)";
-const INSTRUMENT: &str =
-    "preset id: soft_keys, bass, warm_pad, bright_lead, pluck, bell, chiptune, \
-                          pure_tone, drum_kit (see list_presets)";
+const INSTRUMENT: &str = "preset id (78 of them, see list_presets), e.g. soft_keys, e_piano, organ, bass, \
+                          bass_808, acid_bass, bright_lead, supersaw, warm_pad, lush_pad, choir, pluck, \
+                          nylon_guitar, rock_guitar, marimba, bell, strings, brass, flute, saxophone, \
+                          chiptune, riser, drum_kit, drums_808, drums_909, drums_acoustic, drums_lofi, \
+                          drums_trap. Loose names work too (\"rhodes\", \"violin\")";
+const KIT: &str = "drum tracks only: standard | 808 | 909 | acoustic | lofi | trap | electro";
 const NOTES: &str = "notes as a melody string like \"C4/1 E4/0.5 G4/0.5\" (PITCH/BEATS, r = rest), or an \
                      array of {pitch, start, duration, velocity} with start in beats from the clip start";
 
@@ -164,9 +173,13 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "list_presets",
-        description: "List the instrument presets (ids like \"bass\", \"warm_pad\", \"drum_kit\") usable as `instrument` in add_track/update_track.",
-        example: "{}",
-        params: &[],
+        description: "List the instrument presets (ids like \"e_piano\", \"bass_808\", \"strings\", \"drums_808\") usable as `instrument` in add_track/update_track, grouped by category.",
+        example: r#"{"category": "bass"}"#,
+        params: &[p(
+            "category",
+            Str,
+            "only this group: keys | bass | lead | pad | pluck | bells | orchestra | retro | fx | drums",
+        )],
     },
     Tool {
         name: "update_project",
@@ -186,13 +199,14 @@ pub const TOOLS: &[Tool] = &[
         params: &[
             req("name", Str, "track name, e.g. \"Bass\""),
             p("instrument", Str, INSTRUMENT),
+            p("kit", Str, KIT),
             p("gain", Num, "volume 0-2 (default 0.8)"),
             p("pan", Num, "-1 left .. 1 right"),
         ],
     },
     Tool {
         name: "update_track",
-        description: "Change a track's name, instrument preset, volume, pan, mute/solo, or tweak its synth sound.",
+        description: "Change a track's name, instrument preset, drum kit, volume, pan, mute/solo, or tweak its synth sound.",
         example: r#"{"track": "Bass", "instrument": "pluck", "gain": 0.6, "cutoff": 1200}"#,
         params: &[
             req("track", Str, TRACK),
@@ -202,12 +216,28 @@ pub const TOOLS: &[Tool] = &[
             p("pan", Num, "-1 left .. 1 right"),
             p("mute", Bool, "silence the track"),
             p("solo", Bool, "play only soloed tracks"),
-            p("waveform", Str, "synth only: sine | triangle | saw | square"),
+            p("kit", Str, KIT),
+            p("waveform", Str, "synth only: sine | triangle | saw | square | pulse | noise"),
             p("attack", Num, "synth only: seconds"),
             p("decay", Num, "synth only: seconds"),
             p("sustain", Num, "synth only: level 0-1"),
             p("release", Num, "synth only: seconds"),
             p("cutoff", Num, "synth only: low-pass cutoff in Hz (lower = darker)"),
+            p("resonance", Num, "synth only: 0-1, whistling peak at the cutoff (acid, wah)"),
+            p("filter_env", Num, "synth only: octaves the cutoff jumps up at each note, 0-8 (plucks, brass)"),
+            p("filter_decay", Num, "synth only: seconds for that filter jump to fall back"),
+            p("unison", Int, "synth only: 1-5 stacked detuned voices (wider, fatter)"),
+            p("detune", Num, "synth only: unison spread in cents, e.g. 20"),
+            p("sub", Num, "synth only: 0-1 sine one octave below"),
+            p("noise", Num, "synth only: 0-1 noise mixed in (breath, air)"),
+            p("fm", Num, "synth only: 0-10 FM amount for sine/triangle (electric piano, bells)"),
+            p("fm_ratio", Num, "synth only: FM modulator ratio; 1 warm, 2 hollow, 3.5 metallic"),
+            p("fm_decay", Num, "synth only: seconds the FM tone takes to fade (0 = never)"),
+            p("vibrato", Num, "synth only: pitch wobble depth in cents, e.g. 15"),
+            p("vibrato_rate", Num, "synth only: vibrato speed in Hz (default 5)"),
+            p("pitch_env", Num, "synth only: semitones above the note each note starts at, sliding down"),
+            p("pitch_decay", Num, "synth only: seconds for that pitch slide"),
+            p("drive", Num, "synth only: 0-1 saturation / distortion"),
         ],
     },
     Tool {
@@ -407,7 +437,12 @@ fn param_schema(p: &Param) -> Value {
                     "tom_mid": lane("same format"),
                     "tom_high": lane("same format"),
                     "crash": lane("e.g. \"x...............\""),
-                    "ride": lane("same format")
+                    "ride": lane("same format"),
+                    "rim": lane("same format"),
+                    "cowbell": lane("same format"),
+                    "tambourine": lane("same format"),
+                    "shaker": lane("e.g. \"xxxxxxxxxxxxxxxx\""),
+                    "conga_high": lane("same format; also conga_low, bongo_high, bongo_low, claves, triangle")
                 }
             })
         }

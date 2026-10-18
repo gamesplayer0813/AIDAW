@@ -292,6 +292,28 @@ pub const DRUMS: &[(&str, u8)] = &[
     ("tom_high", 48),
     ("crash", 49),
     ("ride", 51),
+    ("rim", 37),
+    ("china", 52),
+    ("ride_bell", 53),
+    ("tambourine", 54),
+    ("splash", 55),
+    ("cowbell", 56),
+    ("bongo_high", 60),
+    ("bongo_low", 61),
+    ("conga_mute", 62),
+    ("conga_high", 63),
+    ("conga_low", 64),
+    ("timbale_high", 65),
+    ("timbale_low", 66),
+    ("agogo_high", 67),
+    ("agogo_low", 68),
+    ("cabasa", 69),
+    ("shaker", 70),
+    ("claves", 75),
+    ("block_high", 76),
+    ("block_low", 77),
+    ("triangle_mute", 80),
+    ("triangle", 81),
 ];
 
 /// Resolve a drum name (`"kick"`, `"Hi-Hat"`, `"open hat"`, `"bd"`) or a MIDI
@@ -313,6 +335,28 @@ pub fn drum_note(name: &str) -> Option<u8> {
         "tomhigh" | "hightom" | "hitom" | "ht" => 48,
         "crash" | "cymbal" | "cr" => 49,
         "ride" | "rd" => 51,
+        "rim" | "rimshot" | "sidestick" | "stick" | "rs" => 37,
+        "china" => 52,
+        "ridebell" | "bell" | "cymbalbell" => 53,
+        "tambourine" | "tamb" | "tambo" => 54,
+        "splash" => 55,
+        "cowbell" | "cb" => 56,
+        "bongo" | "bongohigh" | "highbongo" | "hibongo" => 60,
+        "bongolow" | "lowbongo" => 61,
+        "congamute" | "mutecongo" | "muteconga" | "slap" => 62,
+        "conga" | "congahigh" | "highconga" | "openconga" => 63,
+        "congalow" | "lowconga" | "tumba" => 64,
+        "timbale" | "timbales" | "timbalehigh" | "hightimbale" => 65,
+        "timbalelow" | "lowtimbale" => 66,
+        "agogo" | "agogohigh" | "highagogo" => 67,
+        "agogolow" | "lowagogo" => 68,
+        "cabasa" => 69,
+        "shaker" | "maracas" | "maraca" | "shake" | "sh" => 70,
+        "claves" | "clave" => 75,
+        "block" | "woodblock" | "blockhigh" | "highblock" => 76,
+        "blocklow" | "lowblock" => 77,
+        "trianglemute" | "mutetriangle" => 80,
+        "triangle" | "opentriangle" => 81,
         _ => return pitch::parse(name),
     };
     Some(gm)
@@ -587,7 +631,9 @@ mod tests {
         assert_eq!(drum_note("open hat"), Some(46));
         assert_eq!(drum_note("BD"), Some(36));
         assert_eq!(drum_note("37"), Some(37));
-        assert_eq!(drum_note("cowbell"), None);
+        assert_eq!(drum_note("cowbell"), Some(56));
+        assert_eq!(drum_note("Shaker"), Some(70));
+        assert_eq!(drum_note("bloop"), None);
         let lanes = vec![
             ("kick".to_string(), "x...x...x...x...".to_string()),
             ("hat".to_string(), "x.".to_string()),
@@ -599,7 +645,7 @@ mod tests {
         let snares: Vec<_> = notes.iter().filter(|n| n.pitch == 38).collect();
         assert_eq!((snares[0].start, snares[0].velocity), (1.0, 127));
         assert_eq!(snares[1].velocity, 50);
-        let bad = vec![("cowbell".to_string(), "x".to_string())];
+        let bad = vec![("kazoo".to_string(), "x".to_string())];
         let err = drum_pattern_to_notes(&bad, 16, 0.25, 100)
             .unwrap_err()
             .to_string();
