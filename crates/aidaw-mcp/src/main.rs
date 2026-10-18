@@ -46,6 +46,8 @@ fn main() -> ExitCode {
 
 fn run() -> Result<ExitCode> {
     let mut project = std::env::var_os("AIDAW_PROJECT").map(PathBuf::from);
+    // Resolved to an absolute path below: MCP clients start us with an
+    // arbitrary working directory, and we may be asked for it later.
     let mut format = None;
     let mut positional = Vec::new();
     let mut args = std::env::args().skip(1);
@@ -64,6 +66,7 @@ fn run() -> Result<ExitCode> {
             _ => positional.push(a),
         }
     }
+    let project = project.map(|p| std::path::absolute(&p).unwrap_or(p));
     let mut positional = positional.into_iter();
     match positional.next().as_deref() {
         None | Some("serve") => {

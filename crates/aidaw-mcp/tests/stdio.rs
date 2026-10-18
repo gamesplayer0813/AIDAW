@@ -565,3 +565,90 @@ fn bad_inputs_are_rejected_clearly_and_never_kill_the_server() {
     drop(c);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn paths_are_relative_to_the_project_and_only_project_and_wav_files_are_written() {
+    let dir = temp_dir("paths");
+    let path = dir.join("song.aidaw.json");
+    let mut c = Client::start();
+
+    // Only *.aidaw.json may be created; a bare name or .json is completed.
+    let out = c.call(
+        "new_project",
+        json!({"path": dir.join("draft"), "overwrite": true}),
+    );
+    assert!(out.contains("draft.aidaw.json"), "{out}");
+    let out = c.call(
+        "new_project",
+        json!({"path": dir.join("other.json"), "overwrite": true}),
+    );
+    assert!(out.contains("other.aidaw.json"), "{out}");
+    std::fs::write(dir.join("notes.txt"), "precious").unwrap();
+    let e = c.call_err(
+        "new_project",
+        json!({"path": dir.join("notes.txt"), "overwrite": true}),
+    );
+    assert!(e.contains("aidaw.json"), "{e}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("notes.txt")).unwrap(),
+        "precious"
+    );
+
+    c.call("new_project", json!({"path": path, "overwrite": true}));
+    c.call("add_melody", json!({"track": "Lead", "notes": "C4/1"}));
+
+    // Relative paths land next to the project, not in the server's cwd.
+    let out = c.call("render_wav", json!({"output_path": "mix"}));
+    assert!(
+        out.contains(&dir.join("mix.wav").display().to_string()),
+        "{out}"
+    );
+    assert!(dir.join("mix.wav").exists());
+    let out = c.call("new_project", json!({"path": "second", "overwrite": true}));
+    assert!(dir.join("second.aidaw.json").exists(), "{out}");
+    assert!(c
+        .call("open_project", json!({"path": "song.aidaw.json"}))
+        .contains("Lead"));
+    let e = c.call_err("open_project", json!({"path": "nope.aidaw.json"}));
+    assert!(e.contains("does not exist"), "{e}");
+
+    // render_wav never overwrites a non-WAV file.
+    let e = c.call_err("render_wav", json!({"output_path": dir.join("notes.txt")}));
+    assert!(e.contains(".wav"), "{e}");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("notes.txt")).unwrap(),
+        "precious"
+    );
+
+    drop(c);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn edits_made_by_the_gui_between_calls_are_kept() {
+    let dir = temp_dir("concurrent");
+    let path = dir.join("song.aidaw.json");
+    let mut c = Client::start();
+    c.call("new_project", json!({"path": path, "overwrite": true}));
+    c.call("add_track", json!({"name": "Keys"}));
+
+    // The human renames the song in the GUI (an external write)...
+    let mut p = load(&path);
+    p.name = "Renamed by human".into();
+    aidaw_core::io::save(&p, &path).unwrap();
+    // ...and the AI's next edit builds on that version.
+    c.call("add_melody", json!({"track": "Keys", "notes": "C4/1"}));
+    let p = load(&path);
+    assert_eq!(p.name, "Renamed by human");
+    assert_eq!(p.tracks[0].clips.len(), 1);
+    // No temp files are left behind.
+    let leftovers: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+
+    drop(c);
+    std::fs::remove_dir_all(&dir).ok();
+}

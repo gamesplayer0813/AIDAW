@@ -49,6 +49,13 @@ mistakes:
 Every error says what went wrong, lists the valid values (existing tracks, presets, drum names)
 and shows an example call, so the model can fix the call and try again.
 
+Paths: a relative `path` or `output_path` is taken relative to the open project's folder (or the
+user's Music folder when no project is open), never the server's working directory, and results
+report the absolute path. The server only ever writes `*.aidaw.json` project files and `*.wav`
+renders; `new_project` completes `"song"` to `song.aidaw.json`, and asking it to overwrite any other
+kind of file is refused. If the human saves the project in the AIDAW app while a tool call is
+running, the call is replayed on the fresh file instead of overwriting their change.
+
 ## 1. MCP clients
 
 Build it (`cargo build --release`) and point your client at the binary. Adding
