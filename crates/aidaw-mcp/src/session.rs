@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 
 use aidaw_core::edit::{self, Op};
 use aidaw_core::music::{self, ChordStyle};
-use aidaw_core::{io as pio, pitch, presets, render, Instrument, Note, Project, Waveform};
+use aidaw_core::{
+    io as pio, pitch, presets, render, DrumKit, Instrument, Note, Project, Synth, Waveform,
+};
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Map, Value};
 
@@ -40,6 +42,21 @@ const NUMERIC_KEYS: &[&str] = &[
     "sustain",
     "release",
     "cutoff",
+    "resonance",
+    "filter_env",
+    "filter_decay",
+    "unison",
+    "detune",
+    "sub",
+    "noise",
+    "fm",
+    "fm_ratio",
+    "fm_decay",
+    "vibrato",
+    "vibrato_rate",
+    "pitch_env",
+    "pitch_decay",
+    "drive",
 ];
 const BOOL_KEYS: &[&str] = &["mute", "solo", "overwrite"];
 /// Accepted everywhere although not advertised in the schemas.
@@ -52,7 +69,27 @@ const HIDDEN_KEYS: &[&str] = &[
     "op",
 ];
 const SYNTH_KEYS: &[&str] = &[
-    "waveform", "attack", "decay", "sustain", "release", "cutoff",
+    "waveform",
+    "attack",
+    "decay",
+    "sustain",
+    "release",
+    "cutoff",
+    "resonance",
+    "filter_env",
+    "filter_decay",
+    "unison",
+    "detune",
+    "sub",
+    "noise",
+    "fm",
+    "fm_ratio",
+    "fm_decay",
+    "vibrato",
+    "vibrato_rate",
+    "pitch_env",
+    "pitch_decay",
+    "drive",
 ];
 
 pub struct Session {
@@ -106,7 +143,7 @@ impl Session {
     fn run(&mut self, tool: &Tool, mut args: Args) -> Result<String> {
         match tool.name {
             "help" => Ok(tools::GUIDE.to_string()),
-            "list_presets" => Ok(list_presets()),
+            "list_presets" => list_presets(&args),
             "new_project" => {
                 let path = self.project_path_arg(str_arg(&args, "path")?)?;
                 if path.exists() && args.get("overwrite").and_then(Value::as_bool) != Some(true) {
@@ -912,7 +949,7 @@ fn unknown_keys(tool: &Tool, args: &Args) -> Vec<String> {
     for k in args.keys() {
         let known = tool.params.iter().any(|p| p.name == k.as_str())
             || HIDDEN_KEYS.contains(&k.as_str())
-            || (tool.name == "add_track" && SYNTH_KEYS.contains(&k.as_str()))
+            || (tool.name == "add_track" && (SYNTH_KEYS.contains(&k.as_str()) || k == "kit"))
             || (tool.name == "add_drum_pattern" && music::drum_note(k).is_some())
             || (tool.name == "add_melody" && k == "melody")
             || (tool.name.starts_with("add_") && k == "instrument")
@@ -1248,29 +1285,39 @@ fn note_end(notes: Option<&Value>) -> f64 {
 
 fn preset_ids() -> String {
     presets::all()
-        .into_iter()
+        .iter()
         .map(|p| p.id)
         .collect::<Vec<_>>()
         .join(", ")
 }
 
-/// Turn the `instrument` argument (preset name, waveform name or object) and
-/// any flat synth settings into an [`Instrument`] JSON object.
+fn kit_names() -> String {
+    DrumKit::ALL
+        .iter()
+        .map(|k| k.label())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Turn the `instrument` argument (preset name, waveform name or object),
+/// a drum `kit` and any flat synth settings into an [`Instrument`] JSON object.
 fn resolve_instrument(args: &mut Args, existing: Option<Instrument>) -> Result<()> {
     let bad = |what: &str| {
         anyhow!(
-            "unknown instrument {what}. Use a preset id: {} (or a plain waveform: sine, triangle, saw, square)",
+            "unknown instrument {what}. Use a preset id: {} (or a plain waveform: sine, triangle, saw, square, pulse, noise)",
             preset_ids()
         )
     };
     let from_name = |s: &str| -> Result<Instrument> {
         if let Some(p) = presets::find(s) {
-            return Ok(p.instrument);
+            return Ok(p.instrument.clone());
         }
         let wave = match norm(s).as_str() {
             "saw" | "sawtooth" | "synth" => Waveform::Saw,
             "square" => Waveform::Square,
             "triangle" | "tri" => Waveform::Triangle,
+            "pulse" => Waveform::Pulse,
+            "noise" => Waveform::Noise,
             _ => return Err(bad(&format!("{s:?}"))),
         };
         Ok(with_waveform(Instrument::default_synth(), wave))
@@ -1294,14 +1341,31 @@ fn resolve_instrument(args: &mut Args, existing: Option<Instrument>) -> Result<(
         }
         Some(other) => return Err(bad(&other.to_string())),
     };
+    if let Some(k) = args.remove("kit") {
+        let name = k.as_str().map(norm).unwrap_or_else(|| k.to_string());
+        let kit = DrumKit::ALL
+            .into_iter()
+            .find(|d| norm(d.label()) == name || format!("tr{}", d.label()) == name)
+            .ok_or_else(|| anyhow!("unknown drum kit {k}; kits: {}", kit_names()))?;
+        let base = inst.as_ref().or(existing.as_ref());
+        if base.is_some_and(|b| !b.is_drums()) && inst.is_some() {
+            bail!(
+                "\"kit\" is for drum tracks, but the instrument given is a synth; drop one of them"
+            );
+        }
+        if existing.as_ref().is_some_and(|b| !b.is_drums()) && inst.is_none() {
+            bail!("this track plays a synth, so it has no drum kit; set \"instrument\": \"drums_{}\" to turn it into drums", kit.label());
+        }
+        inst = Some(Instrument::Drums { kit });
+    }
     if SYNTH_KEYS.iter().any(|k| args.contains_key(*k)) {
         let base = inst
             .take()
             .or(existing)
             .unwrap_or_else(Instrument::default_synth);
-        let mut v = serde_json::to_value(&base)?;
-        if base.is_drums() {
-            bail!("drum kits have no synth settings (waveform, attack, ...); change the instrument to a synth preset first");
+        let mut v = serde_json::to_value(base)?;
+        if v.get("type").and_then(Value::as_str) == Some("drums") {
+            bail!("drum kits have no synth settings (waveform, attack, ...); pick another kit with \"kit\" ({}) or change the instrument to a synth preset first", kit_names());
         }
         for k in SYNTH_KEYS {
             if let Some(x) = args.remove(*k) {
@@ -1310,7 +1374,7 @@ fn resolve_instrument(args: &mut Args, existing: Option<Instrument>) -> Result<(
         }
         inst = Some(
             serde_json::from_value(v)
-                .map_err(|e| anyhow!("invalid synth setting: {e}; waveform is sine|triangle|saw|square, times in seconds"))?,
+                .map_err(|e| anyhow!("invalid synth setting: {e}; waveform is sine|triangle|saw|square|pulse|noise, times in seconds, unison 1-5"))?,
         );
     }
     if let Some(inst) = inst {
@@ -1321,53 +1385,68 @@ fn resolve_instrument(args: &mut Args, existing: Option<Instrument>) -> Result<(
 
 fn with_waveform(inst: Instrument, wave: Waveform) -> Instrument {
     match inst {
-        Instrument::Synth {
-            attack,
-            decay,
-            sustain,
-            release,
-            cutoff,
-            ..
-        } => Instrument::Synth {
+        Instrument::Synth(s) => Instrument::Synth(Synth {
             waveform: wave,
-            attack,
-            decay,
-            sustain,
-            release,
-            cutoff,
-        },
+            ..s
+        }),
         other => other,
     }
 }
 
 fn instrument_label(inst: &Instrument) -> String {
-    if let Some(p) = presets::all().into_iter().find(|p| &p.instrument == inst) {
+    if let Some(p) = presets::of(inst) {
         return p.id.to_string();
     }
     match inst {
-        Instrument::Drums => "drums".into(),
-        Instrument::Synth { waveform, .. } => format!("custom {} synth", waveform.label()),
+        Instrument::Drums { kit } => format!("drums ({} kit)", kit.label()),
+        Instrument::Synth(s) => format!("custom {} synth", s.waveform.label()),
     }
 }
 
 // ---------------------------------------------------------------------------
 // Output
 
-fn list_presets() -> String {
-    let mut s = String::from("Instrument presets (pass the id as \"instrument\"):\n");
-    for p in presets::all() {
-        s.push_str(&format!(
-            "- {} ({}): {}\n",
-            p.id,
-            presets::plain_name(p.name),
-            p.hint
-        ));
+fn list_presets(args: &Args) -> Result<String> {
+    let wanted = match args.get("category") {
+        Some(Value::String(c)) => {
+            let c = norm(c);
+            let found = presets::Category::ALL
+                .into_iter()
+                .find(|x| norm(x.id()) == c || norm(presets::plain_name(x.label())) == c)
+                .ok_or_else(|| {
+                    let all: Vec<_> = presets::Category::ALL.iter().map(|c| c.id()).collect();
+                    anyhow!("unknown category {c:?}; categories: {}", all.join(", "))
+                })?;
+            Some(found)
+        }
+        _ => None,
+    };
+    let mut s = format!(
+        "{} instrument presets (pass the id as \"instrument\"):\n",
+        presets::all().len()
+    );
+    for c in presets::Category::ALL {
+        if wanted.is_some_and(|w| w != c) {
+            continue;
+        }
+        s.push_str(&format!("\n[{}]\n", c.id()));
+        for p in presets::Preset::in_category(c) {
+            s.push_str(&format!(
+                "- {} ({}): {}\n",
+                p.id,
+                presets::plain_name(p.name),
+                p.hint
+            ));
+        }
     }
     s.push_str(
-        "Also accepted: plain waveforms sine, triangle, saw, square. Fine-tune a synth with update_track \
-         (waveform, attack, decay, sustain, release, cutoff).\nExample: add_track {\"name\": \"Bass\", \"instrument\": \"bass\"}",
+        "\nAlso accepted: plain waveforms sine, triangle, saw, square, pulse, noise, and loose names like \
+         \"rhodes\", \"violin\", \"808\". Fine-tune a synth with update_track (waveform, attack, decay, sustain, \
+         release, cutoff, resonance, filter_env, unison, detune, sub, noise, fm, vibrato, pitch_env, drive...). \
+         Drum tracks: update_track {\"kit\": \"808\"}; drums also include percussion lanes such as cowbell, \
+         tambourine, shaker, conga_high, bongo_high, claves, triangle.\nExample: add_track {\"name\": \"Bass\", \"instrument\": \"bass_808\"}",
     );
-    s
+    Ok(s)
 }
 
 fn default_wav_path(project: &Path) -> PathBuf {

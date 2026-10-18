@@ -50,14 +50,20 @@ pub enum Waveform {
     #[default]
     Saw,
     Square,
+    /// Narrow (25%) pulse: thinner and more nasal than a square.
+    Pulse,
+    /// White noise: wind, breath, hiss and risers.
+    Noise,
 }
 
 impl Waveform {
-    pub const ALL: [Waveform; 4] = [
+    pub const ALL: [Waveform; 6] = [
         Waveform::Sine,
         Waveform::Triangle,
         Waveform::Saw,
         Waveform::Square,
+        Waveform::Pulse,
+        Waveform::Noise,
     ];
 
     pub fn label(self) -> &'static str {
@@ -66,50 +72,187 @@ impl Waveform {
             Waveform::Triangle => "triangle",
             Waveform::Saw => "saw",
             Waveform::Square => "square",
+            Waveform::Pulse => "pulse",
+            Waveform::Noise => "noise",
         }
+    }
+}
+
+/// Settings of the built-in synth. Only `waveform` and the envelope/cutoff
+/// are needed; every other knob defaults to "off" and is left out of the
+/// JSON when unused, so older project files load and save unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Synth {
+    #[serde(default)]
+    pub waveform: Waveform,
+    /// Envelope times in seconds, sustain level 0..1.
+    #[serde(default = "d_attack")]
+    pub attack: f32,
+    #[serde(default = "d_decay")]
+    pub decay: f32,
+    #[serde(default = "d_sustain")]
+    pub sustain: f32,
+    #[serde(default = "d_release")]
+    pub release: f32,
+    /// Low-pass cutoff in Hz.
+    #[serde(default = "d_cutoff")]
+    pub cutoff: f32,
+    /// Filter resonance 0..1: a whistling peak at the cutoff.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub resonance: f32,
+    /// How far the cutoff jumps up at the start of a note, in octaves
+    /// (0..8). It falls back over `filter_decay` seconds: the "wow" of
+    /// plucks, basses and brass.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub filter_env: f32,
+    #[serde(default = "d_filter_decay", skip_serializing_if = "is_filter_decay")]
+    pub filter_decay: f32,
+    /// Number of stacked, detuned copies of the oscillator (1..5).
+    /// Unset: saws use 2, other waves 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unison: Option<u8>,
+    /// Total spread of the unison copies in cents (unset: 7 for the classic
+    /// two-saw stack, else 14).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detune: Option<f32>,
+    /// Level 0..1 of a sine one octave below: weight for basses.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub sub: f32,
+    /// Level 0..1 of white noise mixed in: breath, hiss, grit.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub noise: f32,
+    /// FM amount (0..10) for the sine and triangle waves: electric pianos,
+    /// bells, mallets. Fades over `fm_decay` seconds (0 = never).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub fm: f32,
+    /// Modulator frequency as a multiple of the note (1 = warm, 2 = hollow,
+    /// 3.5 = metallic bell).
+    #[serde(default = "d_one", skip_serializing_if = "is_one")]
+    pub fm_ratio: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub fm_decay: f32,
+    /// Vibrato depth in cents (fades in over the first half second).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub vibrato: f32,
+    #[serde(default = "d_vibrato_rate", skip_serializing_if = "is_vibrato_rate")]
+    pub vibrato_rate: f32,
+    /// Pitch at the start of a note, in semitones above the played note,
+    /// gliding down over `pitch_decay` seconds (808 basses, zaps, toms).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub pitch_env: f32,
+    #[serde(default = "d_pitch_decay", skip_serializing_if = "is_pitch_decay")]
+    pub pitch_decay: f32,
+    /// Saturation 0..1: warmth at low values, distortion at high ones.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub drive: f32,
+}
+
+impl Default for Synth {
+    fn default() -> Self {
+        Synth::BASE
+    }
+}
+
+impl Synth {
+    /// The plain default synth; presets start from this.
+    pub const BASE: Synth = Synth {
+        waveform: Waveform::Saw,
+        attack: 0.005,
+        decay: 0.2,
+        sustain: 0.7,
+        release: 0.25,
+        cutoff: 6000.0,
+        resonance: 0.0,
+        filter_env: 0.0,
+        filter_decay: 0.3,
+        unison: None,
+        detune: None,
+        sub: 0.0,
+        noise: 0.0,
+        fm: 0.0,
+        fm_ratio: 1.0,
+        fm_decay: 0.0,
+        vibrato: 0.0,
+        vibrato_rate: 5.0,
+        pitch_env: 0.0,
+        pitch_decay: 0.05,
+        drive: 0.0,
+    };
+}
+
+/// Which synthesised drum kit a drum track plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DrumKit {
+    /// The original all-round electronic kit.
+    #[default]
+    Standard,
+    /// Roland TR-808 style: boomy kick, snappy snare, sizzling hats.
+    #[serde(rename = "808")]
+    Tr808,
+    /// TR-909 style: punchy house/techno kick, bright noisy snare.
+    #[serde(rename = "909")]
+    Tr909,
+    /// Natural sounding drum set: woody kick, ringing toms.
+    Acoustic,
+    /// Dusty, dark and crunchy, for lo-fi hip-hop.
+    Lofi,
+    /// Long sub kick, tight snare, crisp hats.
+    Trap,
+    /// Hard, gritty and distorted.
+    Electro,
+}
+
+impl DrumKit {
+    pub const ALL: [DrumKit; 7] = [
+        DrumKit::Standard,
+        DrumKit::Tr808,
+        DrumKit::Tr909,
+        DrumKit::Acoustic,
+        DrumKit::Lofi,
+        DrumKit::Trap,
+        DrumKit::Electro,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DrumKit::Standard => "standard",
+            DrumKit::Tr808 => "808",
+            DrumKit::Tr909 => "909",
+            DrumKit::Acoustic => "acoustic",
+            DrumKit::Lofi => "lofi",
+            DrumKit::Trap => "trap",
+            DrumKit::Electro => "electro",
+        }
+    }
+
+    fn is_standard(&self) -> bool {
+        *self == DrumKit::Standard
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Instrument {
-    /// A simple polyphonic subtractive-style synth.
-    Synth {
-        #[serde(default)]
-        waveform: Waveform,
-        /// Envelope times in seconds, sustain level 0..1.
-        #[serde(default = "d_attack")]
-        attack: f32,
-        #[serde(default = "d_decay")]
-        decay: f32,
-        #[serde(default = "d_sustain")]
-        sustain: f32,
-        #[serde(default = "d_release")]
-        release: f32,
-        /// One-pole low-pass cutoff in Hz.
-        #[serde(default = "d_cutoff")]
-        cutoff: f32,
+    /// A polyphonic subtractive synth with optional FM, unison and sub.
+    Synth(Synth),
+    /// Synthesised drum kit using General MIDI note numbers (see
+    /// `music::DRUMS`): 36 kick, 38 snare, 39 clap, 42 closed hat, 46 open
+    /// hat, 41/45/48 toms, 49 crash, 51 ride, plus percussion such as 56
+    /// cowbell, 54 tambourine, 70 shaker and 60-64 bongos/congas.
+    Drums {
+        #[serde(default, skip_serializing_if = "DrumKit::is_standard")]
+        kit: DrumKit,
     },
-    /// Synthesised drum kit using General MIDI note numbers:
-    /// 36 kick, 38 snare, 39 clap, 42 closed hat, 46 open hat,
-    /// 41/45/48 toms, 49 crash.
-    Drums,
 }
 
 impl Instrument {
     pub fn default_synth() -> Self {
-        Instrument::Synth {
-            waveform: Waveform::Saw,
-            attack: d_attack(),
-            decay: d_decay(),
-            sustain: d_sustain(),
-            release: d_release(),
-            cutoff: d_cutoff(),
-        }
+        Instrument::Synth(Synth::BASE)
     }
 
     pub fn is_drums(&self) -> bool {
-        matches!(self, Instrument::Drums)
+        matches!(self, Instrument::Drums { .. })
     }
 }
 
@@ -267,4 +410,78 @@ fn d_cutoff() -> f32 {
 }
 fn d_velocity() -> u8 {
     100
+}
+fn d_filter_decay() -> f32 {
+    0.3
+}
+fn d_one() -> f32 {
+    1.0
+}
+fn d_vibrato_rate() -> f32 {
+    5.0
+}
+fn d_pitch_decay() -> f32 {
+    0.05
+}
+fn is_zero(x: &f32) -> bool {
+    *x == 0.0
+}
+fn is_one(x: &f32) -> bool {
+    *x == 1.0
+}
+fn is_filter_decay(x: &f32) -> bool {
+    *x == d_filter_decay()
+}
+fn is_vibrato_rate(x: &f32) -> bool {
+    *x == d_vibrato_rate()
+}
+fn is_pitch_decay(x: &f32) -> bool {
+    *x == d_pitch_decay()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_instrument_json_still_loads_and_saves_the_same() {
+        let synth = r#"{"type":"synth","waveform":"square","attack":0.003,"decay":0.15,"sustain":0.6,"release":0.08,"cutoff":900.0}"#;
+        let inst: Instrument = serde_json::from_str(synth).unwrap();
+        assert_eq!(serde_json::to_string(&inst).unwrap(), synth);
+        let drums: Instrument = serde_json::from_str(r#"{"type":"drums"}"#).unwrap();
+        assert_eq!(
+            drums,
+            Instrument::Drums {
+                kit: DrumKit::Standard
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&drums).unwrap(),
+            r#"{"type":"drums"}"#
+        );
+    }
+
+    #[test]
+    fn new_settings_round_trip() {
+        let json = r#"{"type":"synth","waveform":"pulse","fm":2.0,"fm_ratio":3.5,"unison":3,"detune":20.0}"#;
+        let inst: Instrument = serde_json::from_str(json).unwrap();
+        let Instrument::Synth(s) = &inst else {
+            panic!()
+        };
+        assert_eq!(
+            (s.waveform, s.fm, s.unison),
+            (Waveform::Pulse, 2.0, Some(3))
+        );
+        assert_eq!(s.attack, Synth::BASE.attack);
+        let back: Instrument =
+            serde_json::from_str(&serde_json::to_string(&inst).unwrap()).unwrap();
+        assert_eq!(back, inst);
+        let kit: Instrument = serde_json::from_str(r#"{"type":"drums","kit":"808"}"#).unwrap();
+        assert_eq!(
+            kit,
+            Instrument::Drums {
+                kit: DrumKit::Tr808
+            }
+        );
+    }
 }

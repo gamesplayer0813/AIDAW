@@ -652,3 +652,76 @@ fn edits_made_by_the_gui_between_calls_are_kept() {
     drop(c);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn big_sound_library_kits_and_synth_knobs() {
+    let dir = temp_dir("sounds");
+    let path = dir.join("song.aidaw.json");
+    let mut c = Client::start();
+    let all = c.call("list_presets", json!({}));
+    for id in [
+        "e_piano",
+        "bass_808",
+        "strings",
+        "supersaw",
+        "drums_808",
+        "riser",
+    ] {
+        assert!(all.contains(id), "{id} missing from list_presets");
+    }
+    let bass = c.call("list_presets", json!({"category": "bass"}));
+    assert!(
+        bass.contains("acid_bass") && !bass.contains("warm_pad"),
+        "{bass}"
+    );
+    assert!(c
+        .call_err("list_presets", json!({"category": "kazoo"}))
+        .contains("orchestra"));
+
+    c.call("new_project", json!({"path": path, "overwrite": true}));
+    // Loose names find presets; track names do too.
+    assert!(c
+        .call("add_track", json!({"name": "Keys", "instrument": "rhodes"}))
+        .contains("e_piano"));
+    assert!(c
+        .call("add_track", json!({"name": "Violins"}))
+        .contains("strings"));
+    c.call(
+        "add_track",
+        json!({"name": "Beat", "instrument": "drums", "kit": "808"}),
+    );
+    c.call(
+        "add_drum_pattern",
+        json!({"track": "Beat", "pattern": {"kick": "x...", "cowbell": "..x.", "shaker": "xxxx", "conga_high": "x..."}}),
+    );
+    c.call("update_track", json!({"track": "Beat", "kit": "lofi"}));
+    assert!(c
+        .call_err("update_track", json!({"track": "Keys", "kit": "808"}))
+        .contains("drums_808"));
+    c.call(
+        "update_track",
+        json!({"track": "Keys", "fm": 3, "unison": "3", "detune": 20, "waveform": "pulse"}),
+    );
+
+    let p = load(&path);
+    assert_eq!(
+        p.tracks[2].instrument,
+        aidaw_core::Instrument::Drums {
+            kit: aidaw_core::DrumKit::Lofi
+        }
+    );
+    let notes = &p.tracks[2].clips[0].notes;
+    for pitch in [36, 56, 70, 63] {
+        assert!(notes.iter().any(|n| n.pitch == pitch), "{pitch} missing");
+    }
+    let aidaw_core::Instrument::Synth(s) = &p.tracks[0].instrument else {
+        panic!("keys should be a synth");
+    };
+    assert_eq!(
+        (s.waveform, s.fm, s.unison, s.detune),
+        (aidaw_core::Waveform::Pulse, 3.0, Some(3), Some(20.0))
+    );
+    // FM decay came from the e_piano preset and was kept.
+    assert!(s.fm_decay > 0.0);
+    assert!(c.call("get_project", json!({})).contains("drums_lofi"));
+}

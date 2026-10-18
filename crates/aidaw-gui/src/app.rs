@@ -94,17 +94,18 @@ pub struct App {
 /// each with one empty 4-bar clip.
 fn starter_project() -> Project {
     let mut p = Project::new("My Song", 110.0);
-    let [keys, .., drums] = presets::all();
+    let keys = presets::find("soft_keys").expect("preset");
+    let drums = presets::find("drum_kit").expect("preset");
     let ops = vec![
         Op::AddTrack {
             name: "Piano".into(),
-            instrument: Some(keys.instrument),
+            instrument: Some(keys.instrument.clone()),
             gain: None,
             pan: None,
         },
         Op::AddTrack {
             name: "Drums".into(),
-            instrument: Some(drums.instrument),
+            instrument: Some(drums.instrument.clone()),
             gain: None,
             pan: None,
         },

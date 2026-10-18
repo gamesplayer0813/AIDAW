@@ -9,7 +9,7 @@ pub mod pitch;
 pub mod presets;
 pub mod render;
 
-pub use model::{Clip, Instrument, Note, Project, Track, Waveform};
+pub use model::{Clip, DrumKit, Instrument, Note, Project, Synth, Track, Waveform};
 
 #[cfg(test)]
 mod tests {

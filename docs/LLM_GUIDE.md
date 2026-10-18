@@ -21,7 +21,7 @@ All three expose the same tools with the same arguments.
 | `help` | Cheat sheet: time, pitch, notations, and a complete quick-start song |
 | `new_project` / `open_project` | Create or open a project file |
 | `get_project` | Overview of tracks and clips; `detail: "notes"` lists every note, `"json"` gives the raw file |
-| `list_presets` | Instrument presets: `soft_keys`, `bass`, `warm_pad`, `bright_lead`, `pluck`, `bell`, `chiptune`, `pure_tone`, `drum_kit` |
+| `list_presets` | The 77 instrument presets, grouped by category (see [Sounds](#sounds)); `{"category": "bass"}` lists one group |
 | `add_chords` | Chord symbols, e.g. `"Am F C G"`, one per bar. Styles: block, arpeggio, pulse |
 | `add_drum_pattern` | Step strings, e.g. `{"kick": "x...x...x...x...", "snare": "....x.......x..."}` |
 | `add_melody` | Compact text, e.g. `"C4/1 D4/0.5 E4/0.5 r/1 G4/2"` (pitch/beats, `r` = rest) |
@@ -42,7 +42,8 @@ mistakes:
 
 - tracks and clips can be named by name or id
 - numbers can be sent as strings
-- an instrument can be a preset name (`"Warm Pad"`, `"piano"`, `"drums"`)
+- an instrument can be a preset name or a loose word (`"Warm Pad"`, `"piano"`, `"rhodes"`,
+  `"violin"`, `"808"`, `"drums"`)
 - positions can be given in bars
 - notes can be a melody string
 
@@ -55,6 +56,50 @@ report the absolute path. The server only ever writes `*.aidaw.json` project fil
 renders; `new_project` completes `"song"` to `song.aidaw.json`, and asking it to overwrite any other
 kind of file is refused. If the human saves the project in the AIDAW app while a tool call is
 running, the call is replayed on the fresh file instead of overwriting their change.
+
+## Sounds
+
+`list_presets` prints every preset with a one-line hint. Pass the id as `instrument`.
+
+| Group | Presets |
+|---|---|
+| keys | `soft_keys`, `bright_piano`, `e_piano`, `wurly`, `organ`, `church_organ`, `clavinet`, `harpsichord`, `lofi_keys` |
+| bass | `bass`, `sub_bass`, `bass_808`, `synth_bass`, `acid_bass`, `reese_bass`, `pluck_bass`, `finger_bass`, `growl_bass` |
+| lead | `bright_lead`, `supersaw`, `analog_lead`, `square_lead`, `pulse_lead`, `soft_lead`, `hard_lead`, `pure_tone` |
+| pad | `warm_pad`, `lush_pad`, `glass_pad`, `dark_pad`, `choir`, `airy_pad`, `sweep_pad` |
+| pluck | `pluck`, `synth_pluck`, `nylon_guitar`, `clean_guitar`, `rock_guitar`, `harp`, `koto` |
+| bells | `bell`, `music_box`, `marimba`, `xylophone`, `vibraphone`, `glockenspiel`, `kalimba`, `tubular_bells`, `steel_drum` |
+| orchestra | `strings`, `cello`, `pizzicato`, `brass`, `trumpet`, `french_horn`, `saxophone`, `flute`, `pan_flute`, `clarinet`, `oboe` |
+| retro | `chiptune`, `chip_pulse`, `chip_bass`, `game_lead`, `retro_synth` |
+| fx | `riser`, `zap`, `boom`, `wind`, `theremin`, `magic` |
+| drums | `drum_kit`, `drums_808`, `drums_909`, `drums_acoustic`, `drums_lofi`, `drums_trap`, `drums_electro` |
+
+**Drum kits.** Every kit plays the same drum names, so a pattern works on any kit. Switch kit
+with `update_track {"track": "Drums", "kit": "909"}` (`standard`, `808`, `909`, `acoustic`,
+`lofi`, `trap`, `electro`). Besides the drum set, every kit has percussion: `rim`, `ride_bell`,
+`tambourine`, `splash`, `cowbell`, `bongo_high`, `bongo_low`, `conga_mute`, `conga_high`,
+`conga_low`, `timbale_high`, `timbale_low`, `agogo_high`, `agogo_low`, `shaker`, `claves`,
+`block_high`, `block_low`, `triangle`.
+
+**Shaping a synth.** `update_track` (and `add_track`) take these on any synth track; anything
+left out keeps its value:
+
+| Setting | Range | What it does |
+|---|---|---|
+| `waveform` | `sine`, `triangle`, `saw`, `square`, `pulse`, `noise` | Basic tone |
+| `attack`, `decay`, `sustain`, `release` | seconds, sustain 0-1 | Volume envelope |
+| `cutoff` | 40-20000 Hz | Brightness (low-pass filter) |
+| `resonance` | 0-1 | Whistling peak at the cutoff (acid, wah) |
+| `filter_env`, `filter_decay` | 0-8 octaves, seconds | Each note starts brighter and closes (plucks, brass) |
+| `unison`, `detune` | 1-5 voices, cents | Stacked detuned copies: wider and fatter |
+| `sub` | 0-1 | Sine one octave below |
+| `noise` | 0-1 | Breath, air, hiss |
+| `fm`, `fm_ratio`, `fm_decay` | 0-10, ratio, seconds | FM tone for sine/triangle: electric piano (ratio 1), bells (3.5) |
+| `vibrato`, `vibrato_rate` | cents, Hz | Pitch wobble that eases in |
+| `pitch_env`, `pitch_decay` | semitones, seconds | Notes start higher and slide down (808 bass, zaps); negative slides up |
+| `drive` | 0-1 | Warmth to distortion |
+
+Example: `update_track {"track": "Lead", "instrument": "analog_lead", "resonance": 0.7, "vibrato": 25}`.
 
 ## 1. MCP clients
 
@@ -158,6 +203,7 @@ On Windows `cmd.exe`, write JSON with escaped double quotes (`"{\"track\": \"Bas
 - **Pitch** is written as a note name with an octave. `C4` is middle C (MIDI 60). Bass sits
   around `C2`, chords around `C4`, melodies between `C4` and `C6`.
 - **Drums** are written by name: `kick`, `snare`, `clap`, `hat`, `open_hat`, `tom_low`,
-  `tom_mid`, `tom_high`, `crash`, `ride`. Each pattern has 16 steps per bar.
+  `tom_mid`, `tom_high`, `crash`, `ride`, plus percussion such as `cowbell`, `shaker`,
+  `tambourine` and `conga_high`. Each pattern has 16 steps per bar.
 - **Chords** are written as symbols: `C Am F#m Bb G7 Cmaj7 Dm7 Bm7b5 Esus4 Cdim Caug C/E`.
   `C6/9 C9 C13 G7b9 Dm11 Cmaj7#11` also work. `Am:2` lasts 2 beats.
