@@ -4,7 +4,9 @@
 pub mod edit;
 pub mod io;
 pub mod model;
+pub mod music;
 pub mod pitch;
+pub mod presets;
 pub mod render;
 
 pub use model::{Clip, Instrument, Note, Project, Track, Waveform};

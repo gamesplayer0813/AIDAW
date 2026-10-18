@@ -49,7 +49,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
     toolbar(ui, app, &clip_id, track_index);
     ui.separator();
 
-    let kh = app.roll_key_height;
+    // Easy mode uses taller rows so notes are easy to hit.
+    let kh = if app.pro() { app.roll_key_height } else { 18.0 };
     let bw = app.roll_zoom;
     let clip = app
         .project
@@ -118,7 +119,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 );
             }
         }
-        let snap = app.snap;
+        let snap = app.grid();
         let mut b = 0.0;
         let mut i = 0u32;
         while b <= view_beats {
@@ -357,7 +358,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     }
                     Some(Drag::ResizeNote { index }) => {
                         let end = app.snap_beat(beat);
-                        let snap = app.snap;
+                        let snap = app.grid();
                         if let Some(n) = app
                             .project
                             .clip_mut(&clip_id)
@@ -462,7 +463,7 @@ fn add_note(
     let duration = if app.last_note_length > 0.0 {
         app.last_note_length
     } else {
-        app.snap
+        app.grid()
     };
     let velocity = app
         .selected_note
@@ -495,6 +496,142 @@ fn remove_note(app: &mut App, clip_id: &str, index: usize) {
 }
 
 fn toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usize) {
+    if app.pro() {
+        pro_toolbar(ui, app, clip_id, track_index);
+    } else {
+        easy_toolbar(ui, app, clip_id, track_index);
+    }
+}
+
+/// Easy mode: plain words, octave moves only, three loudness buttons, and a
+/// "mood" instead of a key + scale (notes always stay in key).
+fn easy_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usize) {
+    let bpb = app.project.beats_per_bar.max(1) as f64;
+    let drums = app
+        .project
+        .tracks
+        .get(track_index)
+        .is_some_and(|t| t.instrument.is_drums());
+    ui.horizontal(|ui| {
+        ui.heading("Notes").on_hover_text(
+            "Each row is a piano key (low at the bottom, high at the top). Left to right is time.",
+        );
+        if let Some(c) = app.project.clip_mut(clip_id) {
+            ui.label("Part");
+            ui.add(
+                egui::TextEdit::singleline(&mut c.name)
+                    .hint_text(c.id.clone())
+                    .desired_width(110.0),
+            );
+            ui.label("Length")
+                .on_hover_text("How many bars this part lasts");
+            let mut bars = (c.length / bpb).max(1.0).round();
+            let unit = if bars == 1.0 { " bar" } else { " bars" };
+            if ui
+                .add(
+                    egui::DragValue::new(&mut bars)
+                        .range(1.0..=64.0)
+                        .speed(0.05)
+                        .fixed_decimals(0)
+                        .suffix(unit),
+                )
+                .changed()
+            {
+                c.length = bars * bpb;
+            }
+        }
+        ui.separator();
+        if !drums {
+            for (label, st, tip) in [
+                (
+                    "⬇ Lower",
+                    -12,
+                    "Play every note in this part one octave lower",
+                ),
+                (
+                    "⬆ Higher",
+                    12,
+                    "Play every note in this part one octave higher",
+                ),
+            ] {
+                if ui.button(label).on_hover_text(tip).clicked() {
+                    app.run_op(Op::TransposeClip {
+                        clip_id: clip_id.into(),
+                        semitones: st,
+                    });
+                }
+            }
+        }
+        if ui
+            .button("🗑 Clear")
+            .on_hover_text("Remove every note in this part (Ctrl+Z to undo)")
+            .clicked()
+        {
+            app.run_op(Op::RemoveNotes {
+                clip_id: clip_id.into(),
+                from: None,
+                to: None,
+                pitch: None,
+            });
+            app.selected_note = None;
+        }
+        let selected = app.selected_note;
+        if let Some(n) = selected.and_then(|i| {
+            app.project
+                .clip_mut(clip_id)
+                .and_then(|c| c.notes.get_mut(i))
+        }) {
+            ui.separator();
+            ui.label(format!("Note {}", pitch::name(n.pitch)));
+            for (label, v) in [("Soft", 50u8), ("Medium", 90), ("Loud", 120)] {
+                let on = match v {
+                    50 => n.velocity < 70,
+                    90 => (70..105).contains(&n.velocity),
+                    _ => n.velocity >= 105,
+                };
+                if ui
+                    .selectable_label(on, label)
+                    .on_hover_text("How hard this note is played")
+                    .clicked()
+                {
+                    n.velocity = v;
+                }
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        let key = ui.scope(|ui| {
+            ui.add_enabled_ui(!drums, |ui| {
+                ui.label("🎵 Mood").on_hover_text(
+                    "Pick a feeling. Lit-up rows fit the mood, and every note you draw lands on one of them, so it always sounds right.",
+                );
+                for (label, root, sc, tip) in [
+                    ("😊 Happy", 0u8, Scale::Major, "C major: bright and cheerful"),
+                    ("😢 Sad", 9, Scale::Minor, "A minor: dark and emotional"),
+                    (
+                        "👌 Can't go wrong",
+                        0,
+                        Scale::Pentatonic,
+                        "C pentatonic: almost anything you draw sounds nice",
+                    ),
+                    ("🎷 Bluesy", 9, Scale::Blues, "A blues: cool and gritty"),
+                ] {
+                    let on = app.scale == sc && app.scale_root == root;
+                    if ui.selectable_label(on, label).on_hover_text(tip).clicked() {
+                        app.scale = sc;
+                        app.scale_root = root;
+                    }
+                }
+            })
+            .response
+            .on_disabled_hover_text("Drums don't have a mood: every row is a different drum");
+        });
+        app.ui_rects.insert("key", key.response.rect);
+    });
+    ui.weak("click to add a note · drag to move · drag the right edge to make longer · right-click to delete · hold a piano key to hear it");
+}
+
+fn pro_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usize) {
     ui.horizontal(|ui| {
         ui.heading("Piano roll").on_hover_text(
             "Each row is a piano key (low at the bottom, high at the top). Left to right is time.",

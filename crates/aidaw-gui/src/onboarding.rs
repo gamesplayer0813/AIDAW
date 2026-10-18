@@ -127,14 +127,14 @@ const STEPS: &[Step] = &[
     },
     Step {
         title: "10. Stay in key 🎵",
-        body: "Above the piano roll, 'Key' lights up the notes that sound good together. With 'Stay in key' turned on, every note you draw lands on a good-sounding note automatically.\n\nPentatonic is the safest choice: almost anything you draw will sound nice.",
+        body: "Above the notes, the 🎵 row lights up the notes that sound good together, and every note you draw lands on one of them automatically.\n\nIn 🐣 Easy mode pick a Mood (Happy, Sad…). In 🔧 Pro mode you choose any key and can turn 'Stay in key' off.",
         target: "key",
         check: |_, _| false,
     },
     Step {
         title: "You did it! 🏆",
-        body: "That's all you need to make music here.\n\nWant an AI to write music with you? Open Help › 'Let AI make music' and follow the 3 steps. Whatever the AI writes shows up here, and you can change it just like you did now.\n\nYou can replay this tutorial any time from Help.",
-        target: "help",
+        body: "That's all you need to make music here.\n\nThe 🐣 Easy | 🔧 Pro switch at the top left shows more or fewer controls whenever you like. Your song never changes when you flip it.\n\nWant an AI to write music with you? Click ✨ Ask AI at the top and follow the steps. Whatever the AI writes shows up here, and you can change it just like you did now.\n\nYou can replay this tutorial any time from Help.",
+        target: "mode",
         check: |_, _| false,
     },
 ];
@@ -334,7 +334,12 @@ pub fn show_welcome(ctx: &egui::Context, app: &mut App) -> WelcomeChoice {
             {
                 choice = WelcomeChoice::AiHelp;
             }
-            ui.add_space(12.0);
+            ui.add_space(10.0);
+            ui.label(
+                RichText::new("You can switch between 🐣 Easy and 🔧 Pro any time (top left).")
+                    .weak(),
+            );
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if ui
                     .checkbox(

@@ -36,6 +36,13 @@ enum Hit {
 
 pub fn show(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
+        if !app.pro() {
+            ui.heading("Your song").on_hover_text(
+                "Each row is one instrument. The coloured blocks are parts of the song.\nClick a part to see and edit its notes below.",
+            );
+            ui.weak("click a part to edit its notes · double-click an empty spot for a new part · drag to move");
+            return;
+        }
         ui.heading("Song").on_hover_text(
             "Each row is one instrument (a track). The coloured blocks are clips: pieces of music.\nClick a clip to edit its notes in the piano roll below.",
         );
@@ -315,14 +322,23 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                             clip_id,
                             grab_offset,
                         }) => {
-                            let start = app.snap_beat(beat - grab_offset).max(0.0);
+                            // Easy mode moves parts by whole bars so they always line up.
+                            let start = if app.pro() {
+                                app.snap_beat(beat - grab_offset)
+                            } else {
+                                ((beat - grab_offset) / bpb).round() * bpb
+                            }
+                            .max(0.0);
                             if let Some(c) = app.project.clip_mut(&clip_id) {
                                 c.start = start;
                             }
                         }
                         Some(Drag::ResizeClip { clip_id }) => {
-                            let snapped = app.snap_beat(beat);
-                            let snap = app.snap;
+                            let (snapped, snap) = if app.pro() {
+                                (app.snap_beat(beat), app.grid())
+                            } else {
+                                ((beat / bpb).round() * bpb, bpb)
+                            };
                             if let Some(c) = app.project.clip_mut(&clip_id) {
                                 c.length = (snapped - c.start).max(snap);
                             }
@@ -350,7 +366,20 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                             select_clip(app, &clip_id, &track_id)
                         }
                         Hit::Row { track_id, .. } | Hit::Header { track_id } => {
-                            app.selected_track = Some(track_id);
+                            // Show this track's notes, not the previous track's clip.
+                            let first = app
+                                .project
+                                .track(&track_id)
+                                .and_then(|t| t.clips.first())
+                                .map(|c| c.id.clone());
+                            match first {
+                                Some(clip_id) => select_clip(app, &clip_id, &track_id),
+                                None => {
+                                    app.selected_clip = None;
+                                    app.selected_note = None;
+                                    app.selected_track = Some(track_id);
+                                }
+                            }
                         }
                         Hit::Nothing => {}
                     }
