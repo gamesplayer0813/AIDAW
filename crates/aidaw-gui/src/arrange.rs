@@ -4,13 +4,19 @@
 //! edge to resize, double-click an empty spot to create a clip, Delete to
 //! remove the selected clip. Click the ruler to move the playhead.
 
-use eframe::egui::{self, pos2, vec2, Align2, Color32, FontId, Rect, Sense, Stroke, StrokeKind};
+use aidaw_core::presets;
+use eframe::egui::{
+    self, pos2, vec2, Align2, Color32, CornerRadius, FontId, Rect, Sense, Stroke, StrokeKind,
+};
 
 use crate::app::{track_color, App, Drag};
+use crate::theme;
 
-const HEADER_W: f32 = 120.0;
-const RULER_H: f32 = 22.0;
-const ROW_H: f32 = 54.0;
+const HEADER_W: f32 = 150.0;
+const RULER_H: f32 = 26.0;
+const ROW_H: f32 = 58.0;
+/// Height of the name band on top of a clip.
+const CLIP_BAND: f32 = 15.0;
 const EDGE: f32 = 6.0;
 
 enum Hit {
@@ -37,13 +43,13 @@ enum Hit {
 pub fn show(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
         if !app.pro() {
-            ui.heading("Your song").on_hover_text(
+            theme::section(ui, "Your song").on_hover_text(
                 "Each row is one instrument. The coloured blocks are parts of the song.\nClick a part to see and edit its notes below.",
             );
-            ui.weak("click a part to edit its notes · double-click an empty spot for a new part · drag to move");
+            theme::hint(ui, "click a part to edit its notes · double-click an empty spot for a new part · drag to move");
             return;
         }
-        ui.heading("Song").on_hover_text(
+        theme::section(ui, "Song").on_hover_text(
             "Each row is one instrument (a track). The coloured blocks are clips: pieces of music.\nClick a clip to edit its notes in the piano roll below.",
         );
         ui.add(
@@ -52,7 +58,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 .show_value(false)
                 .text("zoom"),
         );
-        ui.weak("click a clip to edit it · double-click an empty spot for a new clip · drag to move · drag the right edge to make longer");
+        theme::hint(ui, "click a clip to edit it · double-click an empty spot for a new clip · drag to move · drag the right edge to make longer");
     });
 
     let bpb = app.project.beats_per_bar.max(1) as f64;
@@ -76,70 +82,105 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             let x_of = |beat: f64| origin.x + HEADER_W + beat as f32 * bw;
             let beat_of = |x: f32| ((x - origin.x - HEADER_W) / bw) as f64;
             let row_top = |i: usize| origin.y + RULER_H + i as f32 * ROW_H;
-            let visuals = ui.visuals().clone();
 
-            // Background, grid and ruler.
-            painter.rect_filled(resp.rect, 0.0, visuals.extreme_bg_color);
+            // Background, rows and grid.
+            painter.rect_filled(resp.rect, 0.0, theme::CANVAS);
             for i in 0..rows {
                 let r =
                     Rect::from_min_size(pos2(origin.x, row_top(i)), vec2(resp.rect.width(), ROW_H));
                 if i % 2 == 1 {
-                    painter.rect_filled(r, 0.0, Color32::from_white_alpha(4));
+                    painter.rect_filled(r, 0.0, Color32::from_white_alpha(3));
                 }
+                painter.line_segment(
+                    [r.left_bottom(), r.right_bottom()],
+                    Stroke::new(1.0_f32, theme::alpha(theme::BORDER, 150)),
+                );
             }
             let bottom = resp.rect.bottom();
+            let ruler = Rect::from_min_size(origin, vec2(resp.rect.width(), RULER_H));
+            painter.rect_filled(ruler, 0.0, theme::PANEL);
+            // Where live playback loops back to the start.
+            if let Some(end) = app.project.loop_end_beats() {
+                let band = Rect::from_min_max(
+                    pos2(x_of(0.0), ruler.bottom() - 4.0),
+                    pos2(x_of(end), ruler.bottom()),
+                );
+                painter.rect_filled(band, 2.0, theme::alpha(theme::ACCENT, 110));
+            }
             let mut b = 0.0;
             while b <= total_beats {
                 let x = x_of(b);
                 let is_bar = (b % bpb).abs() < 1e-9;
                 let col = if is_bar {
-                    Color32::from_white_alpha(40)
+                    Color32::from_white_alpha(22)
                 } else {
-                    Color32::from_white_alpha(14)
+                    Color32::from_white_alpha(7)
                 };
                 painter.line_segment(
                     [pos2(x, origin.y + RULER_H), pos2(x, bottom)],
                     Stroke::new(1.0_f32, col),
                 );
+                let tick = if is_bar { 10.0 } else { 4.0 };
+                painter.line_segment(
+                    [pos2(x, ruler.bottom() - tick), pos2(x, ruler.bottom())],
+                    Stroke::new(
+                        1.0_f32,
+                        if is_bar {
+                            theme::BORDER_HI
+                        } else {
+                            theme::BORDER
+                        },
+                    ),
+                );
                 if is_bar {
                     painter.text(
-                        pos2(x + 3.0, origin.y + 4.0),
+                        pos2(x + 4.0, origin.y + 4.0),
                         Align2::LEFT_TOP,
                         format!("{}", (b / bpb) as i64 + 1),
-                        FontId::monospace(11.0),
-                        visuals.text_color(),
+                        theme::bold_font(11.0),
+                        theme::TEXT_DIM,
                     );
                 }
                 b += 1.0;
             }
             painter.line_segment(
-                [
-                    pos2(origin.x, origin.y + RULER_H),
-                    pos2(resp.rect.right(), origin.y + RULER_H),
-                ],
-                Stroke::new(1.0_f32, Color32::from_white_alpha(60)),
+                [ruler.left_bottom(), ruler.right_bottom()],
+                Stroke::new(1.0_f32, theme::BORDER),
             );
 
-            // Clips.
+            // Clips: a coloured name band on top, a tinted body with a mini
+            // view of the notes.
             for (i, track) in app.project.tracks.iter().enumerate() {
                 let color = track_color(i);
                 let top = row_top(i);
                 for clip in &track.clips {
                     let r = Rect::from_min_max(
-                        pos2(x_of(clip.start), top + 3.0),
-                        pos2(x_of(clip.end()), top + ROW_H - 3.0),
+                        pos2(x_of(clip.start) + 1.0, top + 5.0),
+                        pos2(x_of(clip.end()) - 1.0, top + ROW_H - 5.0),
                     );
                     let selected = app.selected_clip.as_deref() == Some(clip.id.as_str());
+                    if selected {
+                        theme::glow(&painter, r, 7, theme::alpha(color, 120), 16);
+                    }
                     painter.rect_filled(
                         r,
-                        4.0,
-                        color.gamma_multiply(if selected { 0.55 } else { 0.32 }),
+                        7.0,
+                        theme::mix(theme::CANVAS, color, if selected { 0.3 } else { 0.18 }),
                     );
-                    painter.rect_stroke(
-                        r,
-                        4.0,
-                        Stroke::new(if selected { 2.0_f32 } else { 1.0 }, color),
-                        StrokeKind::Inside,
+                    let band = Rect::from_min_size(r.min, vec2(r.width(), CLIP_BAND));
+                    painter.rect_filled(
+                        band,
+                        CornerRadius {
+                            nw: 7,
+                            ne: 7,
+                            sw: 0,
+                            se: 0,
+                        },
+                        if selected {
+                            color
+                        } else {
+                            theme::mix(theme::CANVAS, color, 0.72)
+                        },
                     );
                     // Mini note preview.
                     if !clip.notes.is_empty() {
@@ -147,34 +188,51 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                             (lo.min(n.pitch), hi.max(n.pitch))
                         });
                         let span = (hi - lo).max(1) as f32;
-                        let inner = r.shrink2(vec2(2.0, 14.0));
+                        let inner = Rect::from_min_max(
+                            pos2(r.left() + 3.0, band.bottom() + 5.0),
+                            pos2(r.right() - 3.0, r.bottom() - 5.0),
+                        );
+                        let ink = theme::mix(color, Color32::WHITE, 0.3);
                         for n in &clip.notes {
                             if n.start >= clip.length {
                                 continue;
                             }
-                            let y = inner.bottom()
-                                - (n.pitch - lo) as f32 / span * (inner.height() - 2.0);
-                            let x0 = x_of(clip.start + n.start);
-                            let x1 = x_of(clip.start + (n.start + n.duration).min(clip.length))
-                                .max(x0 + 1.0);
-                            painter.line_segment(
-                                [pos2(x0, y), pos2(x1, y)],
-                                Stroke::new(2.0_f32, color),
+                            let y = inner.bottom() - (n.pitch - lo) as f32 / span * inner.height();
+                            let x0 = x_of(clip.start + n.start) + 1.0;
+                            let x1 = (x_of(clip.start + (n.start + n.duration).min(clip.length))
+                                - 1.0)
+                                .max(x0 + 2.0);
+                            painter.rect_filled(
+                                Rect::from_min_max(pos2(x0, y - 1.25), pos2(x1, y + 1.25)),
+                                1.0,
+                                ink,
                             );
                         }
                     }
+                    painter.rect_stroke(
+                        r,
+                        7.0,
+                        if selected {
+                            Stroke::new(1.5_f32, Color32::WHITE)
+                        } else {
+                            Stroke::new(1.0_f32, theme::alpha(color, 140))
+                        },
+                        StrokeKind::Inside,
+                    );
                     let label = if clip.name.is_empty() {
                         &clip.id
                     } else {
                         &clip.name
                     };
-                    painter.text(
-                        r.left_top() + vec2(4.0, 1.0),
-                        Align2::LEFT_TOP,
-                        label,
-                        FontId::proportional(11.0),
-                        visuals.strong_text_color(),
-                    );
+                    painter
+                        .with_clip_rect(band.shrink2(vec2(4.0, 0.0)).intersect(painter.clip_rect()))
+                        .text(
+                            band.left_center() + vec2(7.0, 0.0),
+                            Align2::LEFT_CENTER,
+                            label,
+                            theme::bold_font(10.5),
+                            theme::CANVAS,
+                        );
                 }
             }
 
@@ -182,11 +240,11 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             for (i, track) in app.project.tracks.iter().enumerate() {
                 if track.clips.is_empty() {
                     painter.text(
-                        pos2(x_of(0.0) + 10.0, row_top(i) + ROW_H / 2.0),
+                        pos2(x_of(0.0) + 12.0, row_top(i) + ROW_H / 2.0),
                         Align2::LEFT_CENTER,
                         "Double-click here to add a clip",
                         FontId::proportional(13.0),
-                        visuals.weak_text_color(),
+                        theme::TEXT_FAINT,
                     );
                 }
             }
@@ -196,55 +254,101 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     Align2::LEFT_CENTER,
                     "No tracks yet. Click ➕ Add instrument on the left.",
                     FontId::proportional(15.0),
-                    visuals.text_color(),
+                    theme::TEXT_DIM,
                 );
             }
 
             // Track headers (drawn last so they cover clips scrolled under them).
+            painter.rect_filled(
+                Rect::from_min_max(
+                    pos2(origin.x, origin.y + RULER_H),
+                    pos2(origin.x + HEADER_W, row_top(rows)),
+                ),
+                0.0,
+                theme::PANEL,
+            );
             for (i, track) in app.project.tracks.iter().enumerate() {
+                let color = track_color(i);
                 let r = Rect::from_min_size(pos2(origin.x, row_top(i)), vec2(HEADER_W, ROW_H));
+                let card = r.shrink2(vec2(6.0, 4.0));
                 let selected = app.selected_track.as_deref() == Some(track.id.as_str());
                 painter.rect_filled(
-                    r,
-                    0.0,
+                    card,
+                    8.0,
                     if selected {
-                        visuals.selection.bg_fill.gamma_multiply(0.5)
+                        theme::mix(theme::SURFACE, color, 0.16)
                     } else {
-                        visuals.panel_fill
+                        theme::SURFACE
                     },
                 );
+                if selected {
+                    painter.rect_stroke(
+                        card,
+                        8.0,
+                        Stroke::new(1.0_f32, theme::alpha(color, 170)),
+                        StrokeKind::Inside,
+                    );
+                }
                 painter.rect_filled(
-                    Rect::from_min_size(r.min, vec2(4.0, ROW_H)),
-                    0.0,
-                    track_color(i),
+                    Rect::from_min_size(card.min + vec2(7.0, 9.0), vec2(4.0, card.height() - 18.0)),
+                    2.0,
+                    color,
                 );
-                painter.text(
-                    r.left_top() + vec2(10.0, 8.0),
+                let text = painter.with_clip_rect(card.shrink(2.0).intersect(painter.clip_rect()));
+                text.text(
+                    card.left_top() + vec2(19.0, 9.0),
                     Align2::LEFT_TOP,
                     &track.name,
-                    FontId::proportional(13.0),
-                    visuals.strong_text_color(),
+                    theme::bold_font(13.0),
+                    theme::TEXT,
                 );
-                let flags = format!(
-                    "{}{}",
-                    if track.mute { "M " } else { "" },
-                    if track.solo { "S" } else { "" }
+                let sound = presets::name_of(&track.instrument)
+                    .map(presets::plain_name)
+                    .unwrap_or("Custom sound");
+                text.text(
+                    card.left_top() + vec2(19.0, 28.0),
+                    Align2::LEFT_TOP,
+                    sound,
+                    FontId::proportional(11.0),
+                    theme::TEXT_DIM,
                 );
-                painter.text(
-                    r.left_bottom() + vec2(10.0, -8.0),
-                    Align2::LEFT_BOTTOM,
-                    flags,
-                    FontId::monospace(11.0),
-                    Color32::YELLOW,
-                );
+                let mut x = card.right() - 6.0;
+                for (on, flag, c) in [
+                    (track.solo, "S", theme::CYAN),
+                    (track.mute, "M", theme::WARN),
+                ] {
+                    if on {
+                        x = theme::pill(&painter, pos2(x, card.top() + 8.0), flag, c).left() - 4.0;
+                    }
+                }
             }
+            painter.line_segment(
+                [
+                    pos2(origin.x + HEADER_W, origin.y + RULER_H),
+                    pos2(origin.x + HEADER_W, bottom),
+                ],
+                Stroke::new(1.0_f32, theme::BORDER),
+            );
 
-            // Playhead.
+            // Playhead, with a marker in the ruler.
             let px = x_of(app.playhead);
             painter.line_segment(
-                [pos2(px, origin.y), pos2(px, bottom)],
-                Stroke::new(1.5_f32, Color32::from_rgb(255, 80, 80)),
+                [pos2(px, origin.y + RULER_H), pos2(px, bottom)],
+                Stroke::new(5.0_f32, theme::alpha(theme::PLAYHEAD, 40)),
             );
+            painter.line_segment(
+                [pos2(px, origin.y + RULER_H), pos2(px, bottom)],
+                Stroke::new(1.5_f32, theme::PLAYHEAD),
+            );
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    pos2(px - 6.0, origin.y + RULER_H - 10.0),
+                    pos2(px + 6.0, origin.y + RULER_H - 10.0),
+                    pos2(px, origin.y + RULER_H),
+                ],
+                theme::PLAYHEAD,
+                Stroke::NONE,
+            ));
 
             // ---- interaction ----
             let hit = |project: &aidaw_core::Project, p: egui::Pos2| -> Hit {

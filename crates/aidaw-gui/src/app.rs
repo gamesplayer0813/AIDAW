@@ -14,26 +14,14 @@ use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, Rect, RichTe
 use crate::onboarding::{self, Tutorial, WelcomeChoice};
 use crate::scale::Scale;
 use crate::settings::Settings;
+use crate::theme;
 use aidaw_core::presets;
 
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(400);
 const UNDO_LIMIT: usize = 200;
 
-pub const TRACK_COLORS: [Color32; 8] = [
-    Color32::from_rgb(0x4f, 0x9d, 0xff),
-    Color32::from_rgb(0xff, 0x8a, 0x4f),
-    Color32::from_rgb(0x6f, 0xd6, 0x7a),
-    Color32::from_rgb(0xd0, 0x6f, 0xe0),
-    Color32::from_rgb(0xff, 0xcf, 0x4f),
-    Color32::from_rgb(0x4f, 0xd8, 0xd0),
-    Color32::from_rgb(0xff, 0x6f, 0x8f),
-    Color32::from_rgb(0xa0, 0xa8, 0xff),
-];
-
-pub fn track_color(index: usize) -> Color32 {
-    TRACK_COLORS[index % TRACK_COLORS.len()]
-}
+pub use crate::theme::track_color;
 
 /// In-progress mouse drags, shared by the arrangement and the piano roll.
 #[derive(Clone, Debug)]
@@ -655,129 +643,112 @@ impl App {
     }
 
     fn top_bar(&mut self, ctx: &egui::Context) {
-        egui::TopBottomPanel::top("menu").show(ctx, |ui| {
-            ui.add_space(3.0);
-            ui.horizontal(|ui| {
-                crate::mode::switch(ui, self);
-                ui.separator();
-                self.menus(ui);
-                ui.separator();
-                self.transport(ui);
-                ui.separator();
-                if self.pro() {
-                    ui.label("BPM").on_hover_text(
-                        "Tempo in beats per minute. 70 = slow ballad, 110 = pop, 170 = drum & bass.",
-                    );
-                } else {
-                    ui.label("Speed").on_hover_text(
-                        "How fast the song plays (beats per minute).\n70 = slow and calm · 110 = pop · 140+ = fast and energetic.",
-                    );
-                }
-                let mut bpm = self.project.bpm;
-                if !self.pro() && ui.button("−").on_hover_text("Slower").clicked() {
-                    bpm = (bpm - 5.0).round().max(20.0);
-                }
-                if ui
-                    .add(
-                        egui::DragValue::new(&mut bpm)
-                            .range(20.0..=400.0)
-                            .speed(0.2)
-                            .fixed_decimals(0),
-                    )
-                    .on_hover_text("Drag left/right or click to type")
-                    .changed()
-                {
-                    self.project.bpm = bpm;
-                }
-                if !self.pro() && ui.button("+").on_hover_text("Faster").clicked() {
-                    bpm = (bpm + 5.0).round().min(400.0);
-                }
-                if bpm != self.project.bpm {
-                    self.project.bpm = bpm;
-                }
-                if self.pro() {
-                    ui.label("Grid").on_hover_text(
-                        "Notes and clips snap to this grid. 1/16 is a good default; 1/4 = one beat.",
-                    );
-                    egui::ComboBox::from_id_salt("snap")
-                        .selected_text(snap_label(self.snap))
-                        .show_ui(ui, |ui| {
-                            for s in [1.0, 0.5, 0.25, 0.125, 1.0 / 3.0, 1.0 / 6.0] {
-                                ui.selectable_value(&mut self.snap, s, snap_label(s));
-                            }
-                        });
-                }
-                ui.separator();
-                let ai = ui
-                    .add(
-                        egui::Button::new(RichText::new("✨ Ask AI").size(15.0).strong())
-                            .fill(Color32::from_rgb(70, 60, 140))
-                            .min_size(egui::vec2(92.0, 28.0)),
-                    )
-                    .on_hover_text("Let an AI assistant (Claude, ChatGPT, …) write music into this song");
-                if ai.clicked() {
-                    self.show_ai_help = true;
-                }
-                self.ui_rects.insert("ai", ai.rect);
-                match &self.path {
-                    Some(p) if self.pro() => {
-                        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                        ui.label(format!("⟳ {name}")).on_hover_text(
-                            "The project file the AI edits through aidaw-mcp; changes appear here live.",
+        egui::TopBottomPanel::top("menu")
+            .frame(theme::chrome_frame())
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    crate::mode::switch(ui, self);
+                    ui.add_space(6.0);
+                    self.menus(ui);
+                    ui.add_space(10.0);
+                    self.transport(ui);
+                    if self.pro() {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("Grid").color(theme::TEXT_DIM)).on_hover_text(
+                            "Notes and clips snap to this grid. 1/16 is a good default; 1/4 = one beat.",
                         );
+                        egui::ComboBox::from_id_salt("snap")
+                            .width(70.0)
+                            .selected_text(snap_label(self.snap))
+                            .show_ui(ui, |ui| {
+                                for s in [1.0, 0.5, 0.25, 0.125, 1.0 / 3.0, 1.0 / 6.0] {
+                                    ui.selectable_value(&mut self.snap, s, snap_label(s));
+                                }
+                            });
                     }
-                    Some(_) => {}
-                    None => {
-                        if ui
-                            .button(RichText::new("💾 Not saved. Click to save").color(Color32::from_rgb(255, 200, 90)))
-                            .on_hover_text("Save your song to a file. AI tools work on this file too.")
-                            .clicked()
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        self.sound_button(ui);
+                        ui.add_space(4.0);
+                        let ai = theme::hero_button(
+                            ui,
+                            "✨ Ask AI",
+                            theme::ACCENT,
+                            egui::vec2(108.0, 34.0),
+                        )
+                        .on_hover_text(
+                            "Let an AI assistant (Claude, ChatGPT, …) write music into this song",
+                        );
+                        if ai.clicked() {
+                            self.show_ai_help = true;
+                        }
+                        self.ui_rects.insert("ai", ai.rect);
+                        if self.path.is_none()
+                            && ui
+                                .button(RichText::new("💾 Not saved. Click to save").color(theme::WARN))
+                                .on_hover_text("Save your song to a file. AI tools work on this file too.")
+                                .clicked()
                         {
                             self.save_as_dialog();
                         }
-                    }
-                }
-                ui.separator();
-                self.sound_button(ui);
-            });
-            ui.add_space(2.0);
-        });
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                let failed = [
-                    "Failed",
-                    "Edit failed",
-                    "Save failed",
-                    "Open failed",
-                    "Export failed",
-                    "Couldn't",
-                ]
-                .iter()
-                .any(|p| self.status.starts_with(p));
-                let text = RichText::new(&self.status).size(14.0);
-                ui.label(if failed {
-                    text.color(Color32::LIGHT_RED)
-                } else {
-                    text
+                    });
                 });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if self.pro() {
-                        ui.weak(format!(
-                            "grid {} · key {} {}",
-                            snap_label(self.snap),
-                            crate::scale::ROOTS[self.scale_root as usize % 12],
-                            self.scale.label()
-                        ));
+            });
+        egui::TopBottomPanel::bottom("status")
+            .frame(theme::chrome_frame().inner_margin(egui::Margin::symmetric(12, 5)))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let failed = [
+                        "Failed",
+                        "Edit failed",
+                        "Save failed",
+                        "Open failed",
+                        "Export failed",
+                        "Couldn't",
+                    ]
+                    .iter()
+                    .any(|p| self.status.starts_with(p));
+                    let dot = if failed {
+                        theme::DANGER
+                    } else if self.is_playing() {
+                        theme::PLAY
                     } else {
-                        ui.weak("🐣 Easy mode · switch to 🔧 Pro (top left) for more controls");
-                    }
+                        theme::ACCENT
+                    };
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                    ui.painter().circle_filled(r.center(), 3.5, dot);
+                    let text = RichText::new(&self.status).size(12.5);
+                    ui.label(if failed {
+                        text.color(theme::DANGER)
+                    } else {
+                        text.color(theme::TEXT_DIM)
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let (Some(p), true) = (&self.path, self.pro()) {
+                            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                            ui.label(RichText::new(format!("⟳ {name}")).size(12.0).color(theme::TEXT_DIM))
+                                .on_hover_text(
+                                    "The project file the AI edits through aidaw-mcp; changes appear here live.",
+                                );
+                            ui.label(RichText::new("·").color(theme::TEXT_FAINT));
+                        }
+                        let text = if self.pro() {
+                            format!(
+                                "grid {} · key {} {}",
+                                snap_label(self.snap),
+                                crate::scale::ROOTS[self.scale_root as usize % 12],
+                                self.scale.label()
+                            )
+                        } else {
+                            "🐣 Easy mode · switch to 🔧 Pro (top left) for more controls".into()
+                        };
+                        ui.label(RichText::new(text).size(12.0).color(theme::TEXT_FAINT));
+                    });
                 });
             });
-        });
     }
 
     fn menus(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button(RichText::new("📁 File").size(15.0), |ui| {
+        ui.menu_button("📁 File", |ui| {
             if ui.button("New song").clicked() {
                 self.load_project(
                     starter_project(),
@@ -810,7 +781,7 @@ impl App {
                 self.export_wav_dialog();
             }
         });
-        let help = ui.menu_button(RichText::new("❓ Help").size(15.0).strong(), |ui| {
+        let help = ui.menu_button("❓ Help", |ui| {
             if ui.button("🎓 Tutorial (2 minutes)").clicked() {
                 self.start_tutorial();
                 ui.close_menu();
@@ -834,16 +805,15 @@ impl App {
         });
         self.ui_rects.insert("help", help.response.rect);
         // Undo is the beginner's safety net, so it is a real button, not hidden in a menu.
-        let big = |t: &str| egui::Button::new(RichText::new(t).size(15.0));
         if ui
-            .add_enabled(!self.undo.is_empty(), big("↩ Undo"))
+            .add_enabled(!self.undo.is_empty(), egui::Button::new("↩ Undo"))
             .on_hover_text("Take back the last change (Ctrl+Z). Works for AI changes too.")
             .clicked()
         {
             self.queued_history = Some(false);
         }
         if ui
-            .add_enabled(!self.redo.is_empty(), big("↪ Redo"))
+            .add_enabled(!self.redo.is_empty(), egui::Button::new("↪ Redo"))
             .on_hover_text("Redo (Ctrl+Y)")
             .clicked()
         {
@@ -851,50 +821,121 @@ impl App {
         }
     }
 
+    /// Stop, Play and the LCD with the song position and tempo.
     fn transport(&mut self, ui: &mut egui::Ui) {
         let playing = self.is_playing();
-        let play = ui
-            .add(
-                egui::Button::new(
-                    RichText::new(if playing { "⏸  Pause" } else { "▶  Play" })
-                        .size(17.0)
-                        .strong(),
-                )
-                .fill(if playing {
-                    Color32::from_rgb(120, 70, 30)
-                } else {
-                    Color32::from_rgb(40, 110, 60)
-                })
-                .min_size(egui::vec2(96.0, 30.0)),
-            )
-            .on_hover_text("Play or pause the song (Space bar)");
-        if play.clicked() {
-            self.toggle_play();
-        }
-        self.ui_rects.insert("play", play.rect);
         if ui
-            .add(egui::Button::new(RichText::new("⏹").size(17.0)).min_size(egui::vec2(32.0, 30.0)))
+            .add(
+                egui::Button::new(RichText::new("⏹").size(16.0))
+                    .corner_radius(17)
+                    .min_size(egui::vec2(34.0, 34.0)),
+            )
             .on_hover_text("Stop and go back to the start")
             .clicked()
         {
             self.stop();
         }
+        let play = theme::hero_button(
+            ui,
+            if playing { "⏸  Pause" } else { "▶  Play" },
+            if playing { theme::PAUSE } else { theme::PLAY },
+            egui::vec2(104.0, 34.0),
+        )
+        .on_hover_text("Play or pause the song (Space bar)");
+        if play.clicked() {
+            self.toggle_play();
+        }
+        self.ui_rects.insert("play", play.rect);
+        ui.add_space(4.0);
+
         let bpb = self.project.beats_per_bar.max(1) as f64;
         let bar = (self.playhead / bpb).floor() as i64 + 1;
-        if self.pro() {
-            let beat = (self.playhead % bpb).floor() as i64 + 1;
-            ui.monospace(format!("bar {bar:>3}.{beat}"))
-                .on_hover_text("Where the song is playing: bar number . beat");
-        } else {
-            ui.monospace(format!("bar {bar}"))
-                .on_hover_text("Where the song is playing");
-        }
+        let beat = (self.playhead % bpb).floor() as i64 + 1;
+        let pro = self.pro();
+        theme::card(theme::CANVAS, egui::Stroke::new(1.0_f32, theme::BORDER))
+            .inner_margin(egui::Margin::symmetric(12, 2))
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let caption = |ui: &mut egui::Ui, t: &str| {
+                    ui.label(
+                        RichText::new(t)
+                            .font(theme::bold_font(9.5))
+                            .extra_letter_spacing(1.0)
+                            .color(theme::TEXT_FAINT),
+                    )
+                };
+                let lcd = |t: String| {
+                    RichText::new(t)
+                        .font(egui::FontId::monospace(19.0))
+                        .color(theme::CYAN)
+                };
+                caption(ui, "BAR");
+                let pos = if pro {
+                    format!("{bar:>3}.{beat}")
+                } else {
+                    format!("{bar:>3}")
+                };
+                ui.label(lcd(pos))
+                    .on_hover_text("Where the song is playing: bar number . beat");
+                let (r, _) = ui.allocate_exact_size(egui::vec2(1.0, 22.0), egui::Sense::hover());
+                ui.painter().rect_filled(r, 0.0, theme::BORDER);
+                caption(ui, if pro { "BPM" } else { "SPEED" }).on_hover_text(if pro {
+                    "Tempo in beats per minute. 70 = slow ballad, 110 = pop, 170 = drum & bass."
+                } else {
+                    "How fast the song plays (beats per minute).\n70 = slow and calm · 110 = pop · 140+ = fast and energetic."
+                });
+                let mut bpm = self.project.bpm;
+                ui.scope(|ui| {
+                    let s = ui.style_mut();
+                    s.drag_value_text_style = egui::TextStyle::Name("lcd".into());
+                    s.text_styles.insert(
+                        egui::TextStyle::Name("lcd".into()),
+                        egui::FontId::monospace(19.0),
+                    );
+                    for w in [&mut s.visuals.widgets.inactive, &mut s.visuals.widgets.hovered] {
+                        w.weak_bg_fill = Color32::TRANSPARENT;
+                        w.bg_fill = Color32::TRANSPARENT;
+                        w.fg_stroke.color = theme::CYAN;
+                    }
+                    s.visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+                    s.spacing.button_padding = egui::vec2(2.0, 0.0);
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut bpm)
+                                .range(20.0..=400.0)
+                                .speed(0.2)
+                                .fixed_decimals(0),
+                        )
+                        .on_hover_text("Drag left/right or click to type")
+                        .changed()
+                    {
+                        self.project.bpm = bpm;
+                    }
+                });
+                if !pro {
+                    let small = |t: &str| {
+                        egui::Button::new(RichText::new(t).size(14.0))
+                            .corner_radius(11)
+                            .min_size(egui::vec2(22.0, 22.0))
+                    };
+                    if ui.add(small("−")).on_hover_text("Slower").clicked() {
+                        bpm = (bpm - 5.0).round().max(20.0);
+                    }
+                    if ui.add(small("+")).on_hover_text("Faster").clicked() {
+                        bpm = (bpm + 5.0).round().min(400.0);
+                    }
+                }
+                if bpm != self.project.bpm {
+                    self.project.bpm = bpm;
+                }
+            });
     }
 
     fn sound_button(&mut self, ui: &mut egui::Ui) {
         match &self.engine {
             Some(e) => {
                 let peak = e.diagnostics().peak;
+                crate::sound::meter(ui, peak).on_hover_text("Output level");
                 let label = if self.pro() {
                     format!("🔊 {}", e.device_name())
                 } else {
@@ -907,11 +948,16 @@ impl App {
                 {
                     self.show_sound = true;
                 }
-                crate::sound::meter(ui, peak).on_hover_text("Output level");
             }
             None => {
                 if ui
-                    .button(RichText::new("🔇 No sound. Click to fix").color(Color32::LIGHT_RED))
+                    .add(
+                        egui::Button::new(
+                            RichText::new("🔇 No sound. Click to fix").color(theme::DANGER),
+                        )
+                        .fill(theme::alpha(theme::DANGER, 30))
+                        .stroke(egui::Stroke::new(1.0_f32, theme::alpha(theme::DANGER, 120))),
+                    )
                     .clicked()
                 {
                     self.show_sound = true;
@@ -951,20 +997,24 @@ impl eframe::App for App {
 
         self.top_bar(ctx);
         egui::SidePanel::left("inspector")
+            .frame(theme::panel_frame())
             .resizable(true)
-            .default_width(270.0)
+            .default_width(290.0)
             .show(ctx, |ui| {
                 crate::inspector::show(ui, self);
             });
         egui::TopBottomPanel::bottom("piano_roll")
+            .frame(theme::panel_frame())
             .resizable(true)
             .default_height(400.0)
             .show(ctx, |ui| {
                 crate::piano_roll::show(ui, self);
             });
-        egui::CentralPanel::default().show(ctx, |ui| {
-            crate::arrange::show(ui, self);
-        });
+        egui::CentralPanel::default()
+            .frame(theme::panel_frame())
+            .show(ctx, |ui| {
+                crate::arrange::show(ui, self);
+            });
 
         self.overlays(ctx);
 
