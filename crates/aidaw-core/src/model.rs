@@ -170,6 +170,30 @@ impl Project {
             .fold(0.0, f64::max)
     }
 
+    /// Where live playback wraps back to the start: the end of the last
+    /// playable note, rounded up to a whole bar so loops stay in time.
+    /// `None` when the song has no notes.
+    pub fn loop_end_beats(&self) -> Option<f64> {
+        let last = self
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .flat_map(|c| {
+                c.notes
+                    .iter()
+                    .filter(|n| n.start >= 0.0 && n.start < c.length && n.duration > 0.0)
+                    .map(|n| c.start + (n.start + n.duration).min(c.length))
+            })
+            .filter(|b| b.is_finite())
+            .fold(0.0, f64::max);
+        if last <= 0.0 {
+            return None;
+        }
+        let bar = f64::from(self.beats_per_bar.max(1));
+        // Tolerate float noise so a note ending exactly on a bar line doesn't add a bar.
+        Some(((last - 1e-6) / bar).ceil().max(1.0) * bar)
+    }
+
     pub fn track(&self, id: &str) -> Option<&Track> {
         self.tracks.iter().find(|t| t.id == id)
     }
