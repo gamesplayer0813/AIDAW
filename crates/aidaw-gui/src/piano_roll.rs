@@ -6,14 +6,16 @@
 use aidaw_core::edit::Op;
 use aidaw_core::{pitch, Note};
 use eframe::egui::{
-    self, pos2, vec2, Align2, Color32, FontId, Rect, RichText, Sense, Stroke, StrokeKind,
+    self, pos2, vec2, Align2, Color32, CornerRadius, FontId, Rect, RichText, Sense, Stroke,
+    StrokeKind,
 };
 
 use crate::app::{track_color, App, Drag};
 use crate::scale::{Scale, ROOTS};
+use crate::theme;
 
 const KEYS_W: f32 = 52.0;
-const RULER_H: f32 = 20.0;
+const RULER_H: f32 = 22.0;
 const EDGE: f32 = 6.0;
 
 enum Hit {
@@ -91,33 +93,38 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         let y_of = |p: u8| origin.y + RULER_H + (127 - p) as f32 * kh;
         let pitch_of =
             |y: f32| 127 - (((y - origin.y - RULER_H) / kh).floor() as i32).clamp(0, 127);
-        let visuals = ui.visuals().clone();
         let color = track_color(track_index);
         let bpb = app.project.beats_per_bar.max(1) as f64;
 
         // Grid.
-        painter.rect_filled(resp.rect, 0.0, visuals.extreme_bg_color);
+        painter.rect_filled(resp.rect, 0.0, theme::CANVAS);
+        let lit = theme::mix(theme::CANVAS, color, 0.07);
         for p in 0..=127u8 {
             let r = Rect::from_min_size(
                 pos2(origin.x + KEYS_W, y_of(p)),
                 vec2(resp.rect.width(), kh),
             );
+            if r.bottom() < visible.top() || r.top() > visible.bottom() {
+                continue;
+            }
             if scale_on {
                 // Light up the rows that are in the chosen key.
                 if in_key(p) {
-                    painter.rect_filled(r, 0.0, color.gamma_multiply(0.07));
+                    painter.rect_filled(r, 0.0, lit);
                 } else {
-                    painter.rect_filled(r, 0.0, Color32::from_black_alpha(90));
+                    painter.rect_filled(r, 0.0, Color32::from_black_alpha(70));
                 }
             } else if pitch::is_black_key(p) {
-                painter.rect_filled(r, 0.0, Color32::from_black_alpha(60));
+                painter.rect_filled(r, 0.0, Color32::from_black_alpha(70));
+            } else {
+                painter.rect_filled(r, 0.0, Color32::from_white_alpha(3));
             }
-            if p % 12 == 0 {
-                painter.line_segment(
-                    [r.left_bottom(), r.right_bottom()],
-                    Stroke::new(1.0_f32, Color32::from_white_alpha(30)),
-                );
-            }
+            let line = if p % 12 == 0 {
+                Color32::from_white_alpha(26)
+            } else {
+                Color32::from_black_alpha(90)
+            };
+            painter.line_segment([r.left_bottom(), r.right_bottom()], Stroke::new(1.0_f32, line));
         }
         let snap = app.grid();
         let mut b = 0.0;
@@ -125,11 +132,11 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         while b <= view_beats {
             let x = x_of(b);
             let col = if (b % bpb).abs() < 1e-6 {
-                Color32::from_white_alpha(60)
+                Color32::from_white_alpha(46)
             } else if (b % 1.0).abs() < 1e-6 {
-                Color32::from_white_alpha(28)
+                Color32::from_white_alpha(18)
             } else {
-                Color32::from_white_alpha(10)
+                Color32::from_white_alpha(6)
             };
             painter.line_segment(
                 [pos2(x, origin.y + RULER_H), pos2(x, resp.rect.bottom())],
@@ -143,36 +150,51 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         painter.rect_filled(
             Rect::from_min_max(pos2(end_x, origin.y), resp.rect.right_bottom()),
             0.0,
-            Color32::from_black_alpha(90),
+            Color32::from_black_alpha(110),
         );
         painter.line_segment(
             [pos2(end_x, origin.y), pos2(end_x, resp.rect.bottom())],
             Stroke::new(2.0_f32, color),
         );
 
-        // Notes.
+        // Notes: rounded, brighter the harder they are played, with a light top edge.
         for (idx, n) in clip.notes.iter().enumerate() {
             let r = Rect::from_min_max(
-                pos2(x_of(n.start), y_of(n.pitch) + 1.0),
+                pos2(x_of(n.start) + 0.5, y_of(n.pitch) + 1.0),
                 pos2(
-                    x_of(n.start + n.duration).max(x_of(n.start) + 3.0),
+                    x_of(n.start + n.duration).max(x_of(n.start) + 4.0) - 0.5,
                     y_of(n.pitch) + kh - 1.0,
                 ),
             );
+            if !visible.intersects(r) {
+                continue;
+            }
             let selected = app.selected_note == Some(idx);
-            let shade = 0.35 + 0.65 * n.velocity as f32 / 127.0;
             let fill = if n.start >= clip.length {
-                Color32::GRAY.gamma_multiply(0.4)
+                theme::SURFACE_HI
             } else {
-                color.gamma_multiply(shade)
+                theme::mix(theme::CANVAS, color, 0.45 + 0.55 * n.velocity as f32 / 127.0)
             };
-            painter.rect_filled(r, 2.0, fill);
+            let radius = (kh / 3.0).min(5.0);
+            if selected {
+                theme::glow(&painter, r, radius as u8, theme::alpha(color, 150), 12);
+            }
+            painter.rect_filled(r, radius, fill);
+            if r.width() > 2.0 * radius {
+                painter.line_segment(
+                    [
+                        pos2(r.left() + radius, r.top() + 1.0),
+                        pos2(r.right() - radius, r.top() + 1.0),
+                    ],
+                    Stroke::new(1.0_f32, theme::alpha(Color32::WHITE, 70)),
+                );
+            }
             let stroke = if selected {
-                Stroke::new(2.0_f32, Color32::WHITE)
+                Stroke::new(1.5_f32, Color32::WHITE)
             } else {
-                Stroke::new(1.0_f32, Color32::from_black_alpha(160))
+                Stroke::new(1.0_f32, Color32::from_black_alpha(140))
             };
-            painter.rect_stroke(r, 2.0, stroke, StrokeKind::Inside);
+            painter.rect_stroke(r, radius, stroke, StrokeKind::Inside);
         }
 
         // Playhead (relative to the clip).
@@ -181,29 +203,44 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             let x = x_of(ph);
             painter.line_segment(
                 [pos2(x, origin.y), pos2(x, resp.rect.bottom())],
-                Stroke::new(1.5_f32, Color32::from_rgb(255, 80, 80)),
+                Stroke::new(5.0_f32, theme::alpha(theme::PLAYHEAD, 40)),
+            );
+            painter.line_segment(
+                [pos2(x, origin.y), pos2(x, resp.rect.bottom())],
+                Stroke::new(1.5_f32, theme::PLAYHEAD),
             );
         }
 
         // Sticky ruler.
         let ruler =
             Rect::from_min_size(pos2(origin.x, ruler_top), vec2(resp.rect.width(), RULER_H));
-        painter.rect_filled(ruler, 0.0, visuals.panel_fill);
+        painter.rect_filled(ruler, 0.0, theme::PANEL);
+        painter.line_segment(
+            [ruler.left_bottom(), ruler.right_bottom()],
+            Stroke::new(1.0_f32, theme::BORDER),
+        );
         let mut b = 0.0;
         while b <= view_beats {
             let x = x_of(b);
-            let text = if (b % bpb).abs() < 1e-6 {
-                format!("{}", (b / bpb) as i64 + 1)
+            let bar = (b % bpb).abs() < 1e-6;
+            let (text, font, col) = if bar {
+                (
+                    format!("{}", (b / bpb) as i64 + 1),
+                    theme::bold_font(11.0),
+                    theme::TEXT_DIM,
+                )
             } else {
-                format!("·{}", (b % bpb) as i64 + 1)
+                (
+                    format!("{}", (b % bpb) as i64 + 1),
+                    FontId::proportional(9.5),
+                    theme::TEXT_FAINT,
+                )
             };
-            painter.text(
-                pos2(x + 2.0, ruler_top + 3.0),
-                Align2::LEFT_TOP,
-                text,
-                FontId::monospace(10.0),
-                visuals.weak_text_color(),
+            painter.line_segment(
+                [pos2(x, ruler.bottom() - if bar { 9.0 } else { 4.0 }), pos2(x, ruler.bottom())],
+                Stroke::new(1.0_f32, if bar { theme::BORDER_HI } else { theme::BORDER }),
             );
+            painter.text(pos2(x + 4.0, ruler_top + 3.0), Align2::LEFT_TOP, text, font, col);
             b += 1.0;
         }
 
@@ -212,25 +249,35 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             pos2(keys_left, origin.y + RULER_H),
             pos2(keys_left + KEYS_W, resp.rect.bottom()),
         );
-        painter.rect_filled(keys, 0.0, Color32::from_gray(200));
+        painter.rect_filled(keys, 0.0, theme::mix(theme::TEXT, theme::CANVAS, 0.08));
         for p in 0..=127u8 {
             let r = Rect::from_min_size(pos2(keys_left, y_of(p)), vec2(KEYS_W, kh));
-            if r.bottom() < ruler_top + RULER_H {
+            if r.bottom() < ruler_top + RULER_H || r.top() > visible.bottom() {
                 continue;
             }
             if app.held_key == Some(p) {
                 // The key being held down lights up in the track colour.
-                painter.rect_filled(r, 0.0, color);
+                painter.rect_filled(r.shrink2(vec2(0.0, 0.5)), 3.0, color);
             } else if pitch::is_black_key(p) {
+                let k = Rect::from_min_size(r.min, vec2(KEYS_W * 0.62, kh));
                 painter.rect_filled(
-                    Rect::from_min_size(r.min, vec2(KEYS_W * 0.62, kh)),
-                    0.0,
-                    Color32::from_gray(30),
+                    k,
+                    CornerRadius {
+                        nw: 0,
+                        sw: 0,
+                        ne: 3,
+                        se: 3,
+                    },
+                    theme::SURFACE,
+                );
+                painter.line_segment(
+                    [pos2(k.left(), k.top() + 1.5), pos2(k.right() - 3.0, k.top() + 1.5)],
+                    Stroke::new(1.0_f32, theme::alpha(Color32::WHITE, 30)),
                 );
             } else {
                 painter.line_segment(
                     [r.left_bottom(), r.right_bottom()],
-                    Stroke::new(1.0_f32, Color32::from_gray(150)),
+                    Stroke::new(1.0_f32, Color32::from_gray(170)),
                 );
             }
             if scale_on && in_key(p) {
@@ -247,18 +294,22 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             };
             if let Some(label) = label {
                 painter.text(
-                    pos2(r.right() - 3.0, r.center().y),
+                    pos2(r.right() - 4.0, r.center().y),
                     Align2::RIGHT_CENTER,
                     label,
-                    FontId::proportional(kh.min(11.0)),
-                    Color32::from_gray(20),
+                    theme::bold_font(kh.min(10.5)),
+                    theme::CANVAS,
                 );
             }
         }
+        painter.line_segment(
+            [keys.right_top(), keys.right_bottom()],
+            Stroke::new(1.0_f32, theme::BORDER),
+        );
         painter.rect_filled(
             Rect::from_min_size(pos2(keys_left, ruler_top), vec2(KEYS_W, RULER_H)),
             0.0,
-            visuals.panel_fill,
+            theme::PANEL,
         );
 
         if clip.notes.is_empty() {
@@ -271,7 +322,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 (visible.left() + KEYS_W + visible.right()) / 2.0,
                 visible.top() + RULER_H + 40.0,
             );
-            painter.text(center, Align2::CENTER_TOP, hint, FontId::proportional(15.0), visuals.text_color());
+            painter.text(center, Align2::CENTER_TOP, hint, FontId::proportional(15.0), theme::TEXT_DIM);
         }
 
         // ---- interaction ----
@@ -513,7 +564,7 @@ fn easy_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: us
         .get(track_index)
         .is_some_and(|t| t.instrument.is_drums());
     ui.horizontal(|ui| {
-        ui.heading("Notes").on_hover_text(
+        theme::section(ui, "Notes").on_hover_text(
             "Each row is a piano key (low at the bottom, high at the top). Left to right is time.",
         );
         if let Some(c) = app.project.clip_mut(clip_id) {
@@ -628,12 +679,12 @@ fn easy_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: us
         });
         app.ui_rects.insert("key", key.response.rect);
     });
-    ui.weak("click to add a note · drag to move · drag the right edge to make longer · right-click to delete · hold a piano key to hear it");
+    theme::hint(ui, "click to add a note · drag to move · drag the right edge to make longer · right-click to delete · hold a piano key to hear it");
 }
 
 fn pro_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usize) {
     ui.horizontal(|ui| {
-        ui.heading("Piano roll").on_hover_text(
+        theme::section(ui, "Piano roll").on_hover_text(
             "Each row is a piano key (low at the bottom, high at the top). Left to right is time.",
         );
         if let Some(c) = app.project.clip_mut(clip_id) {
@@ -739,7 +790,7 @@ fn pro_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usi
         ui.label("Height");
         ui.add(egui::Slider::new(&mut app.roll_key_height, 8.0..=24.0).show_value(false));
     });
-    ui.weak("click the grid to add a note · drag to move · drag the right edge to lengthen · right-click to delete · hold or slide on piano keys to hear them");
+    theme::hint(ui, "click the grid to add a note · drag to move · drag the right edge to lengthen · right-click to delete · hold or slide on piano keys to hear them");
 }
 
 fn drum_label(p: u8) -> Option<&'static str> {

@@ -7,15 +7,14 @@ use eframe::egui::{self, Color32, CornerRadius, Sense, Stroke, StrokeKind};
 
 use crate::app::App;
 
-const EASY: Color32 = Color32::from_rgb(0x2e, 0xb8, 0x6b);
-const PRO: Color32 = Color32::from_rgb(0x8a, 0x5c, 0xf6);
+use crate::theme::{self, EASY, PRO};
 
 /// Draw the switch.
 pub fn switch(ui: &mut egui::Ui, app: &mut App) {
-    let seg = egui::vec2(104.0, 32.0);
+    let seg = egui::vec2(96.0, 30.0);
     let frame = egui::Frame::new()
-        .fill(ui.visuals().extreme_bg_color)
-        .stroke(Stroke::new(1.5_f32, Color32::from_white_alpha(70)))
+        .fill(theme::CANVAS)
+        .stroke(Stroke::new(1.0_f32, theme::BORDER_HI))
         .corner_radius(CornerRadius::same(18))
         .inner_margin(egui::Margin::same(3));
     let resp = frame.show(ui, |ui| {
@@ -41,29 +40,31 @@ pub fn switch(ui: &mut egui::Ui, app: &mut App) {
                 let fill = if on {
                     color
                 } else if r.hovered() {
-                    color.gamma_multiply(0.25)
+                    theme::alpha(color, 50)
                 } else {
                     Color32::TRANSPARENT
                 };
+                if on {
+                    theme::glow(ui.painter(), rect, 15, theme::alpha(color, 110), 16);
+                }
                 ui.painter().rect_filled(rect, CornerRadius::same(15), fill);
                 if on {
                     ui.painter().rect_stroke(
                         rect,
                         CornerRadius::same(15),
-                        Stroke::new(1.0_f32, Color32::WHITE.gamma_multiply(0.6)),
+                        Stroke::new(1.0_f32, theme::alpha(Color32::WHITE, 70)),
                         StrokeKind::Inside,
                     );
+                }
+                if r.hovered() && !on {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
                 ui.painter().text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
                     label,
-                    egui::FontId::proportional(17.0),
-                    if on {
-                        Color32::WHITE
-                    } else {
-                        ui.visuals().weak_text_color()
-                    },
+                    theme::bold_font(15.0),
+                    if on { theme::CANVAS } else { theme::TEXT_DIM },
                 );
                 if r.clicked() && !on {
                     set(app, pro);

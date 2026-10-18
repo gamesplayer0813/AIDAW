@@ -2,7 +2,6 @@
 
 mod app;
 mod arrange;
-mod fonts;
 mod inspector;
 mod mode;
 mod onboarding;
@@ -10,6 +9,7 @@ mod piano_roll;
 mod scale;
 mod settings;
 mod sound;
+mod theme;
 
 use std::path::PathBuf;
 
@@ -28,8 +28,7 @@ fn main() -> eframe::Result {
         "AIDAW",
         options,
         Box::new(|cc| {
-            fonts::install(&cc.egui_ctx);
-            cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            theme::install(&cc.egui_ctx);
             Ok(Box::new(app::App::new(path)))
         }),
     )

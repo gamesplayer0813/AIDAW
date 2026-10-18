@@ -6,13 +6,14 @@ use aidaw_core::{Instrument, Waveform};
 use eframe::egui::{self, RichText};
 
 use crate::app::{track_color, App};
+use crate::theme;
 use aidaw_core::presets;
 
 pub fn show(ui: &mut egui::Ui, app: &mut App) {
     app.ui_rects.insert("inspector", ui.max_rect());
     let pro = app.pro();
     ui.horizontal(|ui| {
-        ui.heading(if pro { "Tracks" } else { "Instruments" });
+        theme::section(ui, if pro { "Tracks" } else { "Instruments" });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.menu_button(RichText::new("➕ Add instrument").strong(), |ui| {
                 ui.label(RichText::new("Pick a sound for the new track").weak());
@@ -42,79 +43,76 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             let mut preview = None;
             for (i, track) in app.project.tracks.iter_mut().enumerate() {
                 let selected = app.selected_track.as_deref() == Some(track.id.as_str());
-                egui::Frame::group(ui.style())
-                    .fill(if selected {
-                        ui.visuals().selection.bg_fill.gamma_multiply(0.35)
-                    } else {
-                        ui.visuals().panel_fill
-                    })
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            let (r, _) =
-                                ui.allocate_exact_size(egui::vec2(6.0, 18.0), egui::Sense::hover());
-                            ui.painter().rect_filled(r, 2.0, track_color(i));
-                            if ui
-                                .selectable_label(selected, RichText::new(&track.name).strong())
-                                .on_hover_text("Select this track to change its sound")
-                                .clicked()
-                            {
-                                app.selected_track = Some(track.id.clone());
-                                preview = Some(i);
-                            }
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| {
-                                    // Only on the selected track, so a stray click can't delete one.
-                                    if selected
-                                        && ui
-                                            .small_button("🗑")
-                                            .on_hover_text(
-                                                "Delete this track (Ctrl+Z brings it back)",
-                                            )
-                                            .clicked()
-                                    {
-                                        remove = Some((track.id.clone(), track.name.clone()));
-                                    }
-                                    if pro {
-                                        ui.toggle_value(&mut track.solo, "S")
-                                            .on_hover_text("Solo: hear ONLY this track");
-                                        ui.toggle_value(&mut track.mute, "M")
-                                            .on_hover_text("Mute: silence this track");
-                                    } else {
-                                        ui.toggle_value(&mut track.mute, "🔇 Silence")
-                                            .on_hover_text("Turn this instrument off for now");
-                                    }
-                                },
-                            );
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("🔉").on_hover_text("Volume");
-                            if pro {
-                                ui.add(
-                                    egui::Slider::new(&mut track.gain, 0.0..=1.5).show_value(true),
-                                )
-                                .on_hover_text("Volume: how loud this track is (1.0 = unchanged)");
-                                ui.label("L/R").on_hover_text("Pan");
-                                ui.add(
-                                    egui::Slider::new(&mut track.pan, -1.0..=1.0).show_value(true),
-                                )
-                                .on_hover_text("Pan: move the sound to the left or right speaker");
-                                if ui
-                                    .small_button("mid")
-                                    .on_hover_text("Centre the pan")
+                let color = track_color(i);
+                let (fill, stroke) = if selected {
+                    (
+                        theme::mix(theme::SURFACE, color, 0.14),
+                        egui::Stroke::new(1.0_f32, theme::alpha(color, 170)),
+                    )
+                } else {
+                    (theme::SURFACE, egui::Stroke::new(1.0_f32, theme::BORDER))
+                };
+                theme::card(fill, stroke).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.horizontal(|ui| {
+                        let (r, _) =
+                            ui.allocate_exact_size(egui::vec2(4.0, 18.0), egui::Sense::hover());
+                        ui.painter().rect_filled(r, 2.0, color);
+                        if ui
+                            .selectable_label(
+                                selected,
+                                RichText::new(&track.name).font(theme::bold_font(14.0)),
+                            )
+                            .on_hover_text("Select this track to change its sound")
+                            .clicked()
+                        {
+                            app.selected_track = Some(track.id.clone());
+                            preview = Some(i);
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            // Only on the selected track, so a stray click can't delete one.
+                            if selected
+                                && ui
+                                    .small_button("🗑")
+                                    .on_hover_text("Delete this track (Ctrl+Z brings it back)")
                                     .clicked()
-                                {
-                                    track.pan = 0.0;
-                                }
+                            {
+                                remove = Some((track.id.clone(), track.name.clone()));
+                            }
+                            if pro {
+                                ui.toggle_value(&mut track.solo, "S")
+                                    .on_hover_text("Solo: hear ONLY this track");
+                                ui.toggle_value(&mut track.mute, "M")
+                                    .on_hover_text("Mute: silence this track");
                             } else {
-                                ui.spacing_mut().slider_width = 180.0;
-                                ui.add(
-                                    egui::Slider::new(&mut track.gain, 0.0..=1.5).show_value(false),
-                                )
-                                .on_hover_text("How loud this instrument is");
+                                ui.toggle_value(&mut track.mute, "🔇 Silence")
+                                    .on_hover_text("Turn this instrument off for now");
                             }
                         });
                     });
+                    ui.horizontal(|ui| {
+                        ui.label("🔉").on_hover_text("Volume");
+                        if pro {
+                            ui.add(egui::Slider::new(&mut track.gain, 0.0..=1.5).show_value(true))
+                                .on_hover_text("Volume: how loud this track is (1.0 = unchanged)");
+                            ui.label("L/R").on_hover_text("Pan");
+                            ui.add(egui::Slider::new(&mut track.pan, -1.0..=1.0).show_value(true))
+                                .on_hover_text("Pan: move the sound to the left or right speaker");
+                            if ui
+                                .small_button("mid")
+                                .on_hover_text("Centre the pan")
+                                .clicked()
+                            {
+                                track.pan = 0.0;
+                            }
+                        } else {
+                            ui.spacing_mut().slider_width = ui.available_width() - 8.0;
+                            ui.add(egui::Slider::new(&mut track.gain, 0.0..=1.5).show_value(false))
+                                .on_hover_text("How loud this instrument is");
+                        }
+                    });
+                });
+                ui.add_space(2.0);
             }
             if let Some((id, name)) = remove {
                 if app.run_op(Op::RemoveTrack { track_id: id }).is_some() {
@@ -153,7 +151,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
     };
 
     let sound = ui.scope(|ui| {
-        ui.heading("Sound");
+        theme::section(ui, "Sound");
         let track = &mut app.project.tracks[index];
         ui.horizontal(|ui| {
             ui.label("Track name");
@@ -162,16 +160,17 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         let current = presets::name_of(&track.instrument).unwrap_or("⚙ Custom");
         let mut picked = false;
         if !pro {
-            ui.label("Pick a sound (click to hear it):");
+            ui.label(RichText::new("Pick a sound (click to hear it):").color(theme::TEXT_DIM));
             egui::Grid::new("preset_grid")
                 .num_columns(2)
                 .spacing([6.0, 6.0])
                 .show(ui, |ui| {
                     for (i, p) in presets::all().into_iter().enumerate() {
                         let is = track.instrument == p.instrument;
-                        let b = egui::Button::new(RichText::new(p.name).size(15.0))
+                        let b = egui::Button::new(RichText::new(p.name).size(14.5))
                             .selected(is)
-                            .min_size(egui::vec2(122.0, 38.0));
+                            .corner_radius(10)
+                            .min_size(egui::vec2(126.0, 40.0));
                         if ui.add(b).on_hover_text(p.hint).clicked() {
                             track.instrument = p.instrument.clone();
                             picked = true;

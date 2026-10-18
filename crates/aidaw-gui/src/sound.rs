@@ -43,20 +43,23 @@ pub fn log_engine(result: &Result<Engine, String>) {
 
 /// Small level meter for the top bar.
 pub fn meter(ui: &mut egui::Ui, peak: f32) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(60.0, 10.0), egui::Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(60.0, 8.0), egui::Sense::click());
     let p = ui.painter();
-    p.rect_filled(rect, 2.0, Color32::from_gray(40));
+    p.rect_filled(rect, 4.0, crate::theme::CANVAS);
     let level = peak.clamp(0.0, 1.0);
     let mut fill = rect;
     fill.set_width(rect.width() * level);
     let color = if level > 0.95 {
-        Color32::RED
+        crate::theme::DANGER
     } else if level > 0.7 {
-        Color32::YELLOW
+        crate::theme::WARN
     } else {
-        Color32::LIGHT_GREEN
+        crate::theme::OK
     };
-    p.rect_filled(fill, 2.0, color);
+    if level > 0.0 {
+        crate::theme::glow(p, fill, 4, crate::theme::alpha(color, 90), 8);
+    }
+    p.rect_filled(fill, 4.0, color);
     resp
 }
 
