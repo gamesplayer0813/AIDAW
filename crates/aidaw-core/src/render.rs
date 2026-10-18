@@ -20,7 +20,7 @@
 use std::f32::consts::{PI, TAU};
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 use crate::model::{Instrument, Project, Waveform};
 use crate::pitch;
@@ -725,8 +725,7 @@ impl Voice {
 
 /// Render the whole project (plus a tail for releases) to interleaved stereo.
 pub fn render(project: &Project, sample_rate: u32) -> Vec<f32> {
-    let tail_seconds = 2.0;
-    let total_seconds = project.length_beats() * project.seconds_per_beat() + tail_seconds;
+    let total_seconds = project.length_beats() * project.seconds_per_beat() + RENDER_TAIL_SECONDS;
     let total_frames = (total_seconds * sample_rate as f64) as usize;
     let mut seq = Sequencer::new(sample_rate);
     let mut out = vec![0.0f32; total_frames * 2];
@@ -752,10 +751,15 @@ pub fn write_wav(path: &Path, samples: &[f32], sample_rate: u32) -> Result<()> {
     Ok(())
 }
 
-/// Longest song [`render_to_wav`] will write, so a runaway clip can't exhaust memory.
+/// Longest song [`render_to_wav`] will write. Rendering streams to disk in
+/// small blocks, so this only bounds the size of the WAV file (about 635 MB
+/// per hour at 44.1 kHz), not memory.
 pub const MAX_RENDER_SECONDS: f64 = 3600.0;
 
-pub fn render_to_wav(project: &Project, path: &Path, sample_rate: u32) -> Result<f64> {
+/// Seconds of silence appended after the last clip so releases can ring out.
+pub const RENDER_TAIL_SECONDS: f64 = 2.0;
+
+fn check_render_args(project: &Project, sample_rate: u32) -> Result<()> {
     if !(8_000..=192_000).contains(&sample_rate) {
         anyhow::bail!("sample rate must be between 8000 and 192000 Hz (got {sample_rate})");
     }
@@ -767,9 +771,56 @@ pub fn render_to_wav(project: &Project, path: &Path, sample_rate: u32) -> Result
             MAX_RENDER_SECONDS / 60.0
         );
     }
-    let samples = render(project, sample_rate);
-    write_wav(path, &samples, sample_rate)?;
-    Ok(samples.len() as f64 / 2.0 / sample_rate as f64)
+    Ok(())
+}
+
+/// Render the song straight into a 16-bit stereo WAV file, block by block,
+/// so even an hour-long song needs only a few kilobytes of memory. Returns
+/// the duration written in seconds.
+pub fn render_to_wav(project: &Project, path: &Path, sample_rate: u32) -> Result<f64> {
+    render_to_wav_with_progress(project, path, sample_rate, |_| {})
+}
+
+/// Like [`render_to_wav`], calling `progress` with a value from 0.0 to 1.0
+/// as the render advances (handy for a progress bar on another thread).
+pub fn render_to_wav_with_progress(
+    project: &Project,
+    path: &Path,
+    sample_rate: u32,
+    mut progress: impl FnMut(f64),
+) -> Result<f64> {
+    check_render_args(project, sample_rate)?;
+    let total_seconds = project.length_beats() * project.seconds_per_beat() + RENDER_TAIL_SECONDS;
+    let total_frames = (total_seconds * sample_rate as f64) as usize;
+    let spec = hound::WavSpec {
+        channels: 2,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut w = hound::WavWriter::create(path, spec)
+        .with_context(|| format!("creating {}", path.display()))?;
+    let mut seq = Sequencer::new(sample_rate);
+    let mut block = vec![0.0f32; 512 * 2];
+    let mut done = 0usize;
+    let mut next_report = 0usize;
+    while done < total_frames {
+        let n = (total_frames - done).min(512);
+        let out = &mut block[..n * 2];
+        seq.process(project, out);
+        for s in out.iter() {
+            let s = if s.is_finite() { *s } else { 0.0 };
+            w.write_sample((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)?;
+        }
+        done += n;
+        if done >= next_report {
+            progress(done as f64 / total_frames.max(1) as f64);
+            next_report = done + sample_rate as usize / 4;
+        }
+    }
+    w.finalize()?;
+    progress(1.0);
+    Ok(total_frames as f64 / sample_rate as f64)
 }
 
 #[cfg(test)]
@@ -877,6 +928,29 @@ mod tests {
         // The first note(s) of the song were triggered after the wrap.
         assert!(peak(&buf[frames..]) > 0.0);
         assert!(buf.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn streamed_wav_matches_in_memory_render() {
+        let p = demo_project();
+        let sr = 22_050;
+        let path = std::env::temp_dir().join(format!("aidaw-render-{}.wav", std::process::id()));
+        let mut reports = Vec::new();
+        let secs = render_to_wav_with_progress(&p, &path, sr, |x| reports.push(x)).unwrap();
+        let expected = render(&p, sr);
+        assert!((secs - expected.len() as f64 / 2.0 / sr as f64).abs() < 1e-9);
+        let got: Vec<i16> = hound::WavReader::open(&path)
+            .unwrap()
+            .samples::<i16>()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(got.len(), expected.len());
+        for (a, b) in got.iter().zip(&expected) {
+            assert_eq!(*a, (b.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
+        }
+        assert_eq!(reports.last().copied(), Some(1.0));
+        assert!(reports.windows(2).all(|w| w[0] <= w[1]));
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

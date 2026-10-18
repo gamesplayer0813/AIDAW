@@ -108,7 +108,7 @@ impl Session {
             "help" => Ok(tools::GUIDE.to_string()),
             "list_presets" => Ok(list_presets()),
             "new_project" => {
-                let path = PathBuf::from(str_arg(&args, "path")?);
+                let path = self.project_path_arg(str_arg(&args, "path")?)?;
                 if path.exists() && args.get("overwrite").and_then(Value::as_bool) != Some(true) {
                     bail!(
                         "{} already exists; pass \"overwrite\": true to replace it, or use open_project",
@@ -132,10 +132,16 @@ impl Session {
                 ))
             }
             "open_project" => {
-                let path = PathBuf::from(str_arg(&args, "path")?);
+                let path = self.resolve(str_arg(&args, "path")?);
+                if !path.exists() {
+                    bail!(
+                        "{} does not exist. Use new_project to create a song, or give the full path of an existing .aidaw.json file",
+                        path.display()
+                    );
+                }
                 let project = pio::load(&path)?;
-                self.path = Some(path);
-                Ok(summary(&project))
+                self.path = Some(path.clone());
+                Ok(format!("opened {}\n{}", path.display(), summary(&project)))
             }
             "get_project" => {
                 let project = pio::load(self.path()?)?;
@@ -172,7 +178,7 @@ impl Session {
                 let path = self.path()?;
                 let project = pio::load(path)?;
                 let out = match args.get("output_path").and_then(Value::as_str) {
-                    Some(p) => PathBuf::from(p),
+                    Some(p) => self.wav_path_arg(p)?,
                     None => default_wav_path(path),
                 };
                 let sr = match args.get("sample_rate") {
@@ -198,7 +204,7 @@ impl Session {
                 };
                 self.edit(|work| {
                     let mut results = Vec::with_capacity(ops.len());
-                    for (i, item) in ops.into_iter().enumerate() {
+                    for (i, item) in ops.clone().into_iter().enumerate() {
                         let mut item = match item {
                             Value::Object(m) => m,
                             _ => bail!("op #{i}: each op must be an object with an \"op\" field"),
@@ -229,7 +235,9 @@ impl Session {
                     Ok(results)
                 })
             }
-            name if is_edit_tool(name) => self.edit(|work| Ok(vec![apply_tool(work, tool, args)?])),
+            name if is_edit_tool(name) => {
+                self.edit(|work| Ok(vec![apply_tool(work, tool, args.clone())?]))
+            }
             other => bail!("tool {other} is not implemented"),
         }
     }
@@ -237,17 +245,122 @@ impl Session {
     /// Load, edit a working copy, save. Re-reading the file on every call
     /// picks up edits the human made in the GUI in the meantime; nothing is
     /// saved if any step fails.
-    fn edit(&self, f: impl FnOnce(&mut Project) -> Result<Vec<Value>>) -> Result<String> {
+    ///
+    /// The GUI may save the same file between our load and our save (it
+    /// autosaves a few hundred milliseconds after each edit). If the file's
+    /// modification time changed meanwhile, the edit is replayed on the fresh
+    /// version instead of overwriting the human's change.
+    fn edit(&self, f: impl Fn(&mut Project) -> Result<Vec<Value>>) -> Result<String> {
         let path = self.path()?;
-        let mut work = pio::load(path)?;
-        let results = f(&mut work)?;
-        pio::save(&work, path)?;
-        Ok(format!(
-            "{}\nProject now: {}",
-            json!({ "results": results }),
-            summary(&work)
-        ))
+        for attempt in 0..EDIT_RETRIES {
+            let before = pio::modified(path);
+            let mut work = pio::load(path)?;
+            let results = f(&mut work)?;
+            if pio::modified(path) != before {
+                // Somebody wrote the file while we were editing: start over.
+                if attempt + 1 < EDIT_RETRIES {
+                    std::thread::sleep(std::time::Duration::from_millis(50 * (attempt as u64 + 1)));
+                }
+                continue;
+            }
+            pio::save(&work, path)?;
+            return Ok(format!(
+                "{}\nProject now: {}",
+                json!({ "results": results }),
+                summary(&work)
+            ));
+        }
+        bail!(
+            "{} keeps changing while I try to save it (is something else writing it?); nothing was changed, please retry",
+            path.display()
+        )
     }
+
+    /// Turn a path the model gave us into an absolute one. Relative paths are
+    /// taken relative to the current project's folder (the model and the
+    /// human both expect "song.wav" to land next to the song), or, with no
+    /// project open, the user's Music folder; never the server's working
+    /// directory, which under an MCP client is somewhere arbitrary.
+    fn resolve(&self, given: &str) -> PathBuf {
+        let given = PathBuf::from(given.trim());
+        if given.is_absolute() {
+            return given;
+        }
+        let base = self
+            .path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .filter(|d| !d.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(default_dir);
+        base.join(given)
+    }
+
+    /// Resolve the `path` of new_project: it always ends up as `*.aidaw.json`
+    /// ("song" and "song.json" are completed), so the model can never make us
+    /// overwrite a file that is not a project.
+    fn project_path_arg(&self, given: &str) -> Result<PathBuf> {
+        let mut path = self.resolve(given);
+        if !pio::is_project_path(&path) {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            let stem = name
+                .strip_suffix(".json")
+                .or_else(|| name.strip_suffix(".JSON"))
+                .unwrap_or(&name);
+            if stem.is_empty() || stem.contains('.') {
+                bail!(
+                    "project files must be named *.{} (got {:?}); e.g. {{\"path\": \"song.aidaw.json\"}}",
+                    pio::EXTENSION,
+                    given
+                );
+            }
+            path.set_file_name(format!("{stem}.{}", pio::EXTENSION));
+        }
+        Ok(path)
+    }
+
+    /// Resolve the `output_path` of render_wav: only `*.wav` may be written.
+    fn wav_path_arg(&self, given: &str) -> Result<PathBuf> {
+        let mut path = self.resolve(given);
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        if name.is_empty() {
+            bail!("output_path must name a .wav file, e.g. \"song.wav\"");
+        }
+        if name.to_ascii_lowercase().ends_with(".wav") {
+            return Ok(path);
+        }
+        if name.contains('.') {
+            bail!(
+                "render_wav only writes .wav files (got {given:?}); e.g. {{\"output_path\": \"song.wav\"}}"
+            );
+        }
+        path.set_file_name(format!("{name}.wav"));
+        Ok(path)
+    }
+}
+
+/// How often an edit is replayed when the file changes underneath it.
+const EDIT_RETRIES: usize = 4;
+
+/// Where relative paths go when no project is open: the user's Music folder
+/// if there is one, else their home folder, else the working directory.
+fn default_dir() -> PathBuf {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from);
+    if let Some(home) = home {
+        let music = home.join("Music");
+        return if music.is_dir() { music } else { home };
+    }
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
 const EDIT_TOOLS: &[&str] = &[

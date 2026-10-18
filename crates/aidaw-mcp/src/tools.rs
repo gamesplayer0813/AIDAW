@@ -25,6 +25,10 @@ PITCH  "C4" = 60 = middle C. Sharps "F#3", flats "Bb2". Bass lives around C2, ch
 NAMES  Tracks/clips can be given by name or id: {"track": "Bass"} or {"track": "t1"}.
 DRUMS  kick 36, snare 38, clap 39, hat 42, open_hat 46, tom_low 41, tom_mid 45, tom_high 48, crash 49, ride 51.
 
+PATHS  Relative paths are taken relative to the open project's folder (with no project open: the
+       user's Music folder). Results print the absolute path. Only *.aidaw.json (projects) and
+       *.wav (renders) are ever written.
+
 QUICK START (4-bar loop)
   new_project      {"path": "song.aidaw.json", "bpm": 100}
   add_track        {"name": "Drums", "instrument": "drum_kit"}
@@ -137,7 +141,7 @@ pub const TOOLS: &[Tool] = &[
         description: "Create a new empty project file and make it the current project.",
         example: r#"{"path": "song.aidaw.json", "name": "My Song", "bpm": 100}"#,
         params: &[
-            req("path", Str, "file path, ideally ending in .aidaw.json"),
+            req("path", Str, "file path ending in .aidaw.json (relative = next to the current project, else the Music folder)"),
             p("name", Str, "song title"),
             p("bpm", Num, "tempo, 20-400 (default 120)"),
             p("overwrite", Bool, "replace the file if it exists"),
@@ -325,7 +329,7 @@ pub const TOOLS: &[Tool] = &[
         description: "Render the song to a 16-bit stereo WAV file (defaults to <project>.wav) so it can be heard.",
         example: r#"{"output_path": "song.wav"}"#,
         params: &[
-            p("output_path", Str, "where to write the .wav"),
+            p("output_path", Str, "where to write the .wav (relative = next to the project)"),
             p("sample_rate", Int, "default 44100"),
         ],
     },

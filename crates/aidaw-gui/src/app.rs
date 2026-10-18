@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant, SystemTime};
 
 use aidaw_core::edit::{self, Op};
@@ -77,6 +79,8 @@ pub struct App {
     last_poll: Instant,
     save_at: Option<Instant>,
     pub status: String,
+    /// A WAV export running on a background thread.
+    export: Option<ExportJob>,
 
     // ---- beginner help ----
     pub settings: Settings,
@@ -136,7 +140,14 @@ fn starter_project() -> Project {
 }
 
 fn mtime(path: &std::path::Path) -> Option<SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+    pio::modified(path)
+}
+
+/// A WAV export in progress on a background thread.
+struct ExportJob {
+    path: PathBuf,
+    progress: Arc<AtomicU32>,
+    result: mpsc::Receiver<Result<f64, String>>,
 }
 
 impl App {
@@ -193,6 +204,7 @@ impl App {
             playhead: 0.0,
             last_poll: Instant::now(),
             status,
+            export: None,
             settings,
             show_welcome,
             show_ai_help: false,
@@ -469,9 +481,25 @@ impl App {
 
     fn save_now(&mut self) {
         self.save_at = None;
-        let Some(path) = &self.path else { return };
-        match pio::save(&self.project, path) {
-            Ok(()) => self.disk_mtime = mtime(path),
+        let Some(path) = self.path.clone() else {
+            return;
+        };
+        // The AI may have written the file since we last read it (between two
+        // polls). Never overwrite that silently: keep the human's version, but
+        // put the AI's on the undo stack so nothing is lost.
+        let on_disk = mtime(&path);
+        if on_disk.is_some() && self.disk_mtime.is_some() && on_disk != self.disk_mtime {
+            if let Ok(theirs) = pio::load(&path) {
+                if theirs != self.project {
+                    self.push_undo(theirs);
+                    self.status =
+                        "The AI changed the song while you were editing; kept your version (Ctrl+Z shows the AI's)"
+                            .into();
+                }
+            }
+        }
+        match pio::save(&self.project, &path) {
+            Ok(()) => self.disk_mtime = mtime(&path),
             Err(e) => self.status = format!("Save failed: {e:#}"),
         }
     }
@@ -536,6 +564,10 @@ impl App {
     }
 
     fn export_wav_dialog(&mut self) {
+        if self.export.is_some() {
+            self.status = "An export is already running".into();
+            return;
+        }
         let name = format!("{}.wav", self.project.name);
         if let Some(p) = rfd::FileDialog::new()
             .add_filter("WAV audio", &["wav"])
@@ -547,10 +579,47 @@ impl App {
                 .as_ref()
                 .map(|e| e.sample_rate())
                 .unwrap_or(44_100);
-            self.status = match render::render_to_wav(&self.project, &p, sr) {
-                Ok(secs) => format!("Exported {secs:.1}s to {}", p.display()),
-                Err(e) => format!("Export failed: {e:#}"),
-            };
+            let project = self.project.clone();
+            let progress = Arc::new(AtomicU32::new(0));
+            let (tx, rx) = mpsc::channel();
+            let (path, prog) = (p.clone(), progress.clone());
+            // Rendering a long song takes seconds; keep the window responsive.
+            std::thread::spawn(move || {
+                let r = render::render_to_wav_with_progress(&project, &path, sr, |x| {
+                    prog.store((x * 1000.0) as u32, Ordering::Relaxed);
+                })
+                .map_err(|e| format!("{e:#}"));
+                let _ = tx.send(r);
+            });
+            self.export = Some(ExportJob {
+                path: p,
+                progress,
+                result: rx,
+            });
+            self.status = "Exporting audio… 0%".into();
+        }
+    }
+
+    /// Show export progress and pick up the result when the thread is done.
+    fn poll_export(&mut self) {
+        let Some(job) = &self.export else { return };
+        let outcome = match job.result.try_recv() {
+            Ok(Ok(secs)) => Some(format!("Exported {secs:.1}s to {}", job.path.display())),
+            Ok(Err(e)) => Some(format!("Export failed: {e}")),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Some("Export failed: the export stopped unexpectedly".into())
+            }
+            Err(mpsc::TryRecvError::Empty) => None,
+        };
+        match outcome {
+            Some(status) => {
+                self.status = status;
+                self.export = None;
+            }
+            None => {
+                let pct = job.progress.load(Ordering::Relaxed) / 10;
+                self.status = format!("Exporting audio… {pct}%");
+            }
         }
     }
 
@@ -726,11 +795,14 @@ impl App {
                 self.save_as_dialog();
             }
             if ui
-                .button(if self.pro() {
-                    "Export as WAV audio…"
-                } else {
-                    "Save as audio file…"
-                })
+                .add_enabled(
+                    self.export.is_none(),
+                    egui::Button::new(if self.pro() {
+                        "Export as WAV audio…"
+                    } else {
+                        "Save as audio file…"
+                    }),
+                )
                 .on_hover_text("Make an audio file you can share or put in other apps")
                 .clicked()
             {
@@ -868,6 +940,7 @@ fn snap_label(s: f64) -> String {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_disk();
+        self.poll_export();
         self.check_audio_alive();
         self.shortcuts(ctx);
         if let Some(e) = &self.engine {
@@ -918,6 +991,8 @@ impl eframe::App for App {
 
         if self.is_playing() {
             ctx.request_repaint();
+        } else if self.export.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(100));
         } else {
             ctx.request_repaint_after(POLL_INTERVAL);
         }
