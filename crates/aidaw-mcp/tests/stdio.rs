@@ -458,3 +458,110 @@ fn command_line_mode() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn bad_inputs_are_rejected_clearly_and_never_kill_the_server() {
+    let dir = temp_dir("bad");
+    let path = dir.join("bad.aidaw.json");
+    let mut c = Client::start();
+    c.call("new_project", json!({"path": path, "overwrite": true}));
+    c.call(
+        "add_track",
+        json!({"name": "Keys", "instrument": "soft_keys"}),
+    );
+    c.call("add_track", json!({"name": "Drums"}));
+    c.call("add_melody", json!({"track": "Keys", "notes": "C4/1 E4/1"}));
+
+    // Sample rates that would crash or overflow the renderer.
+    for sr in [json!(0), json!("0"), json!(5_000_000_000u64)] {
+        let e = c.call_err("render_wav", json!({"sample_rate": sr}));
+        assert!(e.contains("8000 to 192000"), "{e}");
+    }
+    // Absurd lengths.
+    let long = [
+        ("add_melody", json!({"track": "Keys", "notes": "C4/1e7"})),
+        ("add_chords", json!({"track": "Keys", "chords": "Am:1e7"})),
+        (
+            "add_chords",
+            json!({"track": "Keys", "chords": "Am", "beats_per_chord": "1e7"}),
+        ),
+        ("add_clip", json!({"track": "Keys", "bars": 1e7})),
+        ("add_clip", json!({"track": "Keys", "length": 1e9})),
+        ("add_clip", json!({"track": "Keys", "bar": 4096, "bars": 2})),
+        ("update_clip", json!({"clip": "c1", "start": 1e12})),
+        (
+            "add_notes",
+            json!({"clip": "c1", "notes": [{"pitch": 60, "start": 0, "duration": 1e9}]}),
+        ),
+    ];
+    for (tool, args) in long {
+        let e = c.call_err(tool, args.clone());
+        assert!(
+            e.contains("4096") || e.contains("at most"),
+            "{tool} {args}: {e}"
+        );
+    }
+    // Unknown, non-preset track names are not created silently...
+    let e = c.call_err("add_melody", json!({"track": "Melody", "notes": "C5/1"}));
+    assert!(
+        e.contains("Existing tracks: t1 \"Keys\"") && e.contains("instrument"),
+        "{e}"
+    );
+    // ...but are with an explicit instrument, and the result says so up front.
+    let out = c.call(
+        "add_melody",
+        json!({"track": "Melody", "instrument": "pluck", "notes": "C5/1"}),
+    );
+    assert!(
+        out.contains("\"message\":\"created new track t3 \\\"Melody\\\" (pluck)"),
+        "{out}"
+    );
+    let e = c.call_err("add_clip", json!({"track": "  "}));
+    assert!(e.contains("empty"), "{e}");
+    // Tracks by position.
+    c.call("add_clip", json!({"track": "Track 2", "bar": 3}));
+    assert_eq!(load(&path).tracks[1].clips.len(), 1);
+    c.call("update_track", json!({"track": "3", "mute": true}));
+    assert!(load(&path).tracks[2].mute);
+
+    // Drum names only on drum tracks.
+    let e = c.call_err("add_melody", json!({"track": "Keys", "notes": "C4/1 o/1"}));
+    assert!(e.contains("drum"), "{e}");
+    c.call(
+        "add_melody",
+        json!({"track": "Drums", "notes": "kick/1 o/1"}),
+    );
+
+    // Silent coercions are now errors or warnings.
+    let e = c.call_err(
+        "add_chords",
+        json!({"track": "Keys", "chords": "C", "octave": 4.5}),
+    );
+    assert!(e.contains("whole number"), "{e}");
+    let e = c.call_err("transpose_clip", json!({"clip": "c1", "semitones": 60}));
+    assert!(e.contains("-48 to 48"), "{e}");
+    let e = c.call_err("transpose_clip", json!({"clip": "c1", "semitones": 1.5}));
+    assert!(e.contains("whole number"), "{e}");
+    c.call(
+        "add_melody",
+        json!({"track": "Keys", "bar": 1, "notes": "G9/1"}),
+    );
+    let e = c.call_err("transpose_clip", json!({"clip": "c1", "semitones": 12}));
+    assert!(e.contains("0-127"), "{e}");
+    let e = c.call_err("update_project", json!({"beats_per_bar": 0}));
+    assert!(e.contains("1 to 32"), "{e}");
+    let out = c.call("update_track", json!({"track": "Keys", "gain": 5}));
+    assert!(out.contains("clamped"), "{out}");
+
+    // Extended chord qualities, including 6/9.
+    let out = c.call(
+        "add_chords",
+        json!({"track": "Keys", "chords": "C6/9 G7b9 Dm11 Cmaj7#11 CmMaj7 A7#9 F13"}),
+    );
+    assert!(out.contains("7 chord(s)"), "{out}");
+
+    // The server is still alive after all of that.
+    assert!(c.call("get_project", json!({})).contains("3 track(s)"));
+    drop(c);
+    std::fs::remove_dir_all(&dir).ok();
+}

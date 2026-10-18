@@ -39,7 +39,8 @@ QUICK START (4-bar loop)
 
 NOTATIONS
   chords   "Am F C G" = one chord per bar. "Am:2 F:2" = 2 beats each. "r" = rest.
-           Qualities: C Am F#m Bb G7 Cmaj7 Dm7 Bm7b5 Esus4 Asus2 Cdim Caug C6 Cadd9 C5, slash C/E.
+           Qualities: C Am F#m Bb G7 Cmaj7 Dm7 Bm7b5 Esus4 Asus2 Cdim Caug C6 C6/9 Cadd9 C9 C11 C13
+           G7b9 G7#9 Dm11 Cmaj7#11 CmMaj7 C5, slash C/E.
            style: block (held), arpeggio (eighth notes), pulse (every beat). octave: 4 = around middle C.
   melody   "PITCH/BEATS" tokens: "C4/1 D4/0.5 E4/0.5 r/1 G4/2". r = rest. "C4+E4+G4/2" = chord.
            Duration may be omitted (repeats the previous one). "@80" sets velocity: "C4/1@80".
@@ -49,7 +50,9 @@ NOTATIONS
 PLACEMENT (add_chords, add_melody, add_drum_pattern)
   Give "track" and optionally "bar". Without "bar" the music goes after the track's last clip
   (bar 1 on an empty track). If a clip already covers that bar, notes are added into it; otherwise
-  a new clip is created. Give "clip" to target a specific clip. A missing track is created.
+  a new clip is created. Give "clip" to target a specific clip. A missing track is created only
+  if its name is a preset ("Drums", "Bass", "Piano", "Pad", "Lead"...) or you pass "instrument".
+  Tracks can also be given by position: "2" or "Track 2". Songs are at most 4096 bars.
 
 LOW-LEVEL TOOLS
   add_clip {"track": "Lead", "bar": 5, "bars": 2, "notes": "C5/1 E5/1"}  (notes may also be objects:
@@ -273,7 +276,7 @@ pub const TOOLS: &[Tool] = &[
         description: "Write a chord progression from chord symbols; one chord per bar unless \"Am:2\" gives beats. Voiced around middle C. Creates the clip (and track) if needed.",
         example: r#"{"track": "Keys", "chords": "Am F C G", "bar": 1, "style": "block"}"#,
         params: &[
-            req("track", Str, "track name or id (created with soft_keys if missing)"),
+            req("track", Str, "track name, id or position; a missing track is created if the name is a preset (Piano, Pad...) or instrument is given"),
             req("chords", Str, "e.g. \"Am F C G\", \"Dm7:2 G7:2 Cmaj7\", \"C/E\"; r = rest"),
             p("bar", Num, "1-based bar to start at (default: after the track's last clip)"),
             p("beats_per_chord", Num, "default: one bar"),
@@ -281,6 +284,7 @@ pub const TOOLS: &[Tool] = &[
             p("octave", Int, "4 = around middle C (default), 3 lower, 5 higher"),
             p("velocity", Int, "1-127 (default 90)"),
             p("clip", Str, "add into this existing clip instead"),
+            p("instrument", Str, "preset id used if the track has to be created, e.g. \"warm_pad\""),
         ],
     },
     Tool {
@@ -302,11 +306,12 @@ pub const TOOLS: &[Tool] = &[
         description: "Write a melody or bass line from compact text: PITCH/BEATS tokens, r = rest, C4+E4/2 = chord. Creates the clip (and track) if needed.",
         example: r#"{"track": "Lead", "bar": 1, "notes": "C4/1 D4/0.5 E4/0.5 r/1 G4/2"}"#,
         params: &[
-            req("track", Str, "track name or id (created if missing)"),
+            req("track", Str, "track name, id or position; a missing track is created if the name is a preset (Bass, Lead...) or instrument is given"),
             req("notes", Str, "e.g. \"C4/1 D4/0.5 E4/0.5 r/1 G4/2\" (1 = quarter note)"),
             p("bar", Num, "1-based bar to start at (default: after the track's last clip)"),
             p("velocity", Int, "1-127 (default 100)"),
             p("clip", Str, "add into this existing clip instead"),
+            p("instrument", Str, "preset id used if the track has to be created, e.g. \"pluck\""),
         ],
     },
     Tool {

@@ -10,8 +10,23 @@ use anyhow::{anyhow, bail, Result};
 use crate::model::Note;
 use crate::pitch;
 
+/// Longest piece of music (in beats) any notation here may describe: 4096
+/// bars of 4/4. Keeps a typo like `"C4/1e7"` from producing an hours-long render.
+pub const MAX_BEATS: f64 = 16_384.0;
+
 /// Chord qualities understood by [`parse_chord`], as (suffix, intervals).
 const QUALITIES: &[(&str, &[u8])] = &[
+    ("maj7#11", &[0, 4, 7, 11, 18]),
+    ("mMaj7", &[0, 3, 7, 11]),
+    ("mmaj7", &[0, 3, 7, 11]),
+    ("m(maj7)", &[0, 3, 7, 11]),
+    ("minmaj7", &[0, 3, 7, 11]),
+    ("7b9", &[0, 4, 7, 10, 13]),
+    ("7#9", &[0, 4, 7, 10, 15]),
+    ("m11", &[0, 3, 7, 10, 14, 17]),
+    ("69", &[0, 4, 7, 9, 14]),
+    ("11", &[0, 4, 7, 10, 14, 17]),
+    ("13", &[0, 4, 7, 10, 14, 21]),
     ("maj9", &[0, 4, 7, 11, 14]),
     ("maj7", &[0, 4, 7, 11]),
     ("min7b5", &[0, 3, 6, 10]),
@@ -46,7 +61,8 @@ const QUALITIES: &[(&str, &[u8])] = &[
 
 /// Example chord symbols, for help and error messages.
 pub const CHORD_EXAMPLES: &str =
-    "C, Am, F#m, Bb, G7, Cmaj7, Dm7, Bm7b5, Esus4, Asus2, Cdim, Caug, C6, Cadd9, C5, C/E";
+    "C, Am, F#m, Bb, G7, Cmaj7, Dm7, Bm7b5, Esus4, Asus2, Cdim, Caug, C6, C6/9, Cadd9, C9, C11, C13, \
+     G7b9, G7#9, Dm11, Cmaj7#11, CmMaj7, C5, C/E";
 
 /// A parsed chord: pitch classes relative to C (root first) plus an optional
 /// slash bass pitch class.
@@ -88,7 +104,9 @@ pub fn parse_chord(symbol: &str) -> Result<Chord> {
             "unknown chord symbol {symbol:?}; use a root A-G with optional #/b and a quality, e.g. {CHORD_EXAMPLES}"
         )
     };
-    let (main, bass) = match symbol.split_once('/') {
+    // "6/9" is a quality, not a slash chord.
+    let symbol_69 = symbol.replacen("6/9", "69", 1);
+    let (main, bass) = match symbol_69.split_once('/') {
         Some((m, b)) => {
             let (pc, rest) = pitch_class(b).ok_or_else(bad)?;
             if !rest.is_empty() {
@@ -96,7 +114,7 @@ pub fn parse_chord(symbol: &str) -> Result<Chord> {
             }
             (m, Some(pc))
         }
-        None => (symbol, None),
+        None => (symbol_69.as_str(), None),
     };
     let (root, quality) = pitch_class(main).ok_or_else(bad)?;
     let intervals = QUALITIES
@@ -167,6 +185,7 @@ impl ChordStyle {
 /// or `"N.C."` is a rest. Returns (chord or None for rest, beats).
 pub fn parse_progression(text: &str, default_beats: f64) -> Result<Vec<(Option<Chord>, f64)>> {
     let mut out = Vec::new();
+    let mut total = 0.0;
     for token in text
         .split(|c: char| c.is_whitespace() || c == ',' || c == '|')
         .filter(|t| !t.is_empty())
@@ -180,8 +199,12 @@ pub fn parse_progression(text: &str, default_beats: f64) -> Result<Vec<(Option<C
             ),
             None => (token, default_beats),
         };
-        if !(beats.is_finite() && beats > 0.0) {
-            bail!("chord duration must be > 0 beats (in {token:?})");
+        if !(beats.is_finite() && beats > 0.0 && beats <= MAX_BEATS) {
+            bail!("chord duration must be > 0 and at most {MAX_BEATS} beats (in {token:?})");
+        }
+        total += beats;
+        if total > MAX_BEATS {
+            bail!("chord progression is longer than {MAX_BEATS} beats (4096 bars)");
         }
         let chord = match sym.to_ascii_lowercase().as_str() {
             "r" | "rest" | "-" | "n.c." | "nc" | "x" => None,
@@ -361,12 +384,12 @@ pub const MELODY_EXAMPLE: &str = "C4/1 D4/0.5 E4/0.5 r/1 G4/2 C4+E4+G4/4";
 
 /// Parse a melody: space-separated tokens `PITCH[/BEATS][@VELOCITY]`.
 /// PITCH is a name (`C4`, `F#3`, `Bb2`), a MIDI number, a drum name
-/// (`kick`), several joined with `+` for a chord (`C4+E4+G4`), or `r` for a
+/// (`kick`; only when `drums` is true), several joined with `+` for a chord (`C4+E4+G4`), or `r` for a
 /// rest. BEATS defaults to the previous token's duration (1 at the start)
 /// and may be a fraction (`1/2`). Commas and `|` bar lines are ignored.
 /// Returns the notes (starting at beat 0) and the total length in beats,
 /// including trailing rests.
-pub fn parse_melody(text: &str, velocity: u8) -> Result<(Vec<Note>, f64)> {
+pub fn parse_melody(text: &str, velocity: u8, drums: bool) -> Result<(Vec<Note>, f64)> {
     let mut notes = Vec::new();
     let mut t = 0.0;
     let mut dur = 1.0;
@@ -390,9 +413,9 @@ pub fn parse_melody(text: &str, velocity: u8) -> Result<(Vec<Note>, f64)> {
             Some((p, d)) => (
                 p,
                 parse_number(d)
-                    .filter(|d| d.is_finite() && *d > 0.0)
+                    .filter(|d| d.is_finite() && *d > 0.0 && *d <= MAX_BEATS)
                     .ok_or_else(|| {
-                        anyhow!("bad duration in {token:?}; write beats after '/', e.g. \"C4/0.5\" (1 = quarter note)")
+                        anyhow!("bad duration in {token:?}; write beats (> 0, at most {MAX_BEATS}) after '/', e.g. \"C4/0.5\" (1 = quarter note)")
                     })?,
             ),
             None => (rest, dur),
@@ -400,7 +423,13 @@ pub fn parse_melody(text: &str, velocity: u8) -> Result<(Vec<Note>, f64)> {
         dur = d;
         if !matches!(pitches.to_ascii_lowercase().as_str(), "r" | "rest" | "_") {
             for p in pitches.split('+') {
-                let pitch = pitch::parse(p).or_else(|| drum_note(p)).ok_or_else(|| {
+                let drum = || drum_note(p).filter(|_| drums);
+                let pitch = pitch::parse(p).or_else(drum).ok_or_else(|| {
+                    if drum_note(p).is_some() {
+                        return anyhow!(
+                            "{p:?} in {token:?} is a drum name, but this is not a drum track; use note names like C4, F#3, Bb2 (C4 = middle C = 60), or write on a track with the drum_kit instrument"
+                        );
+                    }
                     anyhow!(
                         "bad pitch {p:?} in {token:?}; use a note name with octave like C4, F#3, Bb2 (C4 = middle C = 60), a MIDI number, or r for a rest. Example: \"{MELODY_EXAMPLE}\""
                     )
@@ -414,6 +443,9 @@ pub fn parse_melody(text: &str, velocity: u8) -> Result<(Vec<Note>, f64)> {
             }
         }
         t += d;
+        if t > MAX_BEATS {
+            bail!("melody is longer than {MAX_BEATS} beats (4096 bars)");
+        }
     }
     if notes.is_empty() && t == 0.0 {
         bail!("empty melody; write e.g. \"{MELODY_EXAMPLE}\"");
@@ -465,6 +497,21 @@ mod tests {
         assert_eq!(parse_chord("Bm7b5").unwrap().intervals, vec![0, 3, 6, 10]);
         assert_eq!(parse_chord("C/E").unwrap().bass, Some(4));
         assert!(parse_chord("H7").is_err());
+        let iv = |s: &str| parse_chord(s).unwrap().intervals;
+        assert_eq!(iv("G7b9"), vec![0, 4, 7, 10, 13]);
+        assert_eq!(iv("G7#9"), vec![0, 4, 7, 10, 15]);
+        assert_eq!(iv("C9"), vec![0, 4, 7, 10, 14]);
+        assert_eq!(iv("C11").len(), 6);
+        assert_eq!(iv("C13").last(), Some(&21));
+        assert_eq!(iv("Dm11"), vec![0, 3, 7, 10, 14, 17]);
+        assert_eq!(iv("Cmaj7#11"), vec![0, 4, 7, 11, 18]);
+        assert_eq!(iv("CmMaj7"), vec![0, 3, 7, 11]);
+        let six_nine = parse_chord("C6/9").unwrap();
+        assert_eq!(
+            (six_nine.intervals, six_nine.bass),
+            (vec![0, 4, 7, 9, 14], None)
+        );
+        assert_eq!(parse_chord("C6/9/E").unwrap().bass, Some(4));
         assert!(parse_chord("Cxyz")
             .unwrap_err()
             .to_string()
@@ -502,11 +549,13 @@ mod tests {
         assert!(ChordStyle::parse("arp").is_ok() && ChordStyle::parse("jazz").is_err());
         assert!(parse_progression("  ", 4.0).is_err());
         assert!(parse_progression("Am:0", 4.0).is_err());
+        assert!(parse_progression("Am:1e7", 4.0).is_err());
+        assert!(parse_progression("Am F", 1e7).is_err());
     }
 
     #[test]
     fn melody_notation() {
-        let (m, len) = parse_melody("C4/1 D4/0.5 E4 r/1 G4/1/2 C4+E4/2@80", 100).unwrap();
+        let (m, len) = parse_melody("C4/1 D4/0.5 E4 r/1 G4/1/2 C4+E4/2@80", 100, false).unwrap();
         assert_eq!(len, 5.5);
         assert_eq!(pitches(&m), vec![60, 62, 64, 67, 60, 64]);
         let starts: Vec<f64> = m.iter().map(|n| n.start).collect();
@@ -514,12 +563,22 @@ mod tests {
         assert_eq!(m[2].duration, 0.5); // inherits previous duration
         assert_eq!(m[3].duration, 0.5);
         assert_eq!(m[5].velocity, 80);
-        assert_eq!(parse_melody("60/2 kick", 100).unwrap().0[1].pitch, 36);
-        assert_eq!(parse_melody("C4/1 r/3", 100).unwrap().1, 4.0);
-        let err = parse_melody("C4/1 Q/1", 100).unwrap_err().to_string();
+        assert_eq!(parse_melody("60/2 kick", 100, true).unwrap().0[1].pitch, 36);
+        assert_eq!(parse_melody("C4/1 r/3", 100, false).unwrap().1, 4.0);
+        let err = parse_melody("C4/1 Q/1", 100, false)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("\"Q\"") && err.contains("C4/1"), "{err}");
-        assert!(parse_melody("C4/0", 100).is_err());
-        assert!(parse_melody("", 100).is_err());
+        assert!(parse_melody("C4/0", 100, false).is_err());
+        assert!(parse_melody("C4/1e7", 100, false).is_err());
+        assert!(parse_melody(&"C4/4096 ".repeat(5), 100, false).is_err());
+        let err = parse_melody("C4/1 o/1", 100, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("drum"), "{err}");
+        assert!(parse_melody("kick snare", 100, false).is_err());
+        assert_eq!(parse_melody("o/1", 100, true).unwrap().0[0].pitch, 46);
+        assert!(parse_melody("", 100, false).is_err());
     }
 
     #[test]
@@ -550,9 +609,9 @@ mod tests {
 
     #[test]
     fn format_round_trip() {
-        let (m, _) = parse_melody("C4/1 E4/0.5@80", 100).unwrap();
+        let (m, _) = parse_melody("C4/1 E4/0.5@80", 100, false).unwrap();
         assert_eq!(format_notes(&m, false), "0:C4/1 1:E4/0.5@80");
-        let (d, _) = parse_melody("kick/0.5 snare/0.5", 100).unwrap();
+        let (d, _) = parse_melody("kick/0.5 snare/0.5", 100, true).unwrap();
         assert_eq!(format_notes(&d, true), "0:kick/0.5 0.5:snare/0.5");
     }
 }

@@ -88,7 +88,7 @@ fn run() -> Result<ExitCode> {
                 .ok_or_else(|| anyhow!("call needs a tool name\n{USAGE}"))?;
             let args = cli_args(positional.collect())?;
             let mut session = Session::new(project);
-            match session.call(&tool, args) {
+            match call_guarded(&mut session, &tool, args) {
                 Ok(text) => {
                     println!("{text}");
                     Ok(ExitCode::SUCCESS)
@@ -159,6 +159,22 @@ fn serve(mut session: Session) -> Result<()> {
     Ok(())
 }
 
+/// Run a tool, turning a panic (a bug) into an ordinary error so that one bad
+/// call can never take the server down.
+fn call_guarded(session: &mut Session, name: &str, args: Value) -> Result<String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.call(name, args)))
+        .unwrap_or_else(|panic| {
+            let msg = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".into());
+            Err(anyhow!(
+                "internal error in {name}: {msg}. The project file was not changed by this call; please report this bug"
+            ))
+        })
+}
+
 fn error_response(id: Value, code: i64, message: &str) -> Value {
     json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
@@ -194,7 +210,7 @@ fn handle(session: &mut Session, msg: Value) -> Option<Value> {
                 .unwrap_or("")
                 .to_string();
             let args = params.get("arguments").cloned().unwrap_or(Value::Null);
-            let (text, is_error) = match session.call(&name, args) {
+            let (text, is_error) = match call_guarded(session, &name, args) {
                 Ok(text) => (text, false),
                 Err(e) => (format!("error: {e:#}"), true),
             };

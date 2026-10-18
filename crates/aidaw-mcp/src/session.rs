@@ -175,10 +175,15 @@ impl Session {
                     Some(p) => PathBuf::from(p),
                     None => default_wav_path(path),
                 };
-                let sr = args
-                    .get("sample_rate")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(44_100) as u32;
+                let sr = match args.get("sample_rate") {
+                    None => 44_100,
+                    Some(v) => v
+                        .as_u64()
+                        .filter(|sr| (8_000..=192_000).contains(sr))
+                        .ok_or_else(|| {
+                            anyhow!("sample_rate must be a whole number from 8000 to 192000, e.g. 44100 (got {v})")
+                        })? as u32,
+                };
                 let seconds = render::render_to_wav(&project, &out, sr)?;
                 Ok(format!("rendered {seconds:.1}s to {}", out.display()))
             }
@@ -271,7 +276,27 @@ fn edit_tool_names() -> String {
 
 /// Apply one editing tool to `work`.
 fn apply_tool(work: &mut Project, tool: &Tool, mut args: Args) -> Result<Value> {
+    let bpb = work.beats_per_bar as f64;
+    let mut warnings = Vec::new();
+    for (key, lo, hi) in [
+        ("gain", 0.0, 2.0),
+        ("master_gain", 0.0, 2.0),
+        ("pan", -1.0, 1.0),
+    ] {
+        if let Some(x) = args.get(key).and_then(Value::as_f64) {
+            if !(lo..=hi).contains(&x) {
+                warnings.push(format!("{key} {x} is outside {lo}..{hi} and was clamped"));
+            }
+        }
+    }
     match tool.name {
+        "update_project" => {
+            if let Some(v) = args.get("beats_per_bar") {
+                if !v.as_u64().is_some_and(|b| (1..=32).contains(&b)) {
+                    bail!("beats_per_bar must be a whole number from 1 to 32, e.g. 4 for 4/4 or 3 for 3/4 (got {v})");
+                }
+            }
+        }
         "add_chords" | "add_drum_pattern" | "add_melody" => return musical(work, tool.name, args),
         "add_track" | "update_track" => {
             let existing = match tool.name {
@@ -298,29 +323,58 @@ fn apply_tool(work: &mut Project, tool: &Tool, mut args: Args) -> Result<Value> 
         }
         "add_clip" => {
             let id = resolve_track(work, &mut args)?;
-            let bpb = work.beats_per_bar as f64;
+            let drums = work.track(&id).expect("resolved").instrument.is_drums();
             position(work, &mut args)?;
             if !args.contains_key("start") {
                 args.insert("start".into(), json!(append_position(work, &id)));
             }
             bars_to_length(&mut args, bpb)?;
-            normalize_notes(&mut args)?;
+            normalize_notes(&mut args, drums, max_end(bpb))?;
             if !args.contains_key("length") {
                 let end = note_end(args.get("notes"));
                 args.insert("length".into(), json!(round_up_to_bar(end, bpb)));
             }
+            let num = |k: &str| args.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+            check_end(num("start") + num("length"), bpb)?;
         }
         "update_clip" => {
-            resolve_clip(work, &mut args)?;
+            let id = resolve_clip(work, &mut args)?;
             position(work, &mut args)?;
-            bars_to_length(&mut args, work.beats_per_bar as f64)?;
+            bars_to_length(&mut args, bpb)?;
+            let clip = work.clip(&id).expect("resolved").1;
+            let get = |k: &str, d: f64| args.get(k).and_then(Value::as_f64).unwrap_or(d);
+            check_end(get("start", clip.start) + get("length", clip.length), bpb)?;
         }
-        "remove_clip" | "transpose_clip" => {
+        "remove_clip" => {
             resolve_clip(work, &mut args)?;
+        }
+        "transpose_clip" => {
+            let id = resolve_clip(work, &mut args)?;
+            let semis = match args.get("semitones") {
+                Some(v) => v
+                    .as_i64()
+                    .filter(|s| s.abs() <= 48)
+                    .ok_or_else(|| anyhow!("semitones must be a whole number from -48 to 48 (12 = one octave up), got {v}"))?,
+                None => bail!("missing \"semitones\", e.g. 12 for one octave up or -5"),
+            };
+            let notes = &work.clip(&id).expect("resolved").1.notes;
+            if let (Some(lo), Some(hi)) = (
+                notes.iter().map(|n| n.pitch).min(),
+                notes.iter().map(|n| n.pitch).max(),
+            ) {
+                if lo as i64 + semis < 0 || hi as i64 + semis > 127 {
+                    bail!(
+                        "transposing by {semis} would move notes outside the MIDI range 0-127 (clip spans {}..{}); use a smaller shift",
+                        pitch::name(lo),
+                        pitch::name(hi)
+                    );
+                }
+            }
         }
         "add_notes" => {
-            resolve_clip(work, &mut args)?;
-            normalize_notes(&mut args)?;
+            let id = resolve_clip(work, &mut args)?;
+            let drums = work.clip(&id).expect("resolved").0.instrument.is_drums();
+            normalize_notes(&mut args, drums, max_end(bpb))?;
         }
         "remove_notes" => {
             resolve_clip(work, &mut args)?;
@@ -347,7 +401,26 @@ fn apply_tool(work: &mut Project, tool: &Tool, mut args: Args) -> Result<Value> 
         };
         result["instrument"] = json!(instrument_label(&inst));
     }
+    if !warnings.is_empty() {
+        result["warnings"] = json!(warnings);
+    }
     Ok(result)
+}
+
+/// Clips may not end after this beat (4096 bars).
+fn max_end(bpb: f64) -> f64 {
+    4096.0 * bpb
+}
+
+fn check_end(end: f64, bpb: f64) -> Result<()> {
+    if end > max_end(bpb) + 1e-9 {
+        bail!(
+            "that would end at beat {} (bar {}); songs can be at most 4096 bars long",
+            fmt_num(end),
+            bar_of(end, bpb)
+        );
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -366,26 +439,99 @@ fn musical(work: &mut Project, tool: &str, mut args: Args) -> Result<Value> {
         }
     };
     let mut warnings = Vec::new();
-    let (notes, span, default_preset, clip_name, what) = match tool {
+
+    // Which track (and maybe clip) do the notes go to?
+    let default_preset = match tool {
+        "add_chords" => "soft_keys",
+        "add_drum_pattern" => "drum_kit",
+        _ => "bright_lead",
+    };
+    let explicit_clip = has_any(&args, &["clip", "clip_id", "clip_name"]);
+    let clip_id = if explicit_clip {
+        Some(resolve_clip(work, &mut args)?)
+    } else {
+        None
+    };
+    let mut created_track = None;
+    let track_id = match &clip_id {
+        Some(cid) => work.clip(cid).expect("resolved").0.id.clone(),
+        None => {
+            let query = track_query(&mut args)
+                .or_else(|| (tool == "add_drum_pattern").then(|| "Drums".to_string()))
+                .ok_or_else(|| {
+                    anyhow!(
+                        "missing \"track\": the name or id of the track to write on, e.g. \"Piano\". {}",
+                        track_list(work)
+                    )
+                })?;
+            match find_track(work, &query) {
+                Ok(t) => t.id.clone(),
+                Err(not_found) => {
+                    // Only create tracks whose purpose is clear: a preset-like
+                    // name ("Drums", "Bass", "Piano") or an explicit instrument.
+                    let preset = match args.get("instrument") {
+                        Some(Value::String(s)) => presets::find(s).ok_or_else(|| {
+                            anyhow!("unknown instrument {s:?}. Valid presets: {}", preset_ids())
+                        })?,
+                        Some(other) => bail!(
+                            "instrument must be a preset id string such as {:?}; valid presets: {} (got {other})",
+                            default_preset,
+                            preset_ids()
+                        ),
+                        None => presets::find(&query).ok_or_else(|| {
+                            anyhow!(
+                                "{not_found:#}. Or pass \"instrument\" (e.g. \"{default_preset}\") to create track {query:?} here"
+                            )
+                        })?,
+                    };
+                    let r = edit::apply(
+                        work,
+                        Op::AddTrack {
+                            name: query.clone(),
+                            instrument: Some(preset.instrument.clone()),
+                            gain: None,
+                            pan: None,
+                        },
+                    )?;
+                    let id = r["track_id"].as_str().expect("track id").to_string();
+                    created_track = Some(format!(
+                        "created new track {id} \"{query}\" ({})",
+                        preset.id
+                    ));
+                    id
+                }
+            }
+        }
+    };
+    let is_drums = work.track(&track_id).expect("track").instrument.is_drums();
+
+    let (notes, span, clip_name, what) = match tool {
         "add_chords" => {
             let text = str_arg(&args, "chords")?;
             let per = match args.get("beats_per_chord") {
                 Some(v) => v
                     .as_f64()
-                    .filter(|b| *b > 0.0)
-                    .ok_or_else(|| anyhow!("beats_per_chord must be a number > 0"))?,
+                    .filter(|b| *b > 0.0 && *b <= max_end(bpb))
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "beats_per_chord must be a number > 0 and at most {} (4096 bars), e.g. 2 or 4 (got {v})",
+                            max_end(bpb)
+                        )
+                    })?,
                 None => bpb,
             };
             let prog = music::parse_progression(text, per)?;
             let style = ChordStyle::parse(args.get("style").and_then(Value::as_str).unwrap_or(""))?;
-            let octave = args.get("octave").and_then(Value::as_i64).unwrap_or(4);
-            if !(1..=7).contains(&octave) {
-                bail!("octave must be 1-7 (4 = around middle C), got {octave}");
-            }
+            let octave = match args.get("octave") {
+                None => 4,
+                Some(v) => v.as_i64().filter(|o| (1..=7).contains(o)).ok_or_else(|| {
+                    anyhow!("octave must be a whole number 1-7 (4 = around middle C), got {v}")
+                })?,
+            };
             let span: f64 = prog.iter().map(|c| c.1).sum();
             let notes = music::chords_to_notes(&prog, style, octave as i32, velocity(&args, 90)?);
             let n = prog.iter().filter(|c| c.0.is_some()).count();
-            (notes, span, "soft_keys", "Chords", format!("{n} chord(s)"))
+            (notes, span, "Chords", format!("{n} chord(s)"))
         }
         "add_drum_pattern" => {
             let lanes = drum_lanes(&mut args)?;
@@ -418,22 +564,16 @@ fn musical(work: &mut Project, tool: &str, mut args: Args) -> Result<Value> {
                 velocity(&args, 100)?,
             )?;
             let span = bars as f64 * bpb;
-            (
-                notes,
-                span,
-                "drum_kit",
-                "Beat",
-                format!("{bars} bar(s) of drums"),
-            )
+            (notes, span, "Beat", format!("{bars} bar(s) of drums"))
         }
         _ => {
             // add_melody: a string, or note objects like add_notes takes.
             let (notes, span) = match args.get("notes").or_else(|| args.get("melody")) {
-                Some(Value::String(s)) => music::parse_melody(s, velocity(&args, 100)?)?,
+                Some(Value::String(s)) => music::parse_melody(s, velocity(&args, 100)?, is_drums)?,
                 Some(v @ Value::Array(_)) => {
                     let mut tmp = Args::new();
                     tmp.insert("notes".into(), v.clone());
-                    normalize_notes(&mut tmp)?;
+                    normalize_notes(&mut tmp, is_drums, max_end(bpb))?;
                     let notes: Vec<Note> = serde_json::from_value(tmp.remove("notes").unwrap())?;
                     let end = notes
                         .iter()
@@ -446,52 +586,10 @@ fn musical(work: &mut Project, tool: &str, mut args: Args) -> Result<Value> {
                     music::MELODY_EXAMPLE
                 ),
             };
-            (notes, span, "bright_lead", "Melody", "a melody".to_string())
+            (notes, span, "Melody", "a melody".to_string())
         }
     };
 
-    // Where do the notes go?
-    let explicit_clip = has_any(&args, &["clip", "clip_id", "clip_name"]);
-    let clip_id = if explicit_clip {
-        Some(resolve_clip(work, &mut args)?)
-    } else {
-        None
-    };
-    let mut created_track = None;
-    let track_id = match &clip_id {
-        Some(cid) => work.clip(cid).expect("resolved").0.id.clone(),
-        None => {
-            let query = track_query(&mut args)
-                .or_else(|| (tool == "add_drum_pattern").then(|| "Drums".to_string()))
-                .ok_or_else(|| anyhow!("missing \"track\": the name or id of the track to write on, e.g. \"Piano\""))?;
-            match find_track(work, &query) {
-                Ok(t) => t.id.clone(),
-                Err(_) => {
-                    let preset = match args.get("instrument") {
-                        Some(Value::String(s)) => presets::find(s).ok_or_else(|| {
-                            anyhow!("unknown instrument {s:?}. Valid presets: {}", preset_ids())
-                        })?,
-                        _ => presets::find(&query).unwrap_or_else(|| {
-                            presets::find(default_preset).expect("built-in preset")
-                        }),
-                    };
-                    let r = edit::apply(
-                        work,
-                        Op::AddTrack {
-                            name: query.clone(),
-                            instrument: Some(preset.instrument.clone()),
-                            gain: None,
-                            pan: None,
-                        },
-                    )?;
-                    let id = r["track_id"].as_str().expect("track id").to_string();
-                    created_track = Some(format!("created track {id} \"{query}\" ({})", preset.id));
-                    id
-                }
-            }
-        }
-    };
-    let is_drums = work.track(&track_id).expect("track").instrument.is_drums();
     match (tool == "add_drum_pattern", is_drums) {
         (true, false) => warnings.push(format!(
             "track {track_id} is not a drum kit, so these notes will play as pitches; \
@@ -509,6 +607,7 @@ fn musical(work: &mut Project, tool: &str, mut args: Args) -> Result<Value> {
         (None, Some(cid)) => work.clip(cid).expect("clip").1.start,
         (None, None) => append_position(work, &track_id),
     };
+    check_end(start + span, bpb)?;
     let target = clip_id.or_else(|| {
         work.track(&track_id)?
             .clips
@@ -530,6 +629,7 @@ fn musical(work: &mut Project, tool: &str, mut args: Args) -> Result<Value> {
                 );
             }
             let needed = round_up_to_bar(offset + span, bpb);
+            check_end(clip.start + needed, bpb)?;
             let grow = needed > clip.length + 1e-9;
             let shifted = notes
                 .into_iter()
@@ -573,11 +673,14 @@ fn musical(work: &mut Project, tool: &str, mut args: Args) -> Result<Value> {
         }
     };
     let track = work.track(&track_id).expect("track");
-    let message = format!(
+    let mut message = format!(
         "added {what} ({added} notes) to clip {clip_id} on track {track_id} \"{}\", {}",
         track.name,
         bar_range(start, start + span, bpb)
     );
+    if let Some(c) = &created_track {
+        message = format!("{c}; {message}");
+    }
     let mut result =
         json!({"message": message, "track_id": track_id, "clip_id": clip_id, "notes_added": added});
     if let Some(c) = created_track {
@@ -765,16 +868,33 @@ fn norm(s: &str) -> String {
         .collect()
 }
 
+/// Find a track by id, name (case and punctuation ignored), or position:
+/// `"2"` or `"Track 2"` is the second track.
 fn find_track<'a>(p: &'a Project, q: &str) -> Result<&'a aidaw_core::Track> {
     let q = q.trim();
+    if norm(q).is_empty() {
+        bail!("the track name is empty. {}", track_list(p));
+    }
+    let nth = || {
+        let lower = q.to_ascii_lowercase();
+        let n: usize = lower
+            .strip_prefix("track")
+            .unwrap_or(&lower)
+            .trim()
+            .trim_start_matches('#')
+            .parse()
+            .ok()?;
+        p.tracks.get(n.checked_sub(1)?)
+    };
     p.tracks
         .iter()
         .find(|t| t.id == q)
         .or_else(|| p.tracks.iter().find(|t| t.name.eq_ignore_ascii_case(q)))
         .or_else(|| {
             let n = norm(q);
-            p.tracks.iter().find(|t| !n.is_empty() && norm(&t.name) == n)
+            p.tracks.iter().find(|t| norm(&t.name) == n)
         })
+        .or_else(nth)
         .ok_or_else(|| {
             anyhow!(
                 "no track named or with id {q:?}. {}. To make a new one: add_track {{\"name\": \"{q}\"}}",
@@ -873,14 +993,17 @@ fn position(work: &Project, args: &mut Args) -> Result<()> {
                 "bars are numbered from 1 (bar 1 = beat 0, the start of the song); got bar {bar}"
             );
         }
+        if bar > 4096.0 {
+            bail!("bar {bar} is too far; songs can be at most 4096 bars long");
+        }
         args.insert("start".into(), json!((bar - 1.0) * bpb));
     } else if let Some(v) = args.remove("beat") {
         args.insert("start".into(), v);
     }
     if let Some(s) = args.get("start") {
         match s.as_f64() {
-            Some(s) if s >= 0.0 => {}
-            _ => bail!("start must be a number of beats >= 0 (got {s}); or give \"bar\": 1"),
+            Some(s) if s >= 0.0 && s <= max_end(bpb) => {}
+            _ => bail!("start must be a number of beats from 0 to {} (4096 bars) (got {s}); or give \"bar\": 1", max_end(bpb)),
         }
     }
     Ok(())
@@ -890,8 +1013,8 @@ fn bars_to_length(args: &mut Args, bpb: f64) -> Result<()> {
     if let Some(v) = args.remove("bars") {
         let bars = v
             .as_f64()
-            .filter(|b| *b > 0.0)
-            .ok_or_else(|| anyhow!("bars must be a number > 0 (got {v})"))?;
+            .filter(|b| *b > 0.0 && *b <= 4096.0)
+            .ok_or_else(|| anyhow!("bars must be a number from 1 to 4096 (got {v})"))?;
         args.insert("length".into(), json!(bars * bpb));
     }
     Ok(())
@@ -932,14 +1055,14 @@ fn fmt_num(x: f64) -> String {
 
 /// Make `notes` a JSON array of note objects: melody strings are parsed,
 /// common key aliases accepted, drum names turned into GM numbers.
-fn normalize_notes(args: &mut Args) -> Result<()> {
+fn normalize_notes(args: &mut Args, drums: bool, limit: f64) -> Result<()> {
     let Some(v) = args.remove("notes") else {
         return Ok(());
     };
     let notes = match v {
         Value::String(s) if s.trim_start().starts_with('[') => serde_json::from_str(&s)
             .map_err(|e| anyhow!("notes looked like JSON but did not parse: {e}"))?,
-        Value::String(s) => serde_json::to_value(music::parse_melody(&s, 100)?.0)?,
+        Value::String(s) => serde_json::to_value(music::parse_melody(&s, 100, drums)?.0)?,
         Value::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
             for (i, item) in items.into_iter().enumerate() {
@@ -968,6 +1091,9 @@ fn normalize_notes(args: &mut Args) -> Result<()> {
                 }
                 if let Some(Value::String(s)) = m.get("pitch") {
                     if pitch::parse(s).is_none() {
+                        if !drums && music::drum_note(s).is_some() {
+                            bail!("note #{i}: {s:?} is a drum name, but this is not a drum track; use note names like \"C4\"");
+                        }
                         let p = music::drum_note(s).ok_or_else(|| {
                             anyhow!("note #{i}: bad pitch {s:?}; use a name like \"C4\", \"F#3\", \"Bb2\" (C4 = 60) or a MIDI number 0-127")
                         })?;
@@ -981,6 +1107,10 @@ fn normalize_notes(args: &mut Args) -> Result<()> {
                             "note #{i} is missing {key:?}; each note needs pitch, start (beats from clip start) and duration (beats), e.g. {{\"pitch\": \"C4\", \"start\": 0, \"duration\": 1}}"
                         );
                     }
+                }
+                let num = |k: &str| m.get(k).and_then(Value::as_f64).unwrap_or(0.0);
+                if num("start") + num("duration") > limit {
+                    bail!("note #{i} ends after beat {limit}; songs can be at most 4096 bars long");
                 }
                 out.push(Value::Object(m));
             }

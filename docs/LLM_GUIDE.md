@@ -34,7 +34,8 @@ All three expose the same tools with the same arguments.
 
 The musical tools (`add_chords`, `add_drum_pattern`, `add_melody`) do the note maths for you.
 Give them a `track` (a name such as `"Bass"`) and optionally a `bar` (1 = start of the song).
-If the track does not exist they create it, and they create or extend the clip.
+If the track does not exist, they create it when its name matches a preset ("Drums", "Bass",
+"Piano", "Pad", "Lead", ...) or when you pass `instrument`. They create or extend the clip as needed.
 
 The server accepts more than the schemas strictly require, because smaller models make small
 mistakes:
@@ -152,4 +153,4 @@ On Windows `cmd.exe`, write JSON with escaped double quotes (`"{\"track\": \"Bas
 - **Drums** are written by name: `kick`, `snare`, `clap`, `hat`, `open_hat`, `tom_low`,
   `tom_mid`, `tom_high`, `crash`, `ride`. Each pattern has 16 steps per bar.
 - **Chords** are written as symbols: `C Am F#m Bb G7 Cmaj7 Dm7 Bm7b5 Esus4 Cdim Caug C/E`.
-  `Am:2` lasts 2 beats.
+  `C6/9 C9 C13 G7b9 Dm11 Cmaj7#11` also work. `Am:2` lasts 2 beats.
