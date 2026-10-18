@@ -1,0 +1,1201 @@
+//! Tool execution. Arguments are normalised forgivingly before they reach
+//! [`aidaw_core::edit::Op`]: tracks and clips by name or id, numbers as
+//! strings, instrument presets by name, positions in bars, notes as melody
+//! text. Errors say what was wrong and show what a valid call looks like.
+
+use std::path::{Path, PathBuf};
+
+use aidaw_core::edit::{self, Op};
+use aidaw_core::music::{self, ChordStyle};
+use aidaw_core::{io as pio, pitch, presets, render, Instrument, Note, Project, Waveform};
+use anyhow::{anyhow, bail, Result};
+use serde_json::{json, Map, Value};
+
+use crate::tools::{self, Tool};
+
+type Args = Map<String, Value>;
+
+/// Keys whose string values are turned into numbers.
+const NUMERIC_KEYS: &[&str] = &[
+    "bpm",
+    "beats_per_bar",
+    "master_gain",
+    "gain",
+    "pan",
+    "bar",
+    "bars",
+    "start",
+    "length",
+    "from",
+    "to",
+    "semitones",
+    "duration",
+    "velocity",
+    "beats_per_chord",
+    "octave",
+    "steps_per_beat",
+    "sample_rate",
+    "attack",
+    "decay",
+    "sustain",
+    "release",
+    "cutoff",
+];
+const BOOL_KEYS: &[&str] = &["mute", "solo", "overwrite"];
+/// Accepted everywhere although not advertised in the schemas.
+const HIDDEN_KEYS: &[&str] = &[
+    "track_id",
+    "track_name",
+    "clip_id",
+    "clip_name",
+    "beat",
+    "op",
+];
+const SYNTH_KEYS: &[&str] = &[
+    "waveform", "attack", "decay", "sustain", "release", "cutoff",
+];
+
+pub struct Session {
+    pub path: Option<PathBuf>,
+}
+
+impl Session {
+    pub fn new(path: Option<PathBuf>) -> Self {
+        Session { path }
+    }
+
+    fn path(&self) -> Result<&Path> {
+        self.path.as_deref().ok_or_else(|| {
+            anyhow!(
+                "no project is open. Call new_project first, e.g. {{\"path\": \"song.aidaw.json\", \"bpm\": 100}}, \
+                 or open_project {{\"path\": \"existing.aidaw.json\"}}"
+            )
+        })
+    }
+
+    /// Run a tool and return its text result.
+    pub fn call(&mut self, name: &str, args: Value) -> Result<String> {
+        let tool = tools::find(name).ok_or_else(|| {
+            anyhow!(
+                "unknown tool {name:?}. Valid tools: {}. Call help for a guide.",
+                tools::names()
+            )
+        })?;
+        let mut args = match args {
+            Value::Object(m) => m,
+            Value::Null => Map::new(),
+            // Some clients send the arguments as a JSON-encoded string.
+            Value::String(s) if s.trim().is_empty() => Map::new(),
+            Value::String(s) => match serde_json::from_str(&s) {
+                Ok(Value::Object(m)) => m,
+                _ => bail!("arguments must be a JSON object, e.g. {}", tool.example),
+            },
+            _ => bail!("arguments must be a JSON object, e.g. {}", tool.example),
+        };
+        coerce(&mut args);
+        let warnings = unknown_keys(tool, &args);
+        let mut out = self
+            .run(tool, args)
+            .map_err(|e| anyhow!("{e:#}\nExample {} call: {}", tool.name, tool.example))?;
+        if !warnings.is_empty() {
+            out.push_str(&format!("\nwarning: {}", warnings.join("; ")));
+        }
+        Ok(out)
+    }
+
+    fn run(&mut self, tool: &Tool, mut args: Args) -> Result<String> {
+        match tool.name {
+            "help" => Ok(tools::GUIDE.to_string()),
+            "list_presets" => Ok(list_presets()),
+            "new_project" => {
+                let path = PathBuf::from(str_arg(&args, "path")?);
+                if path.exists() && args.get("overwrite").and_then(Value::as_bool) != Some(true) {
+                    bail!(
+                        "{} already exists; pass \"overwrite\": true to replace it, or use open_project",
+                        path.display()
+                    );
+                }
+                let name = args
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Untitled");
+                let bpm = args.get("bpm").and_then(Value::as_f64).unwrap_or(120.0);
+                if !(20.0..=400.0).contains(&bpm) {
+                    bail!("bpm must be within 20..=400 (got {bpm})");
+                }
+                let project = Project::new(name, bpm);
+                pio::save(&project, &path)?;
+                self.path = Some(path.clone());
+                Ok(format!(
+                    "created {} ({bpm} BPM, 4/4). Next: add_track, e.g. {{\"name\": \"Drums\", \"instrument\": \"drum_kit\"}}",
+                    path.display()
+                ))
+            }
+            "open_project" => {
+                let path = PathBuf::from(str_arg(&args, "path")?);
+                let project = pio::load(&path)?;
+                self.path = Some(path);
+                Ok(summary(&project))
+            }
+            "get_project" => {
+                let project = pio::load(self.path()?)?;
+                let only = match args.get("track").and_then(Value::as_str) {
+                    Some(q) => Some(find_track(&project, q)?.id.clone()),
+                    None => None,
+                };
+                let detail = args
+                    .get("detail")
+                    .and_then(Value::as_str)
+                    .unwrap_or(if args.get("full").and_then(Value::as_bool) == Some(true) {
+                        "json"
+                    } else {
+                        "summary"
+                    })
+                    .to_ascii_lowercase();
+                match detail.as_str() {
+                    "summary" | "" => Ok(format!(
+                        "{}\n(use detail \"notes\" to see every note, \"json\" for the raw file)",
+                        overview(&project, only.as_deref(), false)
+                    )),
+                    "notes" => Ok(overview(&project, only.as_deref(), true)),
+                    "json" | "full" => Ok(format!(
+                        "{}\n\n{}",
+                        summary(&project),
+                        serde_json::to_string_pretty(&project)?
+                    )),
+                    other => {
+                        bail!("unknown detail {other:?}; use \"summary\", \"notes\" or \"json\"")
+                    }
+                }
+            }
+            "render_wav" => {
+                let path = self.path()?;
+                let project = pio::load(path)?;
+                let out = match args.get("output_path").and_then(Value::as_str) {
+                    Some(p) => PathBuf::from(p),
+                    None => default_wav_path(path),
+                };
+                let sr = args
+                    .get("sample_rate")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(44_100) as u32;
+                let seconds = render::render_to_wav(&project, &out, sr)?;
+                Ok(format!("rendered {seconds:.1}s to {}", out.display()))
+            }
+            "apply_ops" => {
+                let ops = match args.remove("ops") {
+                    Some(Value::Array(ops)) => ops,
+                    Some(Value::String(s)) => match serde_json::from_str(&s) {
+                        Ok(Value::Array(ops)) => ops,
+                        _ => bail!("ops must be an array of objects"),
+                    },
+                    _ => bail!("ops must be an array of objects like {{\"op\": \"add_track\", \"name\": \"Bass\"}}"),
+                };
+                self.edit(|work| {
+                    let mut results = Vec::with_capacity(ops.len());
+                    for (i, item) in ops.into_iter().enumerate() {
+                        let mut item = match item {
+                            Value::Object(m) => m,
+                            _ => bail!("op #{i}: each op must be an object with an \"op\" field"),
+                        };
+                        let name = item
+                            .remove("op")
+                            .or_else(|| item.remove("tool"))
+                            .and_then(|v| v.as_str().map(str::to_string))
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "op #{i}: missing \"op\" (a tool name such as \"add_track\")"
+                                )
+                            })?;
+                        let tool = tools::find(&name)
+                            .filter(|t| is_edit_tool(t.name))
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "op #{i}: {name:?} cannot be used in apply_ops; use one of: {}",
+                                    edit_tool_names()
+                                )
+                            })?;
+                        coerce(&mut item);
+                        results.push(
+                            apply_tool(work, tool, item)
+                                .map_err(|e| anyhow!("op #{i} ({}): {e:#}", tool.name))?,
+                        );
+                    }
+                    Ok(results)
+                })
+            }
+            name if is_edit_tool(name) => self.edit(|work| Ok(vec![apply_tool(work, tool, args)?])),
+            other => bail!("tool {other} is not implemented"),
+        }
+    }
+
+    /// Load, edit a working copy, save. Re-reading the file on every call
+    /// picks up edits the human made in the GUI in the meantime; nothing is
+    /// saved if any step fails.
+    fn edit(&self, f: impl FnOnce(&mut Project) -> Result<Vec<Value>>) -> Result<String> {
+        let path = self.path()?;
+        let mut work = pio::load(path)?;
+        let results = f(&mut work)?;
+        pio::save(&work, path)?;
+        Ok(format!(
+            "{}\nProject now: {}",
+            json!({ "results": results }),
+            summary(&work)
+        ))
+    }
+}
+
+const EDIT_TOOLS: &[&str] = &[
+    "update_project",
+    "add_track",
+    "update_track",
+    "remove_track",
+    "add_clip",
+    "update_clip",
+    "remove_clip",
+    "add_notes",
+    "remove_notes",
+    "transpose_clip",
+    "add_chords",
+    "add_drum_pattern",
+    "add_melody",
+];
+
+fn is_edit_tool(name: &str) -> bool {
+    EDIT_TOOLS.contains(&name)
+}
+
+fn edit_tool_names() -> String {
+    EDIT_TOOLS.join(", ")
+}
+
+/// Apply one editing tool to `work`.
+fn apply_tool(work: &mut Project, tool: &Tool, mut args: Args) -> Result<Value> {
+    match tool.name {
+        "add_chords" | "add_drum_pattern" | "add_melody" => return musical(work, tool.name, args),
+        "add_track" | "update_track" => {
+            let existing = match tool.name {
+                "update_track" => {
+                    let id = resolve_track(work, &mut args)?;
+                    Some(work.track(&id).expect("resolved").instrument.clone())
+                }
+                _ => None,
+            };
+            resolve_instrument(&mut args, existing)?;
+            if tool.name == "add_track" && !args.contains_key("instrument") {
+                // "Drums" gets a drum kit, "Bass" a bass, and so on.
+                if let Some(p) = args
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .and_then(presets::find)
+                {
+                    args.insert("instrument".into(), serde_json::to_value(&p.instrument)?);
+                }
+            }
+        }
+        "remove_track" => {
+            resolve_track(work, &mut args)?;
+        }
+        "add_clip" => {
+            let id = resolve_track(work, &mut args)?;
+            let bpb = work.beats_per_bar as f64;
+            position(work, &mut args)?;
+            if !args.contains_key("start") {
+                args.insert("start".into(), json!(append_position(work, &id)));
+            }
+            bars_to_length(&mut args, bpb)?;
+            normalize_notes(&mut args)?;
+            if !args.contains_key("length") {
+                let end = note_end(args.get("notes"));
+                args.insert("length".into(), json!(round_up_to_bar(end, bpb)));
+            }
+        }
+        "update_clip" => {
+            resolve_clip(work, &mut args)?;
+            position(work, &mut args)?;
+            bars_to_length(&mut args, work.beats_per_bar as f64)?;
+        }
+        "remove_clip" | "transpose_clip" => {
+            resolve_clip(work, &mut args)?;
+        }
+        "add_notes" => {
+            resolve_clip(work, &mut args)?;
+            normalize_notes(&mut args)?;
+        }
+        "remove_notes" => {
+            resolve_clip(work, &mut args)?;
+            if let Some(Value::String(s)) = args.get("pitch") {
+                if let Some(p) = pitch::parse(s).or_else(|| music::drum_note(s)) {
+                    args.insert("pitch".into(), json!(p));
+                }
+            }
+        }
+        _ => {}
+    }
+    let created_instrument = (tool.name == "add_track").then(|| args.get("instrument").cloned());
+    for key in ["bar", "bars", "beat", "track_name", "clip_name"] {
+        args.remove(key);
+    }
+    args.insert("op".into(), Value::String(tool.name.into()));
+    let op: Op = serde_json::from_value(Value::Object(args))
+        .map_err(|e| anyhow!("invalid arguments for {}: {e}", tool.name))?;
+    let mut result = edit::apply(work, op)?;
+    if let Some(inst) = created_instrument {
+        let inst: Instrument = match inst {
+            Some(v) => serde_json::from_value(v)?,
+            None => Instrument::default_synth(),
+        };
+        result["instrument"] = json!(instrument_label(&inst));
+    }
+    Ok(result)
+}
+
+// ---------------------------------------------------------------------------
+// High-level musical tools
+
+fn musical(work: &mut Project, tool: &str, mut args: Args) -> Result<Value> {
+    let bpb = work.beats_per_bar as f64;
+    let velocity = |args: &Args, default: u8| -> Result<u8> {
+        match args.get("velocity") {
+            None => Ok(default),
+            Some(v) => v
+                .as_u64()
+                .filter(|v| (1..=127).contains(v))
+                .map(|v| v as u8)
+                .ok_or_else(|| anyhow!("velocity must be a whole number 1-127 (got {v})")),
+        }
+    };
+    let mut warnings = Vec::new();
+    let (notes, span, default_preset, clip_name, what) = match tool {
+        "add_chords" => {
+            let text = str_arg(&args, "chords")?;
+            let per = match args.get("beats_per_chord") {
+                Some(v) => v
+                    .as_f64()
+                    .filter(|b| *b > 0.0)
+                    .ok_or_else(|| anyhow!("beats_per_chord must be a number > 0"))?,
+                None => bpb,
+            };
+            let prog = music::parse_progression(text, per)?;
+            let style = ChordStyle::parse(args.get("style").and_then(Value::as_str).unwrap_or(""))?;
+            let octave = args.get("octave").and_then(Value::as_i64).unwrap_or(4);
+            if !(1..=7).contains(&octave) {
+                bail!("octave must be 1-7 (4 = around middle C), got {octave}");
+            }
+            let span: f64 = prog.iter().map(|c| c.1).sum();
+            let notes = music::chords_to_notes(&prog, style, octave as i32, velocity(&args, 90)?);
+            let n = prog.iter().filter(|c| c.0.is_some()).count();
+            (notes, span, "soft_keys", "Chords", format!("{n} chord(s)"))
+        }
+        "add_drum_pattern" => {
+            let lanes = drum_lanes(&mut args)?;
+            let spb = match args.get("steps_per_beat") {
+                Some(v) => v
+                    .as_u64()
+                    .filter(|s| (1..=16).contains(s))
+                    .ok_or_else(|| anyhow!("steps_per_beat must be 1-16 (4 = sixteenth notes)"))?,
+                None => 4,
+            } as usize;
+            let steps_per_bar = spb * work.beats_per_bar as usize;
+            let longest = lanes.iter().map(|(_, s)| step_count(s)).max().unwrap_or(0);
+            let bars = match args.get("bars") {
+                Some(v) => v
+                    .as_u64()
+                    .filter(|b| (1..=512).contains(b))
+                    .ok_or_else(|| anyhow!("bars must be a whole number >= 1"))?
+                    as usize,
+                None => longest.div_ceil(steps_per_bar).max(1),
+            };
+            if longest > steps_per_bar && longest % steps_per_bar != 0 {
+                warnings.push(format!(
+                    "a pattern has {longest} steps, not a multiple of {steps_per_bar} (one bar); it was repeated anyway"
+                ));
+            }
+            let notes = music::drum_pattern_to_notes(
+                &lanes,
+                bars * steps_per_bar,
+                1.0 / spb as f64,
+                velocity(&args, 100)?,
+            )?;
+            let span = bars as f64 * bpb;
+            (
+                notes,
+                span,
+                "drum_kit",
+                "Beat",
+                format!("{bars} bar(s) of drums"),
+            )
+        }
+        _ => {
+            // add_melody: a string, or note objects like add_notes takes.
+            let (notes, span) = match args.get("notes").or_else(|| args.get("melody")) {
+                Some(Value::String(s)) => music::parse_melody(s, velocity(&args, 100)?)?,
+                Some(v @ Value::Array(_)) => {
+                    let mut tmp = Args::new();
+                    tmp.insert("notes".into(), v.clone());
+                    normalize_notes(&mut tmp)?;
+                    let notes: Vec<Note> = serde_json::from_value(tmp.remove("notes").unwrap())?;
+                    let end = notes
+                        .iter()
+                        .map(|n| n.start + n.duration)
+                        .fold(0.0, f64::max);
+                    (notes, end)
+                }
+                _ => bail!(
+                    "missing \"notes\": a melody string like \"{}\"",
+                    music::MELODY_EXAMPLE
+                ),
+            };
+            (notes, span, "bright_lead", "Melody", "a melody".to_string())
+        }
+    };
+
+    // Where do the notes go?
+    let explicit_clip = has_any(&args, &["clip", "clip_id", "clip_name"]);
+    let clip_id = if explicit_clip {
+        Some(resolve_clip(work, &mut args)?)
+    } else {
+        None
+    };
+    let mut created_track = None;
+    let track_id = match &clip_id {
+        Some(cid) => work.clip(cid).expect("resolved").0.id.clone(),
+        None => {
+            let query = track_query(&mut args)
+                .or_else(|| (tool == "add_drum_pattern").then(|| "Drums".to_string()))
+                .ok_or_else(|| anyhow!("missing \"track\": the name or id of the track to write on, e.g. \"Piano\""))?;
+            match find_track(work, &query) {
+                Ok(t) => t.id.clone(),
+                Err(_) => {
+                    let preset = match args.get("instrument") {
+                        Some(Value::String(s)) => presets::find(s).ok_or_else(|| {
+                            anyhow!("unknown instrument {s:?}. Valid presets: {}", preset_ids())
+                        })?,
+                        _ => presets::find(&query).unwrap_or_else(|| {
+                            presets::find(default_preset).expect("built-in preset")
+                        }),
+                    };
+                    let r = edit::apply(
+                        work,
+                        Op::AddTrack {
+                            name: query.clone(),
+                            instrument: Some(preset.instrument.clone()),
+                            gain: None,
+                            pan: None,
+                        },
+                    )?;
+                    let id = r["track_id"].as_str().expect("track id").to_string();
+                    created_track = Some(format!("created track {id} \"{query}\" ({})", preset.id));
+                    id
+                }
+            }
+        }
+    };
+    let is_drums = work.track(&track_id).expect("track").instrument.is_drums();
+    match (tool == "add_drum_pattern", is_drums) {
+        (true, false) => warnings.push(format!(
+            "track {track_id} is not a drum kit, so these notes will play as pitches; \
+             use update_track {{\"track\": \"{track_id}\", \"instrument\": \"drum_kit\"}} to hear drums"
+        )),
+        (false, true) => warnings.push(format!(
+            "track {track_id} is a drum kit, so pitches play as drum sounds; use a melodic track instead"
+        )),
+        _ => {}
+    }
+
+    position(work, &mut args)?;
+    let start = match (args.get("start").and_then(Value::as_f64), &clip_id) {
+        (Some(s), _) => s,
+        (None, Some(cid)) => work.clip(cid).expect("clip").1.start,
+        (None, None) => append_position(work, &track_id),
+    };
+    let target = clip_id.or_else(|| {
+        work.track(&track_id)?
+            .clips
+            .iter()
+            .find(|c| c.start <= start + 1e-9 && start < c.end() - 1e-9)
+            .map(|c| c.id.clone())
+    });
+
+    let added = notes.len();
+    let clip_id = match target {
+        Some(cid) => {
+            let clip = work.clip(&cid).expect("clip").1;
+            let offset = start - clip.start;
+            if offset < -1e-9 {
+                bail!(
+                    "position beat {start} is before clip {cid}, which starts at beat {} (bar {})",
+                    clip.start,
+                    bar_of(clip.start, bpb)
+                );
+            }
+            let needed = round_up_to_bar(offset + span, bpb);
+            let grow = needed > clip.length + 1e-9;
+            let shifted = notes
+                .into_iter()
+                .map(|n| Note {
+                    start: n.start + offset,
+                    ..n
+                })
+                .collect();
+            edit::apply(
+                work,
+                Op::AddNotes {
+                    clip_id: cid.clone(),
+                    notes: shifted,
+                },
+            )?;
+            if grow {
+                edit::apply(
+                    work,
+                    Op::UpdateClip {
+                        clip_id: cid.clone(),
+                        name: None,
+                        start: None,
+                        length: Some(needed),
+                    },
+                )?;
+            }
+            cid
+        }
+        None => {
+            let r = edit::apply(
+                work,
+                Op::AddClip {
+                    track_id: track_id.clone(),
+                    start,
+                    length: round_up_to_bar(span, bpb),
+                    name: Some(clip_name.to_string()),
+                    notes,
+                },
+            )?;
+            r["clip_id"].as_str().expect("clip id").to_string()
+        }
+    };
+    let track = work.track(&track_id).expect("track");
+    let message = format!(
+        "added {what} ({added} notes) to clip {clip_id} on track {track_id} \"{}\", {}",
+        track.name,
+        bar_range(start, start + span, bpb)
+    );
+    let mut result =
+        json!({"message": message, "track_id": track_id, "clip_id": clip_id, "notes_added": added});
+    if let Some(c) = created_track {
+        result["created"] = json!(c);
+    }
+    if !warnings.is_empty() {
+        result["warnings"] = json!(warnings);
+    }
+    Ok(result)
+}
+
+/// Collect drum lanes from `pattern` (an object, a JSON string, or lines like
+/// "kick: x...") and from top-level keys that are drum names.
+fn drum_lanes(args: &mut Args) -> Result<Vec<(String, String)>> {
+    let mut lanes = Vec::new();
+    let push_obj = |m: &Args, lanes: &mut Vec<(String, String)>| -> Result<()> {
+        for (k, v) in m {
+            let steps = v.as_str().ok_or_else(|| {
+                anyhow!("pattern for {k:?} must be a string of steps like \"x...x...x...x...\" (got {v})")
+            })?;
+            lanes.push((k.clone(), steps.to_string()));
+        }
+        Ok(())
+    };
+    match args.remove("pattern").or_else(|| args.remove("drums")) {
+        Some(Value::Object(m)) => push_obj(&m, &mut lanes)?,
+        Some(Value::String(s)) => match serde_json::from_str::<Value>(&s) {
+            Ok(Value::Object(m)) => push_obj(&m, &mut lanes)?,
+            _ => {
+                for line in s.split(['\n', ';', ',']).filter(|l| !l.trim().is_empty()) {
+                    let (name, steps) = line.split_once([':', '=']).ok_or_else(|| {
+                        anyhow!("could not read pattern line {line:?}; write \"kick: x...x...x...x...\"")
+                    })?;
+                    lanes.push((name.trim().to_string(), steps.trim().to_string()));
+                }
+            }
+        },
+        Some(other) => {
+            bail!("pattern must be an object like {{\"kick\": \"x...x...x...x...\"}} (got {other})")
+        }
+        None => {}
+    }
+    // Lanes given at the top level: {"track": "Drums", "kick": "x..."}.
+    let tool = tools::find("add_drum_pattern").expect("tool");
+    let top: Vec<String> = args
+        .keys()
+        .filter(|k| {
+            !tool.params.iter().any(|p| p.name == k.as_str()) && music::drum_note(k).is_some()
+        })
+        .cloned()
+        .collect();
+    for k in top {
+        if let Some(Value::String(s)) = args.remove(&k) {
+            lanes.push((k, s));
+        }
+    }
+    if lanes.is_empty() {
+        bail!(
+            "missing \"pattern\": an object of drum name -> steps, e.g. {{\"kick\": \"x...x...x...x...\", \"snare\": \"....x.......x...\", \"hat\": \"x.x.x.x.x.x.x.x.\"}}"
+        );
+    }
+    Ok(lanes)
+}
+
+fn step_count(steps: &str) -> usize {
+    steps
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '|')
+        .count()
+}
+
+// ---------------------------------------------------------------------------
+// Argument normalisation
+
+/// Turn numeric strings into numbers, whole floats into integers and
+/// "true"/"false" strings into booleans, recursively for known keys.
+fn coerce(args: &mut Args) {
+    for (k, v) in args.iter_mut() {
+        match v {
+            Value::String(s) if NUMERIC_KEYS.contains(&k.as_str()) => {
+                let t = s.trim();
+                if let Ok(i) = t.parse::<i64>() {
+                    *v = json!(i);
+                } else if let Ok(f) = t.parse::<f64>() {
+                    *v = json!(f);
+                }
+            }
+            Value::Number(n) if n.is_f64() => {
+                let f = n.as_f64().unwrap_or(f64::NAN);
+                if f.fract() == 0.0 && f.abs() < 1e15 {
+                    *v = json!(f as i64);
+                }
+            }
+            Value::String(s) if BOOL_KEYS.contains(&k.as_str()) => {
+                match s.trim().to_ascii_lowercase().as_str() {
+                    "true" | "yes" | "on" | "1" => *v = json!(true),
+                    "false" | "no" | "off" | "0" => *v = json!(false),
+                    _ => {}
+                }
+            }
+            Value::Object(m) => coerce(m),
+            Value::Array(items) => {
+                for item in items {
+                    if let Value::Object(m) = item {
+                        coerce(m);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn unknown_keys(tool: &Tool, args: &Args) -> Vec<String> {
+    let mut out = Vec::new();
+    for k in args.keys() {
+        let known = tool.params.iter().any(|p| p.name == k.as_str())
+            || HIDDEN_KEYS.contains(&k.as_str())
+            || (tool.name == "add_track" && SYNTH_KEYS.contains(&k.as_str()))
+            || (tool.name == "add_drum_pattern" && music::drum_note(k).is_some())
+            || (tool.name == "add_melody" && k == "melody")
+            || (tool.name.starts_with("add_") && k == "instrument")
+            || (tool.name == "get_project" && k == "full");
+        if !known {
+            let valid: Vec<&str> = tool.params.iter().map(|p| p.name).collect();
+            out.push(format!(
+                "ignored unknown argument {k:?} (valid for {}: {})",
+                tool.name,
+                if valid.is_empty() {
+                    "none".into()
+                } else {
+                    valid.join(", ")
+                }
+            ));
+        }
+    }
+    out
+}
+
+fn has_any(args: &Args, keys: &[&str]) -> bool {
+    keys.iter().any(|k| args.contains_key(*k))
+}
+
+fn str_arg<'a>(args: &'a Args, key: &str) -> Result<&'a str> {
+    match args.get(key) {
+        Some(Value::String(s)) => Ok(s),
+        Some(other) => bail!("{key:?} must be a string (got {other})"),
+        None => bail!("missing argument {key:?}"),
+    }
+}
+
+fn ref_string(v: Value) -> Option<String> {
+    match v {
+        Value::String(s) => Some(s),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+/// Take the track reference out of `track` / `track_id` / `track_name`.
+fn track_query(args: &mut Args) -> Option<String> {
+    ["track", "track_id", "track_name"]
+        .iter()
+        .find_map(|k| args.remove(*k))
+        .and_then(ref_string)
+}
+
+/// Resolve the track reference in `args` to an id stored as `track_id`.
+fn resolve_track(work: &Project, args: &mut Args) -> Result<String> {
+    let q = track_query(args).ok_or_else(|| {
+        anyhow!(
+            "missing \"track\" (a track name or id). {}",
+            track_list(work)
+        )
+    })?;
+    let id = find_track(work, &q)?.id.clone();
+    args.insert("track_id".into(), json!(id));
+    Ok(id)
+}
+
+fn norm(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn find_track<'a>(p: &'a Project, q: &str) -> Result<&'a aidaw_core::Track> {
+    let q = q.trim();
+    p.tracks
+        .iter()
+        .find(|t| t.id == q)
+        .or_else(|| p.tracks.iter().find(|t| t.name.eq_ignore_ascii_case(q)))
+        .or_else(|| {
+            let n = norm(q);
+            p.tracks.iter().find(|t| !n.is_empty() && norm(&t.name) == n)
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "no track named or with id {q:?}. {}. To make a new one: add_track {{\"name\": \"{q}\"}}",
+                track_list(p)
+            )
+        })
+}
+
+fn track_list(p: &Project) -> String {
+    if p.tracks.is_empty() {
+        return "The project has no tracks yet; create one with add_track, e.g. {\"name\": \"Bass\", \"instrument\": \"bass\"}".into();
+    }
+    let list: Vec<String> = p
+        .tracks
+        .iter()
+        .map(|t| format!("{} \"{}\"", t.id, t.name))
+        .collect();
+    format!("Existing tracks: {}", list.join(", "))
+}
+
+/// Resolve `clip` / `clip_id` / `clip_name` (an id or a unique name) to `clip_id`.
+fn resolve_clip(work: &Project, args: &mut Args) -> Result<String> {
+    let q = ["clip", "clip_id", "clip_name"]
+        .iter()
+        .find_map(|k| args.remove(*k))
+        .and_then(ref_string)
+        .ok_or_else(|| {
+            anyhow!(
+                "missing \"clip\" (a clip id like \"c1\" or a clip name). {}",
+                clip_list(work)
+            )
+        })?;
+    let q = q.trim();
+    let id = if work.clip(q).is_some() {
+        q.to_string()
+    } else {
+        let matches: Vec<(&aidaw_core::Track, &aidaw_core::Clip)> = work
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter().map(move |c| (t, c)))
+            .filter(|(_, c)| !c.name.is_empty() && norm(&c.name) == norm(q))
+            .collect();
+        match matches.as_slice() {
+            [(_, c)] => c.id.clone(),
+            [] => bail!("no clip named or with id {q:?}. {}", clip_list(work)),
+            many => bail!(
+                "clip name {q:?} is ambiguous; use one of the ids: {}",
+                many.iter()
+                    .map(|(t, c)| format!(
+                        "{} (track \"{}\", bar {})",
+                        c.id,
+                        t.name,
+                        bar_of(c.start, work.beats_per_bar as f64)
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    };
+    args.insert("clip_id".into(), json!(id));
+    Ok(id)
+}
+
+fn clip_list(p: &Project) -> String {
+    let bpb = p.beats_per_bar as f64;
+    let list: Vec<String> = p
+        .tracks
+        .iter()
+        .flat_map(|t| {
+            t.clips.iter().map(move |c| {
+                format!(
+                    "{} (track \"{}\", {})",
+                    c.id,
+                    t.name,
+                    bar_range(c.start, c.end(), bpb)
+                )
+            })
+        })
+        .collect();
+    if list.is_empty() {
+        "There are no clips yet; create one with add_clip or add_melody.".into()
+    } else {
+        format!("Existing clips: {}", list.join(", "))
+    }
+}
+
+/// Convert `bar` (1-based) or `beat` into an absolute `start` in beats.
+fn position(work: &Project, args: &mut Args) -> Result<()> {
+    let bpb = work.beats_per_bar as f64;
+    if let Some(v) = args.remove("bar") {
+        let bar = v
+            .as_f64()
+            .ok_or_else(|| anyhow!("bar must be a number like 1 or 5 (got {v})"))?;
+        if bar < 1.0 {
+            bail!(
+                "bars are numbered from 1 (bar 1 = beat 0, the start of the song); got bar {bar}"
+            );
+        }
+        args.insert("start".into(), json!((bar - 1.0) * bpb));
+    } else if let Some(v) = args.remove("beat") {
+        args.insert("start".into(), v);
+    }
+    if let Some(s) = args.get("start") {
+        match s.as_f64() {
+            Some(s) if s >= 0.0 => {}
+            _ => bail!("start must be a number of beats >= 0 (got {s}); or give \"bar\": 1"),
+        }
+    }
+    Ok(())
+}
+
+fn bars_to_length(args: &mut Args, bpb: f64) -> Result<()> {
+    if let Some(v) = args.remove("bars") {
+        let bars = v
+            .as_f64()
+            .filter(|b| *b > 0.0)
+            .ok_or_else(|| anyhow!("bars must be a number > 0 (got {v})"))?;
+        args.insert("length".into(), json!(bars * bpb));
+    }
+    Ok(())
+}
+
+/// The first bar line at or after the end of the track's last clip.
+fn append_position(work: &Project, track_id: &str) -> f64 {
+    let end = work
+        .track(track_id)
+        .map(|t| t.clips.iter().map(|c| c.end()).fold(0.0, f64::max))
+        .unwrap_or(0.0);
+    let bpb = work.beats_per_bar as f64;
+    (end / bpb - 1e-9).ceil().max(0.0) * bpb
+}
+
+fn round_up_to_bar(beats: f64, bpb: f64) -> f64 {
+    ((beats / bpb - 1e-9).ceil().max(1.0)) * bpb
+}
+
+fn bar_of(beat: f64, bpb: f64) -> String {
+    fmt_num(beat / bpb + 1.0)
+}
+
+/// "bar 5" or "bars 1-4".
+fn bar_range(start: f64, end: f64, bpb: f64) -> String {
+    let (first, last) = (bar_of(start, bpb), fmt_num((end / bpb - 1e-9).ceil()));
+    if last == first || (end - start) <= bpb + 1e-9 && start % bpb == 0.0 {
+        format!("bar {first}")
+    } else {
+        format!("bars {first}-{last}")
+    }
+}
+
+fn fmt_num(x: f64) -> String {
+    let r = (x * 1000.0).round() / 1000.0;
+    format!("{r}")
+}
+
+/// Make `notes` a JSON array of note objects: melody strings are parsed,
+/// common key aliases accepted, drum names turned into GM numbers.
+fn normalize_notes(args: &mut Args) -> Result<()> {
+    let Some(v) = args.remove("notes") else {
+        return Ok(());
+    };
+    let notes = match v {
+        Value::String(s) if s.trim_start().starts_with('[') => serde_json::from_str(&s)
+            .map_err(|e| anyhow!("notes looked like JSON but did not parse: {e}"))?,
+        Value::String(s) => serde_json::to_value(music::parse_melody(&s, 100)?.0)?,
+        Value::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for (i, item) in items.into_iter().enumerate() {
+                let Value::Object(mut m) = item else {
+                    bail!(
+                        "note #{i} must be an object like {{\"pitch\": \"C4\", \"start\": 0, \"duration\": 1}} (got {item})"
+                    );
+                };
+                for (alias, key) in [
+                    ("note", "pitch"),
+                    ("midi", "pitch"),
+                    ("time", "start"),
+                    ("beat", "start"),
+                    ("offset", "start"),
+                    ("position", "start"),
+                    ("length", "duration"),
+                    ("dur", "duration"),
+                    ("len", "duration"),
+                    ("vel", "velocity"),
+                ] {
+                    if !m.contains_key(key) {
+                        if let Some(v) = m.remove(alias) {
+                            m.insert(key.into(), v);
+                        }
+                    }
+                }
+                if let Some(Value::String(s)) = m.get("pitch") {
+                    if pitch::parse(s).is_none() {
+                        let p = music::drum_note(s).ok_or_else(|| {
+                            anyhow!("note #{i}: bad pitch {s:?}; use a name like \"C4\", \"F#3\", \"Bb2\" (C4 = 60) or a MIDI number 0-127")
+                        })?;
+                        m.insert("pitch".into(), json!(p));
+                    }
+                }
+                coerce(&mut m);
+                for key in ["pitch", "start", "duration"] {
+                    if !m.contains_key(key) {
+                        bail!(
+                            "note #{i} is missing {key:?}; each note needs pitch, start (beats from clip start) and duration (beats), e.g. {{\"pitch\": \"C4\", \"start\": 0, \"duration\": 1}}"
+                        );
+                    }
+                }
+                out.push(Value::Object(m));
+            }
+            Value::Array(out)
+        }
+        other => bail!("notes must be an array of note objects or a melody string like \"C4/1 E4/1\" (got {other})"),
+    };
+    args.insert("notes".into(), notes);
+    Ok(())
+}
+
+fn note_end(notes: Option<&Value>) -> f64 {
+    notes
+        .and_then(Value::as_array)
+        .map(|ns| {
+            ns.iter()
+                .filter_map(|n| Some(n.get("start")?.as_f64()? + n.get("duration")?.as_f64()?))
+                .fold(0.0, f64::max)
+        })
+        .unwrap_or(0.0)
+}
+
+fn preset_ids() -> String {
+    presets::all()
+        .into_iter()
+        .map(|p| p.id)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Turn the `instrument` argument (preset name, waveform name or object) and
+/// any flat synth settings into an [`Instrument`] JSON object.
+fn resolve_instrument(args: &mut Args, existing: Option<Instrument>) -> Result<()> {
+    let bad = |what: &str| {
+        anyhow!(
+            "unknown instrument {what}. Use a preset id: {} (or a plain waveform: sine, triangle, saw, square)",
+            preset_ids()
+        )
+    };
+    let from_name = |s: &str| -> Result<Instrument> {
+        if let Some(p) = presets::find(s) {
+            return Ok(p.instrument);
+        }
+        let wave = match norm(s).as_str() {
+            "saw" | "sawtooth" | "synth" => Waveform::Saw,
+            "square" => Waveform::Square,
+            "triangle" | "tri" => Waveform::Triangle,
+            _ => return Err(bad(&format!("{s:?}"))),
+        };
+        Ok(with_waveform(Instrument::default_synth(), wave))
+    };
+    let mut inst = match args.remove("instrument") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(from_name(&s)?),
+        Some(Value::Object(m)) => {
+            if let Some(Value::String(p)) = m.get("preset") {
+                Some(from_name(p)?)
+            } else {
+                match m.get("type").and_then(Value::as_str) {
+                    Some("synth" | "drums") => Some(
+                        serde_json::from_value(Value::Object(m))
+                            .map_err(|e| anyhow!("invalid instrument object: {e}"))?,
+                    ),
+                    Some(other) => Some(from_name(other)?),
+                    None => bail!("instrument object needs \"type\": \"synth\" or \"drums\"; simpler: pass a preset id string like \"bass\""),
+                }
+            }
+        }
+        Some(other) => return Err(bad(&other.to_string())),
+    };
+    if SYNTH_KEYS.iter().any(|k| args.contains_key(*k)) {
+        let base = inst
+            .take()
+            .or(existing)
+            .unwrap_or_else(Instrument::default_synth);
+        let mut v = serde_json::to_value(&base)?;
+        if base.is_drums() {
+            bail!("drum kits have no synth settings (waveform, attack, ...); change the instrument to a synth preset first");
+        }
+        for k in SYNTH_KEYS {
+            if let Some(x) = args.remove(*k) {
+                v[*k] = x;
+            }
+        }
+        inst = Some(
+            serde_json::from_value(v)
+                .map_err(|e| anyhow!("invalid synth setting: {e}; waveform is sine|triangle|saw|square, times in seconds"))?,
+        );
+    }
+    if let Some(inst) = inst {
+        args.insert("instrument".into(), serde_json::to_value(inst)?);
+    }
+    Ok(())
+}
+
+fn with_waveform(inst: Instrument, wave: Waveform) -> Instrument {
+    match inst {
+        Instrument::Synth {
+            attack,
+            decay,
+            sustain,
+            release,
+            cutoff,
+            ..
+        } => Instrument::Synth {
+            waveform: wave,
+            attack,
+            decay,
+            sustain,
+            release,
+            cutoff,
+        },
+        other => other,
+    }
+}
+
+fn instrument_label(inst: &Instrument) -> String {
+    if let Some(p) = presets::all().into_iter().find(|p| &p.instrument == inst) {
+        return p.id.to_string();
+    }
+    match inst {
+        Instrument::Drums => "drums".into(),
+        Instrument::Synth { waveform, .. } => format!("custom {} synth", waveform.label()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Output
+
+fn list_presets() -> String {
+    let mut s = String::from("Instrument presets (pass the id as \"instrument\"):\n");
+    for p in presets::all() {
+        s.push_str(&format!(
+            "- {} ({}): {}\n",
+            p.id,
+            presets::plain_name(p.name),
+            p.hint
+        ));
+    }
+    s.push_str(
+        "Also accepted: plain waveforms sine, triangle, saw, square. Fine-tune a synth with update_track \
+         (waveform, attack, decay, sustain, release, cutoff).\nExample: add_track {\"name\": \"Bass\", \"instrument\": \"bass\"}",
+    );
+    s
+}
+
+fn default_wav_path(project: &Path) -> PathBuf {
+    let name = project
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("project");
+    let stem = name
+        .strip_suffix(".aidaw.json")
+        .or_else(|| name.strip_suffix(".json"))
+        .unwrap_or(name);
+    project.with_file_name(format!("{stem}.wav"))
+}
+
+/// A compact overview so the model does not need to read the full JSON every time.
+pub fn summary(p: &Project) -> String {
+    overview(p, None, false)
+}
+
+fn overview(p: &Project, only: Option<&str>, with_notes: bool) -> String {
+    let bpb = p.beats_per_bar as f64;
+    let len = p.length_beats();
+    let mut s = format!(
+        "\"{}\" — {} BPM, {}/4, {} beats ({} bars), {} track(s)",
+        p.name,
+        p.bpm,
+        p.beats_per_bar,
+        fmt_num(len),
+        fmt_num((len / bpb).ceil()),
+        p.tracks.len()
+    );
+    for t in p.tracks.iter().filter(|t| only.is_none_or(|id| t.id == id)) {
+        s.push_str(&format!(
+            "\n- {} \"{}\" [{}] gain {:.2} pan {:.2}{}{}",
+            t.id,
+            t.name,
+            instrument_label(&t.instrument),
+            t.gain,
+            t.pan,
+            if t.mute { " MUTED" } else { "" },
+            if t.solo { " SOLO" } else { "" }
+        ));
+        for c in &t.clips {
+            let (lo, hi) = c.notes.iter().fold((127u8, 0u8), |(lo, hi), n| {
+                (lo.min(n.pitch), hi.max(n.pitch))
+            });
+            let range = if c.notes.is_empty() || t.instrument.is_drums() {
+                String::new()
+            } else {
+                format!(", {}..{}", pitch::name(lo), pitch::name(hi))
+            };
+            let name = if c.name.is_empty() {
+                String::new()
+            } else {
+                format!(" \"{}\"", c.name)
+            };
+            s.push_str(&format!(
+                "\n    - {}{name} {} (beats {}..{}) {} notes{range}",
+                c.id,
+                bar_range(c.start, c.end(), bpb),
+                fmt_num(c.start),
+                fmt_num(c.end()),
+                c.notes.len(),
+            ));
+            if with_notes && !c.notes.is_empty() {
+                s.push_str(&format!(
+                    "\n      notes (start:PITCH/BEATS): {}",
+                    music::format_notes(&c.notes, t.instrument.is_drums())
+                ));
+            }
+        }
+    }
+    s
+}
