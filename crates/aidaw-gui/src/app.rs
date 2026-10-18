@@ -89,6 +89,8 @@ pub struct App {
     /// Event counters the tutorial watches.
     pub ev_note_drags: u32,
     pub ev_undos: u32,
+    /// Pitch currently sounding because a piano key (or dragged note) is held.
+    pub held_key: Option<u8>,
 
     // ---- key / scale helper ----
     pub scale_root: u8,
@@ -199,6 +201,7 @@ impl App {
             ui_rects: HashMap::new(),
             ev_note_drags: 0,
             ev_undos: 0,
+            held_key: None,
             scale_root: 0,
             scale: Scale::Major,
             scale_lock: true,
@@ -241,6 +244,24 @@ impl App {
             e.set_project(&self.project);
             e.preview(track_index, pitch);
         }
+    }
+
+    /// Start sounding a note until [`Self::release_note`] (holding a piano key).
+    pub fn hold_note(&mut self, track_index: usize, pitch: u8) {
+        if let Some(e) = &self.engine {
+            if self.held_key.is_none() {
+                e.set_project(&self.project);
+            }
+            e.hold(track_index, pitch);
+        }
+        self.held_key = Some(pitch);
+    }
+
+    pub fn release_note(&mut self) {
+        if let Some(e) = &self.engine {
+            e.release();
+        }
+        self.held_key = None;
     }
 
     /// Whether the key helper applies to this track (it never applies to drums).
@@ -783,6 +804,10 @@ impl eframe::App for App {
             if snap != self.project {
                 self.push_undo(snap);
             }
+        }
+        // Safety net: never leave a held note ringing after the mouse is released.
+        if self.held_key.is_some() && !ctx.input(|i| i.pointer.any_down()) {
+            self.release_note();
         }
         if self.save_at.is_some_and(|t| Instant::now() >= t) {
             self.save_now();

@@ -207,6 +207,20 @@ impl Engine {
         }
     }
 
+    /// Start a note that sounds until [`Self::release`] (holding a piano key).
+    pub fn hold(&self, track: usize, pitch: u8) {
+        if let Ok(mut s) = self.shared.lock() {
+            let Shared { project, seq, .. } = &mut *s;
+            seq.preview_hold(project, track, pitch);
+        }
+    }
+
+    pub fn release(&self) {
+        if let Ok(mut s) = self.shared.lock() {
+            s.seq.release_held();
+        }
+    }
+
     pub fn is_playing(&self) -> bool {
         self.shared.lock().map(|s| s.playing).unwrap_or(false)
     }

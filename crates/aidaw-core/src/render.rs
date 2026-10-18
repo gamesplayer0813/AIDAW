@@ -84,6 +84,8 @@ struct Voice {
     lp: f32,
     hp: f32,
     done: bool,
+    /// A preview note that sounds until [`Sequencer::release_held`].
+    held: bool,
 }
 
 pub struct Sequencer {
@@ -135,6 +137,27 @@ impl Sequencer {
         };
         let gate = (self.sample_rate * 0.35) as u64;
         self.spawn(track, &t.instrument, pitch_, 100, 0, gate);
+    }
+
+    /// Start a preview note that keeps sounding until [`Self::release_held`]
+    /// (like holding a piano key). Any previously held note is released.
+    pub fn preview_hold(&mut self, project: &Project, track: usize, pitch_: u8) {
+        self.release_held();
+        let Some(t) = project.tracks.get(track) else {
+            return;
+        };
+        self.spawn(track, &t.instrument, pitch_, 100, 0, u64::MAX);
+        if let Some(v) = self.voices.last_mut() {
+            v.held = true;
+        }
+    }
+
+    /// Let go of the held preview note; it fades out with its release time.
+    pub fn release_held(&mut self) {
+        for v in self.voices.iter_mut().filter(|v| v.held) {
+            v.held = false;
+            v.gate = v.age;
+        }
     }
 
     fn render_block(&mut self, project: &Project, out: &mut [f32], advance: bool) {
@@ -270,6 +293,7 @@ impl Sequencer {
             lp: 0.0,
             hp: 0.0,
             done: false,
+            held: false,
         });
     }
 }

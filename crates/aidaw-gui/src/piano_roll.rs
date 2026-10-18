@@ -18,7 +18,7 @@ const EDGE: f32 = 6.0;
 
 enum Hit {
     Ruler(f64),
-    Keys(u8),
+    Keys,
     NoteBody { index: usize, offset: f64 },
     NoteEdge { index: usize },
     Grid { beat: f64, pitch: u8 },
@@ -217,7 +217,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             if r.bottom() < ruler_top + RULER_H {
                 continue;
             }
-            if pitch::is_black_key(p) {
+            if app.held_key == Some(p) {
+                // The key being held down lights up in the track colour.
+                painter.rect_filled(r, 0.0, color);
+            } else if pitch::is_black_key(p) {
                 painter.rect_filled(
                     Rect::from_min_size(r.min, vec2(KEYS_W * 0.62, kh)),
                     0.0,
@@ -261,7 +264,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             let hint = if is_drums {
                 "Click in the grid to add drum hits.\nTry Kick on beats 1 and 3, Snare on 2 and 4, Hi-hat everywhere!"
             } else {
-                "This clip is empty. Click anywhere in the grid to add a note!\nClick the piano keys on the left to hear them first."
+                "This clip is empty. Click anywhere in the grid to add a note!\nHold a piano key on the left to hear it, slide up or down to hear others."
             };
             let center = pos2(
                 (visible.left() + KEYS_W + visible.right()) / 2.0,
@@ -276,7 +279,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 return Hit::Ruler(beat_of(p.x).max(0.0));
             }
             if p.x < keys_left + KEYS_W {
-                return Hit::Keys(pitch_of(p.y) as u8);
+                return Hit::Keys;
             }
             let pitch_ = pitch_of(p.y) as u8;
             let beat = beat_of(p.x);
@@ -331,7 +334,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                         app.drag = index.map(|index| Drag::ResizeNote { index });
                     }
                     Hit::Ruler(b) => app.seek(clip.start + b),
-                    Hit::Keys(_) => {}
+                    Hit::Keys => {}
                 }
             }
         }
@@ -343,18 +346,13 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     Some(Drag::MoveNote { index, grab_offset }) => {
                         let start = snapped_move(grab_offset);
                         let pitch_ = app.fit_pitch(track_index, pitch_of(p.y) as u8);
-                        let mut moved_pitch = false;
                         if let Some(n) = app
                             .project
                             .clip_mut(&clip_id)
                             .and_then(|c| c.notes.get_mut(index))
                         {
                             n.start = start;
-                            moved_pitch = n.pitch != pitch_;
                             n.pitch = pitch_;
-                        }
-                        if moved_pitch {
-                            app.preview_note(track_index, pitch_);
                         }
                     }
                     Some(Drag::ResizeNote { index }) => {
@@ -377,6 +375,34 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 }
             }
         }
+        // Hold-to-hear: pressing a piano key sounds it until you let go, and
+        // sliding up/down the keyboard plays each key you pass. Dragging a note
+        // also keeps it sounding at its current pitch.
+        let want = if resp.is_pointer_button_down_on() {
+            if let Some(Drag::MoveNote { index, .. }) = &app.drag {
+                app.project
+                    .clip(&clip_id)
+                    .and_then(|(_, c)| c.notes.get(*index))
+                    .map(|n| n.pitch)
+            } else {
+                let on_keys = ui
+                    .input(|i| i.pointer.press_origin())
+                    .is_some_and(|o| o.x < keys_left + KEYS_W && o.y >= ruler_top + RULER_H);
+                on_keys
+                    .then(|| ui.input(|i| i.pointer.latest_pos()))
+                    .flatten()
+                    .map(|p| pitch_of(p.y.max(ruler_top + RULER_H)) as u8)
+            }
+        } else {
+            None
+        };
+        if want != app.held_key {
+            match want {
+                Some(p) => app.hold_note(track_index, p),
+                None => app.release_note(),
+            }
+        }
+
         if resp.drag_stopped() {
             if matches!(app.drag, Some(Drag::MoveNote { .. } | Drag::ResizeNote { .. })) {
                 app.ev_note_drags += 1;
@@ -397,7 +423,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                         add_note(app, &clip_id, track_index, app.snap_floor(beat).max(0.0), p);
                     }
                     Hit::Ruler(b) => app.seek(clip.start + b),
-                    Hit::Keys(p) => app.preview_note(track_index, p),
+                    Hit::Keys => {}
                 }
             }
         }
@@ -576,7 +602,7 @@ fn toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usize) 
         ui.label("Height");
         ui.add(egui::Slider::new(&mut app.roll_key_height, 8.0..=24.0).show_value(false));
     });
-    ui.weak("click the grid to add a note · drag to move · drag the right edge to lengthen · right-click to delete · click piano keys to hear them");
+    ui.weak("click the grid to add a note · drag to move · drag the right edge to lengthen · right-click to delete · hold or slide on piano keys to hear them");
 }
 
 fn drum_label(p: u8) -> Option<&'static str> {

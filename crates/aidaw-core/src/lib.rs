@@ -108,6 +108,22 @@ mod tests {
     }
 
     #[test]
+    fn held_preview_sustains_until_released() {
+        let p = demo();
+        let mut seq = render::Sequencer::new(22_050);
+        seq.preview_hold(&p, 0, 60);
+        let mut buf = vec![0.0f32; 2 * 22_050]; // one second, longer than a normal preview
+        seq.process_voices(&p, &mut buf);
+        assert!(
+            buf[buf.len() - 200..].iter().any(|s| s.abs() > 0.01),
+            "still sounding"
+        );
+        seq.release_held();
+        seq.process_voices(&p, &mut buf); // release (0.25 s) finishes within this second
+        assert_eq!(seq.active_voices(), 0);
+    }
+
+    #[test]
     fn solo_isolates_track() {
         let mut p = demo();
         p.tracks[1].solo = true;

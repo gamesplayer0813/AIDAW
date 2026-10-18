@@ -472,7 +472,7 @@ pub fn show_shortcuts(ctx: &egui::Context, open: &mut bool) {
                         ("Click the piano roll grid", "Add a note"),
                         ("Drag a note / its right edge", "Move / make longer"),
                         ("Right-click a note", "Delete it"),
-                        ("Click a piano key", "Hear that note"),
+                        ("Hold or slide on piano keys", "Hear notes"),
                         ("Delete", "Delete the selected note or clip"),
                         ("Ctrl+mouse wheel", "Zoom the piano roll"),
                     ] {
