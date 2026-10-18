@@ -90,27 +90,48 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                             }
                         });
                     });
-                    ui.horizontal(|ui| {
-                        ui.label("🔉").on_hover_text("Volume");
-                        if pro {
-                            ui.add(egui::Slider::new(&mut track.gain, 0.0..=1.5).show_value(true))
+                    if pro {
+                        // Volume and pan share one row when there is room, else one row each.
+                        let wide = ui.available_width() >= 420.0;
+                        let per_row = if wide { 2.0 } else { 1.0 };
+                        let slider = ((ui.available_width() - 110.0 * per_row - 50.0) / per_row)
+                            .clamp(40.0, 140.0);
+                        let volume = |ui: &mut egui::Ui, gain: &mut f32| {
+                            ui.label("🔉").on_hover_text("Volume");
+                            ui.spacing_mut().slider_width = slider;
+                            ui.add(egui::Slider::new(gain, 0.0..=1.5).show_value(true))
                                 .on_hover_text("Volume: how loud this track is (1.0 = unchanged)");
+                        };
+                        let pan = |ui: &mut egui::Ui, pan: &mut f32| {
                             ui.label("L/R").on_hover_text("Pan");
-                            ui.add(egui::Slider::new(&mut track.pan, -1.0..=1.0).show_value(true))
+                            ui.spacing_mut().slider_width = slider;
+                            ui.add(egui::Slider::new(pan, -1.0..=1.0).show_value(true))
                                 .on_hover_text("Pan: move the sound to the left or right speaker");
                             if ui
                                 .small_button("mid")
                                 .on_hover_text("Centre the pan")
                                 .clicked()
                             {
-                                track.pan = 0.0;
+                                *pan = 0.0;
                             }
+                        };
+                        if wide {
+                            ui.horizontal(|ui| {
+                                volume(ui, &mut track.gain);
+                                pan(ui, &mut track.pan);
+                            });
                         } else {
+                            ui.horizontal(|ui| volume(ui, &mut track.gain));
+                            ui.horizontal(|ui| pan(ui, &mut track.pan));
+                        }
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.label("🔉").on_hover_text("Volume");
                             ui.spacing_mut().slider_width = ui.available_width() - 8.0;
                             ui.add(egui::Slider::new(&mut track.gain, 0.0..=1.5).show_value(false))
                                 .on_hover_text("How loud this instrument is");
-                        }
-                    });
+                        });
+                    }
                 });
                 ui.add_space(2.0);
             }
@@ -136,11 +157,21 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         ui.horizontal(|ui| {
             ui.label("Master volume")
                 .on_hover_text("Volume of the whole song");
+            ui.spacing_mut().slider_width = (ui.available_width() - 70.0).clamp(40.0, 140.0);
             ui.add(egui::Slider::new(&mut app.project.master_gain, 0.0..=1.5).show_value(true));
         });
         ui.separator();
     }
 
+    egui::ScrollArea::vertical()
+        .id_salt("sound")
+        .auto_shrink([false, false])
+        .show(ui, |ui| sound_section(ui, app));
+}
+
+/// The selected track's name and sound (scrolls when the window is short).
+fn sound_section(ui: &mut egui::Ui, app: &mut App) {
+    let pro = app.pro();
     let Some(index) = app
         .selected_track
         .as_deref()
@@ -155,12 +186,13 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         let track = &mut app.project.tracks[index];
         ui.horizontal(|ui| {
             ui.label("Track name");
-            ui.text_edit_singleline(&mut track.name);
+            ui.add(egui::TextEdit::singleline(&mut track.name).desired_width(f32::INFINITY));
         });
         let current = presets::name_of(&track.instrument).unwrap_or("⚙ Custom");
         let mut picked = false;
         if !pro {
             ui.label(RichText::new("Pick a sound (click to hear it):").color(theme::TEXT_DIM));
+            let cell = ((ui.available_width() - 6.0) / 2.0).clamp(90.0, 160.0);
             egui::Grid::new("preset_grid")
                 .num_columns(2)
                 .spacing([6.0, 6.0])
@@ -170,7 +202,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                         let b = egui::Button::new(RichText::new(p.name).size(14.5))
                             .selected(is)
                             .corner_radius(10)
-                            .min_size(egui::vec2(126.0, 40.0));
+                            .min_size(egui::vec2(cell, 40.0));
                         if ui.add(b).on_hover_text(p.hint).clicked() {
                             track.instrument = p.instrument.clone();
                             picked = true;
@@ -185,7 +217,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt("preset")
                 .selected_text(RichText::new(current).strong())
-                .width(170.0)
+                .width((ui.available_width() - 90.0).clamp(90.0, 170.0))
                 .show_ui(ui, |ui| {
                     for p in presets::all() {
                         let is = track.instrument == p.instrument;
@@ -239,6 +271,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             egui::CollapsingHeader::new("⚙ Fine-tune the sound")
                 .default_open(true)
                 .show(ui, |ui| {
+                    ui.spacing_mut().slider_width =
+                        (ui.available_width() - 160.0).clamp(50.0, 160.0);
                     egui::Grid::new("adsr").num_columns(2).show(ui, |ui| {
                         ui.label("Wave").on_hover_text("The basic tone colour");
                         egui::ComboBox::from_id_salt("wave")

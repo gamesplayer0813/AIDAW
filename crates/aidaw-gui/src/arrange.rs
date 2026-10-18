@@ -41,7 +41,7 @@ enum Hit {
 }
 
 pub fn show(ui: &mut egui::Ui, app: &mut App) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         if !app.pro() {
             theme::section(ui, "Your song").on_hover_text(
                 "Each row is one instrument. The coloured blocks are parts of the song.\nClick a part to see and edit its notes below.",
