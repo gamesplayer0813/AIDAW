@@ -325,7 +325,7 @@ impl Sequencer {
         } else {
             0.0
         };
-        for f in out.chunks_exact_mut(2) {
+        for f in out.as_chunks_mut::<2>().0 {
             let mut l = f[0] * master;
             let mut r = f[1] * master;
             if !l.is_finite() || !r.is_finite() {
