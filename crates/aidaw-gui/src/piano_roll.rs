@@ -11,6 +11,7 @@ use eframe::egui::{
 };
 
 use crate::app::{track_color, App, Drag};
+use crate::i18n::{tr, trf};
 use crate::scale::{Scale, ROOTS};
 use crate::theme;
 
@@ -31,7 +32,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         app.ui_rects.insert("piano", ui.max_rect());
         ui.centered_and_justified(|ui| {
             ui.label(
-                RichText::new("👆 Click a coloured clip above to see and edit its notes here.\nNo clips yet? Double-click an empty spot in a track row.")
+                RichText::new(tr("👆 Click a coloured clip above to see and edit its notes here.\nNo clips yet? Double-click an empty spot in a track row."))
                     .size(15.0)
                     .weak(),
             )
@@ -314,9 +315,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
 
         if clip.notes.is_empty() {
             let hint = if is_drums {
-                "Click in the grid to add drum hits.\nTry Kick on beats 1 and 3, Snare on 2 and 4, Hi-hat everywhere!"
+                tr("Click in the grid to add drum hits.\nTry Kick on beats 1 and 3, Snare on 2 and 4, Hi-hat everywhere!")
             } else {
-                "This clip is empty. Click anywhere in the grid to add a note!\nHold a piano key on the left to hear it, slide up or down to hear others."
+                tr("This clip is empty. Click anywhere in the grid to add a note!\nHold a piano key on the left to hear it, slide up or down to hear others.")
             };
             let center = pos2(
                 (visible.left() + KEYS_W + visible.right()) / 2.0,
@@ -564,20 +565,20 @@ fn easy_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: us
         .get(track_index)
         .is_some_and(|t| t.instrument.is_drums());
     ui.horizontal_wrapped(|ui| {
-        theme::section(ui, "Notes").on_hover_text(
+        theme::section(ui, tr("Notes")).on_hover_text(tr(
             "Each row is a piano key (low at the bottom, high at the top). Left to right is time.",
-        );
+        ));
         if let Some(c) = app.project.clip_mut(clip_id) {
-            ui.label("Part");
+            ui.label(tr("Part"));
             ui.add(
                 egui::TextEdit::singleline(&mut c.name)
                     .hint_text(c.id.clone())
                     .desired_width(110.0),
             );
-            ui.label("Length")
-                .on_hover_text("How many bars this part lasts");
+            ui.label(tr("Length"))
+                .on_hover_text(tr("How many bars this part lasts"));
             let mut bars = (c.length / bpb).max(1.0).round();
-            let unit = if bars == 1.0 { " bar" } else { " bars" };
+            let unit = if bars == 1.0 { tr(" bar") } else { tr(" bars") };
             if ui
                 .add(
                     egui::DragValue::new(&mut bars)
@@ -595,14 +596,14 @@ fn easy_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: us
         if !drums {
             for (label, st, tip) in [
                 (
-                    "⬇ Lower",
+                    tr("⬇ Lower"),
                     -12,
-                    "Play every note in this part one octave lower",
+                    tr("Play every note in this part one octave lower"),
                 ),
                 (
-                    "⬆ Higher",
+                    tr("⬆ Higher"),
                     12,
-                    "Play every note in this part one octave higher",
+                    tr("Play every note in this part one octave higher"),
                 ),
             ] {
                 if ui.button(label).on_hover_text(tip).clicked() {
@@ -614,8 +615,8 @@ fn easy_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: us
             }
         }
         if ui
-            .button("🗑 Clear")
-            .on_hover_text("Remove every note in this part (Ctrl+Z to undo)")
+            .button(tr("🗑 Clear"))
+            .on_hover_text(tr("Remove every note in this part (Ctrl+Z to undo)"))
             .clicked()
         {
             app.run_op(Op::RemoveNotes {
@@ -633,8 +634,8 @@ fn easy_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: us
                 .and_then(|c| c.notes.get_mut(i))
         }) {
             ui.separator();
-            ui.label(format!("Note {}", pitch::name(n.pitch)));
-            for (label, v) in [("Soft", 50u8), ("Medium", 90), ("Loud", 120)] {
+            ui.label(trf("Note {}", &[&pitch::name(n.pitch)]));
+            for (label, v) in [(tr("Soft"), 50u8), (tr("Medium"), 90), (tr("Loud"), 120)] {
                 let on = match v {
                     50 => n.velocity < 70,
                     90 => (70..105).contains(&n.velocity),
@@ -642,7 +643,7 @@ fn easy_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: us
                 };
                 if ui
                     .selectable_label(on, label)
-                    .on_hover_text("How hard this note is played")
+                    .on_hover_text(tr("How hard this note is played"))
                     .clicked()
                 {
                     n.velocity = v;
@@ -653,19 +654,19 @@ fn easy_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: us
     ui.horizontal_wrapped(|ui| {
         let key = ui.scope(|ui| {
             ui.add_enabled_ui(!drums, |ui| {
-                ui.label("🎵 Mood").on_hover_text(
+                ui.label(tr("🎵 Mood")).on_hover_text(tr(
                     "Pick a feeling. Lit-up rows fit the mood, and every note you draw lands on one of them, so it always sounds right.",
-                );
+                ));
                 for (label, root, sc, tip) in [
-                    ("😊 Happy", 0u8, Scale::Major, "C major: bright and cheerful"),
-                    ("😢 Sad", 9, Scale::Minor, "A minor: dark and emotional"),
+                    (tr("😊 Happy"), 0u8, Scale::Major, tr("C major: bright and cheerful")),
+                    (tr("😢 Sad"), 9, Scale::Minor, tr("A minor: dark and emotional")),
                     (
-                        "👌 Can't go wrong",
+                        tr("👌 Can't go wrong"),
                         0,
                         Scale::Pentatonic,
-                        "C pentatonic: almost anything you draw sounds nice",
+                        tr("C pentatonic: almost anything you draw sounds nice"),
                     ),
-                    ("🎷 Bluesy", 9, Scale::Blues, "A blues: cool and gritty"),
+                    (tr("🎷 Bluesy"), 9, Scale::Blues, tr("A blues: cool and gritty")),
                 ] {
                     let on = app.scale == sc && app.scale_root == root;
                     if ui.selectable_label(on, label).on_hover_text(tip).clicked() {
@@ -675,42 +676,42 @@ fn easy_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: us
                 }
             })
             .response
-            .on_disabled_hover_text("Drums don't have a mood: every row is a different drum");
+            .on_disabled_hover_text(tr("Drums don't have a mood: every row is a different drum"));
         });
         app.ui_rects.insert("key", key.response.rect);
     });
-    theme::hint(ui, "click to add a note · drag to move · drag the right edge to make longer · right-click to delete · hold a piano key to hear it");
+    theme::hint(ui, tr("click to add a note · drag to move · drag the right edge to make longer · right-click to delete · hold a piano key to hear it"));
 }
 
 fn pro_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usize) {
     ui.horizontal_wrapped(|ui| {
-        theme::section(ui, "Piano roll").on_hover_text(
+        theme::section(ui, tr("Piano roll")).on_hover_text(tr(
             "Each row is a piano key (low at the bottom, high at the top). Left to right is time.",
-        );
+        ));
         if let Some(c) = app.project.clip_mut(clip_id) {
-            ui.label("Clip");
+            ui.label(tr("Clip"));
             ui.add(
                 egui::TextEdit::singleline(&mut c.name)
                     .hint_text(c.id.clone())
                     .desired_width(110.0),
             );
-            ui.label("Length")
-                .on_hover_text("How long this clip is. 4 beats = 1 bar.");
+            ui.label(tr("Length"))
+                .on_hover_text(tr("How long this clip is. 4 beats = 1 bar."));
             ui.add(
                 egui::DragValue::new(&mut c.length)
                     .range(0.25..=1024.0)
                     .speed(0.25)
-                    .suffix(" beats"),
+                    .suffix(tr(" beats")),
             );
         }
         ui.separator();
-        ui.label("Move all notes")
-            .on_hover_text("Transpose: shift every note in this clip up or down");
+        ui.label(tr("Move all notes"))
+            .on_hover_text(tr("Transpose: shift every note in this clip up or down"));
         for (label, st, tip) in [
-            ("⏬", -12, "Down one octave"),
-            ("🔽", -1, "Down a little (one semitone)"),
-            ("🔼", 1, "Up a little (one semitone)"),
-            ("⏫", 12, "Up one octave"),
+            ("⏬", -12, tr("Down one octave")),
+            ("🔽", -1, tr("Down a little (one semitone)")),
+            ("🔼", 1, tr("Up a little (one semitone)")),
+            ("⏫", 12, tr("Up one octave")),
         ] {
             if ui.small_button(label).on_hover_text(tip).clicked() {
                 app.run_op(Op::TransposeClip {
@@ -720,8 +721,8 @@ fn pro_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usi
             }
         }
         if ui
-            .small_button("🗑 Clear")
-            .on_hover_text("Remove every note in this clip (Ctrl+Z to undo)")
+            .small_button(tr("🗑 Clear"))
+            .on_hover_text(tr("Remove every note in this clip (Ctrl+Z to undo)"))
             .clicked()
         {
             app.run_op(Op::RemoveNotes {
@@ -739,11 +740,12 @@ fn pro_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usi
                 .clip_mut(clip_id)
                 .and_then(|c| c.notes.get_mut(i))
         }) {
-            ui.label(format!("Note {}", pitch::name(n.pitch)));
-            ui.label("Loudness")
-                .on_hover_text("Velocity: how hard the note is played");
+            ui.label(trf("Note {}", &[&pitch::name(n.pitch)]));
+            ui.label(tr("Loudness"))
+                .on_hover_text(tr("Velocity: how hard the note is played"));
             ui.add(egui::Slider::new(&mut n.velocity, 1..=127));
-            ui.label("Length").on_hover_text("Note length in beats");
+            ui.label(tr("Length"))
+                .on_hover_text(tr("Note length in beats"));
             ui.add(
                 egui::DragValue::new(&mut n.duration)
                     .range(0.01..=256.0)
@@ -757,9 +759,9 @@ fn pro_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usi
         let drums = app.project.tracks.get(track_index).is_some_and(|t| t.instrument.is_drums());
         let key = ui.scope(|ui| {
             ui.add_enabled_ui(!drums, |ui| {
-                ui.label("🎵 Key").on_hover_text(
+                ui.label(tr("🎵 Key")).on_hover_text(tr(
                     "Notes in the same key sound good together. Lit-up rows are in the key.",
-                );
+                ));
                 egui::ComboBox::from_id_salt("scale_root")
                     .width(48.0)
                     .selected_text(ROOTS[app.scale_root as usize % 12])
@@ -778,12 +780,12 @@ fn pro_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usi
                     });
                 ui.add_enabled(
                     app.scale != Scale::Off,
-                    egui::Checkbox::new(&mut app.scale_lock, "Stay in key"),
+                    egui::Checkbox::new(&mut app.scale_lock, tr("Stay in key")),
                 )
-                .on_hover_text("New and moved notes jump to the nearest note in the key, so it always sounds right.");
+                .on_hover_text(tr("New and moved notes jump to the nearest note in the key, so it always sounds right."));
             })
             .response
-            .on_disabled_hover_text("Drums don't have a key");
+            .on_disabled_hover_text(tr("Drums don't have a key"));
         });
         app.ui_rects.insert("key", key.response.rect);
         if !narrow {
@@ -794,32 +796,32 @@ fn pro_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usi
     if narrow {
         ui.horizontal(|ui| zoom_controls(ui, app));
     }
-    theme::hint(ui, "click the grid to add a note · drag to move · drag the right edge to lengthen · right-click to delete · hold or slide on piano keys to hear them");
+    theme::hint(ui, tr("click the grid to add a note · drag to move · drag the right edge to lengthen · right-click to delete · hold or slide on piano keys to hear them"));
 }
 
 fn zoom_controls(ui: &mut egui::Ui, app: &mut App) {
     ui.spacing_mut().slider_width = 80.0;
-    ui.label("Zoom");
+    ui.label(tr("Zoom"));
     ui.add(
         egui::Slider::new(&mut app.roll_zoom, 20.0..=400.0)
             .logarithmic(true)
             .show_value(false),
     );
-    ui.label("Height");
+    ui.label(tr("Height"));
     ui.add(egui::Slider::new(&mut app.roll_key_height, 8.0..=24.0).show_value(false));
 }
 
 fn drum_label(p: u8) -> Option<&'static str> {
     Some(match p {
-        36 => "Kick",
-        38 => "Snare",
-        39 => "Clap",
-        42 => "C.Hat",
-        46 => "O.Hat",
-        41 => "Tom L",
-        45 => "Tom M",
-        48 => "Tom H",
-        49 => "Crash",
+        36 => tr("Kick"),
+        38 => tr("Snare"),
+        39 => tr("Clap"),
+        42 => tr("C.Hat"),
+        46 => tr("O.Hat"),
+        41 => tr("Tom L"),
+        45 => tr("Tom M"),
+        48 => tr("Tom H"),
+        49 => tr("Crash"),
         _ => return None,
     })
 }
