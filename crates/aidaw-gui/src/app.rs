@@ -78,6 +78,11 @@ pub struct App {
     tutorial: Option<Tutorial>,
     /// Screen areas of key widgets, recorded each frame so the tutorial can point at them.
     pub ui_rects: HashMap<&'static str, Rect>,
+    /// Widths of the top bar's menu, transport and right-hand groups last frame.
+    top_bar_widths: [f32; 3],
+    /// Share of the height the piano roll takes, and the height it was taken of.
+    roll_share: f32,
+    roll_room_h: f32,
     /// Event counters the tutorial watches.
     pub ev_note_drags: u32,
     pub ev_undos: u32,
@@ -199,6 +204,9 @@ impl App {
             show_shortcuts: false,
             tutorial: None,
             ui_rects: HashMap::new(),
+            top_bar_widths: [0.0; 3],
+            roll_share: 0.5,
+            roll_room_h: 0.0,
             ev_note_drags: 0,
             ev_undos: 0,
             held_key: None,
@@ -646,52 +654,55 @@ impl App {
         egui::TopBottomPanel::top("menu")
             .frame(theme::chrome_frame())
             .show(ctx, |ui| {
+                // One row when everything fits, two rows in a narrow window.
+                // Group widths are measured each frame and used for the next.
+                let [menus_w, transport_w, right_w] = self.top_bar_widths;
+                let one_row =
+                    menus_w + transport_w + right_w + 40.0 <= ui.available_width();
+                let mut widths = [0.0; 3];
                 ui.horizontal(|ui| {
-                    crate::mode::switch(ui, self);
-                    ui.add_space(6.0);
-                    self.menus(ui);
-                    ui.add_space(10.0);
-                    self.transport(ui);
-                    if self.pro() {
-                        ui.add_space(4.0);
-                        ui.label(RichText::new("Grid").color(theme::TEXT_DIM)).on_hover_text(
-                            "Notes and clips snap to this grid. 1/16 is a good default; 1/4 = one beat.",
-                        );
-                        egui::ComboBox::from_id_salt("snap")
-                            .width(70.0)
-                            .selected_text(snap_label(self.snap))
-                            .show_ui(ui, |ui| {
-                                for s in [1.0, 0.5, 0.25, 0.125, 1.0 / 3.0, 1.0 / 6.0] {
-                                    ui.selectable_value(&mut self.snap, s, snap_label(s));
-                                }
-                            });
+                    widths[0] = ui
+                        .horizontal(|ui| {
+                            crate::mode::switch(ui, self);
+                            ui.add_space(6.0);
+                            self.menus(ui);
+                        })
+                        .response
+                        .rect
+                        .width();
+                    if one_row {
+                        ui.add_space(10.0);
+                        widths[1] = ui.horizontal(|ui| self.transport_row(ui)).response.rect.width();
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        self.sound_button(ui);
-                        ui.add_space(4.0);
-                        let ai = theme::hero_button(
-                            ui,
-                            "✨ Ask AI",
-                            theme::ACCENT,
-                            egui::vec2(108.0, 34.0),
-                        )
-                        .on_hover_text(
-                            "Let an AI assistant (Claude, ChatGPT, …) write music into this song",
-                        );
-                        if ai.clicked() {
-                            self.show_ai_help = true;
-                        }
-                        self.ui_rects.insert("ai", ai.rect);
-                        if self.path.is_none()
-                            && ui
-                                .button(RichText::new("💾 Not saved. Click to save").color(theme::WARN))
-                                .on_hover_text("Save your song to a file. AI tools work on this file too.")
-                                .clicked()
-                        {
-                            self.save_as_dialog();
-                        }
+                        widths[2] = ui
+                            .horizontal(|ui| {
+                                self.sound_button(ui);
+                                ui.add_space(4.0);
+                                let ai = theme::hero_button(
+                                    ui,
+                                    "✨ Ask AI",
+                                    theme::ACCENT,
+                                    egui::vec2(108.0, 34.0),
+                                )
+                                .on_hover_text(
+                                    "Let an AI assistant (Claude, ChatGPT, …) write music into this song",
+                                );
+                                if ai.clicked() {
+                                    self.show_ai_help = true;
+                                }
+                                self.ui_rects.insert("ai", ai.rect);
+                            })
+                            .response
+                            .rect
+                            .width();
                     });
                 });
+                if !one_row {
+                    ui.add_space(4.0);
+                    widths[1] = ui.horizontal(|ui| self.transport_row(ui)).response.rect.width();
+                }
+                self.top_bar_widths = widths;
             });
         egui::TopBottomPanel::bottom("status")
             .frame(theme::chrome_frame().inner_margin(egui::Margin::symmetric(12, 5)))
@@ -821,6 +832,34 @@ impl App {
         }
     }
 
+    /// Transport, the Pro grid picker and the "not saved" reminder.
+    fn transport_row(&mut self, ui: &mut egui::Ui) {
+        self.transport(ui);
+        if self.pro() {
+            ui.add_space(4.0);
+            ui.label(RichText::new("Grid").color(theme::TEXT_DIM))
+                .on_hover_text(
+                    "Notes and clips snap to this grid. 1/16 is a good default; 1/4 = one beat.",
+                );
+            egui::ComboBox::from_id_salt("snap")
+                .width(70.0)
+                .selected_text(snap_label(self.snap))
+                .show_ui(ui, |ui| {
+                    for s in [1.0, 0.5, 0.25, 0.125, 1.0 / 3.0, 1.0 / 6.0] {
+                        ui.selectable_value(&mut self.snap, s, snap_label(s));
+                    }
+                });
+        }
+        if self.path.is_none()
+            && ui
+                .button(RichText::new("💾 Not saved. Click to save").color(theme::WARN))
+                .on_hover_text("Save your song to a file. AI tools work on this file too.")
+                .clicked()
+        {
+            self.save_as_dialog();
+        }
+    }
+
     /// Stop, Play and the LCD with the song position and tempo.
     fn transport(&mut self, ui: &mut egui::Ui) {
         let playing = self.is_playing();
@@ -937,7 +976,10 @@ impl App {
                 let peak = e.diagnostics().peak;
                 crate::sound::meter(ui, peak).on_hover_text("Output level");
                 let label = if self.pro() {
-                    format!("🔊 {}", e.device_name())
+                    let name = e.device_name();
+                    let short: String = name.chars().take(20).collect();
+                    let ell = if short.len() < name.len() { "…" } else { "" };
+                    format!("🔊 {short}{ell}")
                 } else {
                     "🔊 Sound".to_string()
                 };
@@ -996,20 +1038,36 @@ impl eframe::App for App {
         let frame_start = self.project.clone();
 
         self.top_bar(ctx);
+        // Panel sizes follow the window, so a small window still shows the
+        // song, the notes and the side bar without anything overlapping.
+        let room = ctx.available_rect();
         egui::SidePanel::left("inspector")
             .frame(theme::panel_frame())
             .resizable(true)
-            .default_width(290.0)
+            .default_width((room.width() * 0.22).clamp(240.0, 300.0))
+            .min_width(220.0)
+            .max_width((room.width() * 0.4).max(220.0))
             .show(ctx, |ui| {
                 crate::inspector::show(ui, self);
             });
-        egui::TopBottomPanel::bottom("piano_roll")
+        // The piano roll keeps its share of the height when the window is
+        // resized; dragging its edge changes that share.
+        let h = room.height();
+        let mut roll = egui::TopBottomPanel::bottom("piano_roll")
             .frame(theme::panel_frame())
             .resizable(true)
-            .default_height(400.0)
-            .show(ctx, |ui| {
-                crate::piano_roll::show(ui, self);
-            });
+            .min_height(150.0)
+            .max_height((h - 170.0).max(150.0));
+        if (h - self.roll_room_h).abs() > 0.5 {
+            roll = roll.exact_height((self.roll_share * h).clamp(150.0, (h - 170.0).max(150.0)));
+        }
+        let shown = roll.show(ctx, |ui| {
+            crate::piano_roll::show(ui, self);
+        });
+        if (h - self.roll_room_h).abs() <= 0.5 && h > 0.0 {
+            self.roll_share = shown.response.rect.height() / h;
+        }
+        self.roll_room_h = h;
         egui::CentralPanel::default()
             .frame(theme::panel_frame())
             .show(ctx, |ui| {

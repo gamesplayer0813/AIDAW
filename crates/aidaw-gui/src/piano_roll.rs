@@ -563,7 +563,7 @@ fn easy_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: us
         .tracks
         .get(track_index)
         .is_some_and(|t| t.instrument.is_drums());
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         theme::section(ui, "Notes").on_hover_text(
             "Each row is a piano key (low at the bottom, high at the top). Left to right is time.",
         );
@@ -650,7 +650,7 @@ fn easy_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: us
             }
         }
     });
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let key = ui.scope(|ui| {
             ui.add_enabled_ui(!drums, |ui| {
                 ui.label("🎵 Mood").on_hover_text(
@@ -683,7 +683,7 @@ fn easy_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: us
 }
 
 fn pro_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usize) {
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         theme::section(ui, "Piano roll").on_hover_text(
             "Each row is a piano key (low at the bottom, high at the top). Left to right is time.",
         );
@@ -751,7 +751,9 @@ fn pro_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usi
             );
         }
     });
-    ui.horizontal(|ui| {
+    // In a narrow window the zoom sliders get a row of their own.
+    let narrow = ui.available_width() < 780.0;
+    ui.horizontal_wrapped(|ui| {
         let drums = app.project.tracks.get(track_index).is_some_and(|t| t.instrument.is_drums());
         let key = ui.scope(|ui| {
             ui.add_enabled_ui(!drums, |ui| {
@@ -784,13 +786,27 @@ fn pro_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usi
             .on_disabled_hover_text("Drums don't have a key");
         });
         app.ui_rects.insert("key", key.response.rect);
-        ui.separator();
-        ui.label("Zoom");
-        ui.add(egui::Slider::new(&mut app.roll_zoom, 20.0..=400.0).logarithmic(true).show_value(false));
-        ui.label("Height");
-        ui.add(egui::Slider::new(&mut app.roll_key_height, 8.0..=24.0).show_value(false));
+        if !narrow {
+            ui.separator();
+            zoom_controls(ui, app);
+        }
     });
+    if narrow {
+        ui.horizontal(|ui| zoom_controls(ui, app));
+    }
     theme::hint(ui, "click the grid to add a note · drag to move · drag the right edge to lengthen · right-click to delete · hold or slide on piano keys to hear them");
+}
+
+fn zoom_controls(ui: &mut egui::Ui, app: &mut App) {
+    ui.spacing_mut().slider_width = 80.0;
+    ui.label("Zoom");
+    ui.add(
+        egui::Slider::new(&mut app.roll_zoom, 20.0..=400.0)
+            .logarithmic(true)
+            .show_value(false),
+    );
+    ui.label("Height");
+    ui.add(egui::Slider::new(&mut app.roll_key_height, 8.0..=24.0).show_value(false));
 }
 
 fn drum_label(p: u8) -> Option<&'static str> {
