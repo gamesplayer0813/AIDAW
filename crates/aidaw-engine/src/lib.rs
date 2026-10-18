@@ -20,6 +20,8 @@ struct Shared {
     seq: Sequencer,
     playing: bool,
     position: f64,
+    /// Cached [`Project::loop_end_beats`]: playback wraps to the start here.
+    loop_end: Option<f64>,
 }
 
 /// Health counters the UI can show, written lock-free by the audio thread.
@@ -122,6 +124,7 @@ impl Engine {
             seq: Sequencer::new(sample_rate),
             playing: false,
             position: 0.0,
+            loop_end: project.loop_end_beats(),
         }));
         let stats = Arc::new(Stats::default());
         let sc: cpal::StreamConfig = config.config();
@@ -175,8 +178,10 @@ impl Engine {
     pub fn set_project(&self, project: &Project) {
         // Clone before locking so the audio callback's try_lock isn't starved on big songs.
         let mut fresh = project.clone();
+        let loop_end = project.loop_end_beats();
         if let Ok(mut s) = self.shared.lock() {
             std::mem::swap(&mut s.project, &mut fresh);
+            s.loop_end = loop_end;
         }
         // The old project is dropped here, outside the lock.
     }
@@ -265,9 +270,10 @@ where
                     seq,
                     position,
                     playing,
+                    loop_end,
                 } = &mut *s;
                 if *playing {
-                    seq.process(project, &mut stereo);
+                    seq.process_looping(project, &mut stereo, *loop_end);
                     *position = seq.position();
                 } else if seq.active_voices() > 0 {
                     // Stopped, but note previews are still ringing.

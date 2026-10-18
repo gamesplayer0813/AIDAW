@@ -206,6 +206,28 @@ impl Sequencer {
         self.render_block(project, out, true);
     }
 
+    /// Like [`Self::process`], but when the playhead reaches `loop_end` it
+    /// jumps back to beat 0 mid-block and keeps going. Notes already sounding
+    /// ring out naturally across the wrap, as in a real loop.
+    pub fn process_looping(&mut self, project: &Project, out: &mut [f32], loop_end: Option<f64>) {
+        let Some(end) = loop_end.filter(|e| e.is_finite() && *e > 0.0) else {
+            self.process(project, out);
+            return;
+        };
+        let frames_per_beat = self.sample_rate as f64 * project.seconds_per_beat();
+        let mut rest = out;
+        while !rest.is_empty() {
+            if self.position >= end {
+                self.position = 0.0;
+            }
+            let until = ((end - self.position) * frames_per_beat).ceil().max(1.0);
+            let n = (rest.len() / 2).min(until as usize).max(1) * 2;
+            let (now, later) = rest.split_at_mut(n.min(rest.len()));
+            self.render_block(project, now, true);
+            rest = later;
+        }
+    }
+
     /// Render only the voices already sounding (e.g. note previews) without
     /// triggering clip notes or moving the playhead. Used while stopped.
     pub fn process_voices(&mut self, project: &Project, out: &mut [f32]) {
@@ -807,6 +829,54 @@ mod tests {
         // must be completely silent and no voices may linger.
         let tail = &audio[audio.len() - sr as usize..];
         assert!(peak(tail) == 0.0, "tail peak {}", peak(tail));
+    }
+
+    #[test]
+    fn loop_end_rounds_last_note_up_to_bar() {
+        let mut p = Project::new("t", 120.0);
+        assert_eq!(p.loop_end_beats(), None);
+        p.tracks = demo_project().tracks;
+        for t in &mut p.tracks {
+            t.clips.clear();
+        }
+        p.tracks[0].clips.push(crate::Clip {
+            id: "c".into(),
+            name: String::new(),
+            start: 4.0,
+            length: 16.0,
+            notes: vec![crate::Note {
+                pitch: 60,
+                start: 1.0,
+                duration: 1.5,
+                velocity: 100,
+            }],
+        });
+        // Note ends at beat 6.5 -> wraps at the end of bar 2 (beat 8),
+        // even though the clip itself runs on to beat 20.
+        assert_eq!(p.loop_end_beats(), Some(8.0));
+        p.tracks[0].clips[0].notes[0].duration = 3.0; // ends exactly on beat 8
+        assert_eq!(p.loop_end_beats(), Some(8.0));
+    }
+
+    #[test]
+    fn playback_wraps_to_start_after_last_note() {
+        let p = demo_project();
+        let end = p.loop_end_beats().expect("demo has notes");
+        let sr = 22_050;
+        let mut seq = Sequencer::new(sr);
+        seq.seek(end - 0.25);
+        let fpb = sr as f64 * p.seconds_per_beat();
+        let frames = (fpb * 0.5) as usize; // half a beat: crosses the loop point
+        let mut buf = vec![0.0f32; frames * 2];
+        seq.process_looping(&p, &mut buf, Some(end));
+        assert!(
+            (seq.position() - 0.25).abs() < 1e-3,
+            "pos {}",
+            seq.position()
+        );
+        // The first note(s) of the song were triggered after the wrap.
+        assert!(peak(&buf[frames..]) > 0.0);
+        assert!(buf.iter().all(|s| s.is_finite()));
     }
 
     #[test]
