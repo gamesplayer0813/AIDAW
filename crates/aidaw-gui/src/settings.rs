@@ -4,6 +4,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::Lang;
+
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(default)]
 pub struct Settings {
@@ -11,6 +13,8 @@ pub struct Settings {
     pub tutorial_done: bool,
     /// Pro mode: every control. Off = Easy mode, the default for new users.
     pub pro: bool,
+    /// Interface language; `None` follows the system language.
+    pub lang: Option<Lang>,
 }
 
 impl Default for Settings {
@@ -19,6 +23,7 @@ impl Default for Settings {
             show_welcome: true,
             tutorial_done: false,
             pro: false,
+            lang: None,
         }
     }
 }

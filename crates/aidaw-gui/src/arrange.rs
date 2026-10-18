@@ -10,6 +10,7 @@ use eframe::egui::{
 };
 
 use crate::app::{track_color, App, Drag};
+use crate::i18n::tr;
 use crate::theme;
 
 const HEADER_W: f32 = 150.0;
@@ -43,22 +44,22 @@ enum Hit {
 pub fn show(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal_wrapped(|ui| {
         if !app.pro() {
-            theme::section(ui, "Your song").on_hover_text(
+            theme::section(ui, tr("Your song")).on_hover_text(tr(
                 "Each row is one instrument. The coloured blocks are parts of the song.\nClick a part to see and edit its notes below.",
-            );
-            theme::hint(ui, "click a part to edit its notes · double-click an empty spot for a new part · drag to move");
+            ));
+            theme::hint(ui, tr("click a part to edit its notes · double-click an empty spot for a new part · drag to move"));
             return;
         }
-        theme::section(ui, "Song").on_hover_text(
+        theme::section(ui, tr("Song")).on_hover_text(tr(
             "Each row is one instrument (a track). The coloured blocks are clips: pieces of music.\nClick a clip to edit its notes in the piano roll below.",
-        );
+        ));
         ui.add(
             egui::Slider::new(&mut app.arrange_zoom, 8.0..=120.0)
                 .logarithmic(true)
                 .show_value(false)
-                .text("zoom"),
+                .text(tr("zoom")),
         );
-        theme::hint(ui, "click a clip to edit it · double-click an empty spot for a new clip · drag to move · drag the right edge to make longer");
+        theme::hint(ui, tr("click a clip to edit it · double-click an empty spot for a new clip · drag to move · drag the right edge to make longer"));
     });
 
     let bpb = app.project.beats_per_bar.max(1) as f64;
@@ -242,7 +243,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     painter.text(
                         pos2(x_of(0.0) + 12.0, row_top(i) + ROW_H / 2.0),
                         Align2::LEFT_CENTER,
-                        "Double-click here to add a clip",
+                        tr("Double-click here to add a clip"),
                         FontId::proportional(13.0),
                         theme::TEXT_FAINT,
                     );
@@ -252,7 +253,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 painter.text(
                     pos2(origin.x + 20.0, origin.y + RULER_H + 24.0),
                     Align2::LEFT_CENTER,
-                    "No tracks yet. Click ➕ Add instrument on the left.",
+                    tr("No tracks yet. Click ➕ Add instrument on the left."),
                     FontId::proportional(15.0),
                     theme::TEXT_DIM,
                 );
@@ -303,8 +304,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     theme::TEXT,
                 );
                 let sound = presets::name_of(&track.instrument)
-                    .map(presets::plain_name)
-                    .unwrap_or("Custom sound");
+                    .map(|n| presets::plain_name(tr(n)))
+                    .unwrap_or(tr("Custom sound"));
                 text.text(
                     card.left_top() + vec2(19.0, 28.0),
                     Align2::LEFT_TOP,

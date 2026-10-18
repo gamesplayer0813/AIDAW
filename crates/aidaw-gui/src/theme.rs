@@ -86,8 +86,8 @@ pub fn bold_font(size: f32) -> FontId {
     FontId::new(size, bold())
 }
 
-/// Some system fonts that carry CJK glyphs, so Chinese/Japanese track and
-/// clip names render (Inter and egui's bundled fonts have none).
+/// Some system fonts that carry CJK glyphs beyond the bundled subset
+/// (Inter and egui's own fonts have none).
 const CJK_CANDIDATES: &[&str] = &[
     r"C:\Windows\Fonts\msyh.ttc",
     r"C:\Windows\Fonts\msyh.ttf",
@@ -118,6 +118,25 @@ fn install_fonts(ctx: &egui::Context) {
     let mut b = vec!["inter-semibold".to_string()];
     b.extend(fallback);
     fonts.families.insert(bold(), b);
+    // Bundled Simplified Chinese (all of GB2312 plus every character the
+    // translations use), so the Chinese interface renders on any PC.
+    fonts.font_data.insert(
+        "noto-sc".into(),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../assets/NotoSansSC-Regular-subset.otf"
+        ))),
+    );
+    // Right after the Latin font, so Chinese punctuation (，。！？) comes
+    // from it rather than from the emoji fonts.
+    for family in [FontFamily::Proportional, FontFamily::Monospace, bold()] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .insert(1, "noto-sc".into());
+    }
+    // A system CJK font, if there is one, covers the rarer characters people
+    // type into track and clip names.
     if let Some(bytes) = CJK_CANDIDATES.iter().find_map(|p| std::fs::read(p).ok()) {
         fonts
             .font_data

@@ -6,6 +6,7 @@ use aidaw_core::{Instrument, Waveform};
 use eframe::egui::{self, RichText};
 
 use crate::app::{track_color, App};
+use crate::i18n::{tr, trf};
 use crate::theme;
 use aidaw_core::presets;
 
@@ -13,26 +14,26 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
     app.ui_rects.insert("inspector", ui.max_rect());
     let pro = app.pro();
     ui.horizontal(|ui| {
-        theme::section(ui, if pro { "Tracks" } else { "Instruments" });
+        theme::section(ui, if pro { tr("Tracks") } else { tr("Instruments") });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.menu_button(RichText::new("➕ Add instrument").strong(), |ui| {
-                ui.label(RichText::new("Pick a sound for the new track").weak());
+            ui.menu_button(RichText::new(tr("➕ Add instrument")).strong(), |ui| {
+                ui.label(RichText::new(tr("Pick a sound for the new track")).weak());
                 for p in presets::all() {
-                    if ui.button(p.name).on_hover_text(p.hint).clicked() {
+                    if ui.button(tr(p.name)).on_hover_text(tr(p.hint)).clicked() {
                         app.add_track(&p);
                         ui.close_menu();
                     }
                 }
             })
             .response
-            .on_hover_text("Add a new track. Each track plays one instrument.");
+            .on_hover_text(tr("Add a new track. Each track plays one instrument."));
         });
     });
     ui.separator();
 
     if app.project.tracks.is_empty() {
         ui.add_space(8.0);
-        ui.label("No tracks yet. Click ➕ Add instrument above to start.");
+        ui.label(tr("No tracks yet. Click ➕ Add instrument above to start."));
     }
 
     egui::ScrollArea::vertical()
@@ -63,7 +64,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                                 selected,
                                 RichText::new(&track.name).font(theme::bold_font(14.0)),
                             )
-                            .on_hover_text("Select this track to change its sound")
+                            .on_hover_text(tr("Select this track to change its sound"))
                             .clicked()
                         {
                             app.selected_track = Some(track.id.clone());
@@ -74,19 +75,19 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                             if selected
                                 && ui
                                     .small_button("🗑")
-                                    .on_hover_text("Delete this track (Ctrl+Z brings it back)")
+                                    .on_hover_text(tr("Delete this track (Ctrl+Z brings it back)"))
                                     .clicked()
                             {
                                 remove = Some((track.id.clone(), track.name.clone()));
                             }
                             if pro {
                                 ui.toggle_value(&mut track.solo, "S")
-                                    .on_hover_text("Solo: hear ONLY this track");
+                                    .on_hover_text(tr("Solo: hear ONLY this track"));
                                 ui.toggle_value(&mut track.mute, "M")
-                                    .on_hover_text("Mute: silence this track");
+                                    .on_hover_text(tr("Mute: silence this track"));
                             } else {
-                                ui.toggle_value(&mut track.mute, "🔇 Silence")
-                                    .on_hover_text("Turn this instrument off for now");
+                                ui.toggle_value(&mut track.mute, tr("🔇 Silence"))
+                                    .on_hover_text(tr("Turn this instrument off for now"));
                             }
                         });
                     });
@@ -97,19 +98,23 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                         let slider = ((ui.available_width() - 110.0 * per_row - 50.0) / per_row)
                             .clamp(40.0, 140.0);
                         let volume = |ui: &mut egui::Ui, gain: &mut f32| {
-                            ui.label("🔉").on_hover_text("Volume");
+                            ui.label("🔉").on_hover_text(tr("Volume"));
                             ui.spacing_mut().slider_width = slider;
                             ui.add(egui::Slider::new(gain, 0.0..=1.5).show_value(true))
-                                .on_hover_text("Volume: how loud this track is (1.0 = unchanged)");
+                                .on_hover_text(tr(
+                                    "Volume: how loud this track is (1.0 = unchanged)",
+                                ));
                         };
                         let pan = |ui: &mut egui::Ui, pan: &mut f32| {
-                            ui.label("L/R").on_hover_text("Pan");
+                            ui.label(tr("L/R")).on_hover_text(tr("Pan"));
                             ui.spacing_mut().slider_width = slider;
                             ui.add(egui::Slider::new(pan, -1.0..=1.0).show_value(true))
-                                .on_hover_text("Pan: move the sound to the left or right speaker");
+                                .on_hover_text(tr(
+                                    "Pan: move the sound to the left or right speaker",
+                                ));
                             if ui
-                                .small_button("mid")
-                                .on_hover_text("Centre the pan")
+                                .small_button(tr("mid"))
+                                .on_hover_text(tr("Centre the pan"))
                                 .clicked()
                             {
                                 *pan = 0.0;
@@ -126,10 +131,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                         }
                     } else {
                         ui.horizontal(|ui| {
-                            ui.label("🔉").on_hover_text("Volume");
+                            ui.label("🔉").on_hover_text(tr("Volume"));
                             ui.spacing_mut().slider_width = ui.available_width() - 8.0;
                             ui.add(egui::Slider::new(&mut track.gain, 0.0..=1.5).show_value(false))
-                                .on_hover_text("How loud this instrument is");
+                                .on_hover_text(tr("How loud this instrument is"));
                         });
                     }
                 });
@@ -137,7 +142,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             }
             if let Some((id, name)) = remove {
                 if app.run_op(Op::RemoveTrack { track_id: id }).is_some() {
-                    app.status = format!("Deleted {name}. Ctrl+Z (or ↩ Undo) brings it back.");
+                    app.status = trf("Deleted {}. Ctrl+Z (or ↩ Undo) brings it back.", &[&name]);
                 }
             }
             if let Some(i) = preview {
@@ -155,8 +160,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
     ui.separator();
     if pro {
         ui.horizontal(|ui| {
-            ui.label("Master volume")
-                .on_hover_text("Volume of the whole song");
+            ui.label(tr("Master volume"))
+                .on_hover_text(tr("Volume of the whole song"));
             ui.spacing_mut().slider_width = (ui.available_width() - 70.0).clamp(40.0, 140.0);
             ui.add(egui::Slider::new(&mut app.project.master_gain, 0.0..=1.5).show_value(true));
         });
@@ -177,21 +182,21 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
         .as_deref()
         .and_then(|id| app.project.tracks.iter().position(|t| t.id == id))
     else {
-        ui.weak("Click a track above to change its sound.");
+        ui.weak(tr("Click a track above to change its sound."));
         return;
     };
 
     let sound = ui.scope(|ui| {
-        theme::section(ui, "Sound");
+        theme::section(ui, tr("Sound"));
         let track = &mut app.project.tracks[index];
         ui.horizontal(|ui| {
-            ui.label("Track name");
+            ui.label(tr("Track name"));
             ui.add(egui::TextEdit::singleline(&mut track.name).desired_width(f32::INFINITY));
         });
-        let current = presets::name_of(&track.instrument).unwrap_or("⚙ Custom");
+        let current = presets::name_of(&track.instrument).map_or(tr("⚙ Custom"), tr);
         let mut picked = false;
         if !pro {
-            ui.label(RichText::new("Pick a sound (click to hear it):").color(theme::TEXT_DIM));
+            ui.label(RichText::new(tr("Pick a sound (click to hear it):")).color(theme::TEXT_DIM));
             let cell = ((ui.available_width() - 6.0) / 2.0).clamp(90.0, 160.0);
             egui::Grid::new("preset_grid")
                 .num_columns(2)
@@ -199,11 +204,11 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
                 .show(ui, |ui| {
                     for (i, p) in presets::all().into_iter().enumerate() {
                         let is = track.instrument == p.instrument;
-                        let b = egui::Button::new(RichText::new(p.name).size(14.5))
+                        let b = egui::Button::new(RichText::new(tr(p.name)).size(14.5))
                             .selected(is)
                             .corner_radius(10)
                             .min_size(egui::vec2(cell, 40.0));
-                        if ui.add(b).on_hover_text(p.hint).clicked() {
+                        if ui.add(b).on_hover_text(tr(p.hint)).clicked() {
                             track.instrument = p.instrument.clone();
                             picked = true;
                         }
@@ -222,8 +227,8 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
                     for p in presets::all() {
                         let is = track.instrument == p.instrument;
                         if ui
-                            .selectable_label(is, p.name)
-                            .on_hover_text(p.hint)
+                            .selectable_label(is, tr(p.name))
+                            .on_hover_text(tr(p.hint))
                             .clicked()
                             && !is
                         {
@@ -233,8 +238,8 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
                     }
                 });
             if ui
-                .button("🔊 Try")
-                .on_hover_text("Hear this sound")
+                .button(tr("🔊 Try"))
+                .on_hover_text(tr("Hear this sound"))
                 .clicked()
             {
                 picked = true;
@@ -244,7 +249,7 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
             .into_iter()
             .find(|p| p.instrument == track.instrument)
         {
-            ui.weak(p.hint);
+            ui.weak(tr(p.hint));
         }
         picked
     });
@@ -268,51 +273,52 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
             if !pro {
                 return;
             }
-            egui::CollapsingHeader::new("⚙ Fine-tune the sound")
+            egui::CollapsingHeader::new(tr("⚙ Fine-tune the sound"))
                 .default_open(true)
                 .show(ui, |ui| {
                     ui.spacing_mut().slider_width =
                         (ui.available_width() - 160.0).clamp(50.0, 160.0);
                     egui::Grid::new("adsr").num_columns(2).show(ui, |ui| {
-                        ui.label("Wave").on_hover_text("The basic tone colour");
+                        ui.label(tr("Wave"))
+                            .on_hover_text(tr("The basic tone colour"));
                         egui::ComboBox::from_id_salt("wave")
-                            .selected_text(waveform.label())
+                            .selected_text(tr(waveform.label()))
                             .show_ui(ui, |ui| {
                                 for w in Waveform::ALL {
-                                    ui.selectable_value(waveform, w, w.label());
+                                    ui.selectable_value(waveform, w, tr(w.label()));
                                 }
                             });
                         ui.end_row();
-                        ui.label("Fade in")
-                            .on_hover_text("Attack: how slowly the note starts");
+                        ui.label(tr("Fade in"))
+                            .on_hover_text(tr("Attack: how slowly the note starts"));
                         ui.add(
                             egui::Slider::new(attack, 0.001..=2.0)
                                 .logarithmic(true)
                                 .suffix(" s"),
                         );
                         ui.end_row();
-                        ui.label("Drop")
-                            .on_hover_text("Decay: how fast it falls to the hold level");
+                        ui.label(tr("Drop"))
+                            .on_hover_text(tr("Decay: how fast it falls to the hold level"));
                         ui.add(
                             egui::Slider::new(decay, 0.001..=3.0)
                                 .logarithmic(true)
                                 .suffix(" s"),
                         );
                         ui.end_row();
-                        ui.label("Hold level")
-                            .on_hover_text("Sustain: loudness while the note is held");
+                        ui.label(tr("Hold level"))
+                            .on_hover_text(tr("Sustain: loudness while the note is held"));
                         ui.add(egui::Slider::new(sustain, 0.0..=1.0));
                         ui.end_row();
-                        ui.label("Fade out")
-                            .on_hover_text("Release: how long it rings after the note ends");
+                        ui.label(tr("Fade out"))
+                            .on_hover_text(tr("Release: how long it rings after the note ends"));
                         ui.add(
                             egui::Slider::new(release, 0.005..=4.0)
                                 .logarithmic(true)
                                 .suffix(" s"),
                         );
                         ui.end_row();
-                        ui.label("Brightness")
-                            .on_hover_text("Filter cutoff: lower = darker, softer");
+                        ui.label(tr("Brightness"))
+                            .on_hover_text(tr("Filter cutoff: lower = darker, softer"));
                         ui.add(
                             egui::Slider::new(cutoff, 40.0..=20_000.0)
                                 .logarithmic(true)
@@ -323,7 +329,7 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
                 });
         }
         Instrument::Drums => {
-            ui.weak("Each row in the piano roll is a different drum: Kick, Snare, Clap, Hi-hats, Toms and Crash are labelled on the keyboard.");
+            ui.weak(tr("Each row in the piano roll is a different drum: Kick, Snare, Clap, Hi-hats, Toms and Crash are labelled on the keyboard."));
         }
     }
 }
