@@ -173,9 +173,12 @@ impl Engine {
     }
 
     pub fn set_project(&self, project: &Project) {
+        // Clone before locking so the audio callback's try_lock isn't starved on big songs.
+        let mut fresh = project.clone();
         if let Ok(mut s) = self.shared.lock() {
-            s.project = project.clone();
+            std::mem::swap(&mut s.project, &mut fresh);
         }
+        // The old project is dropped here, outside the lock.
     }
 
     pub fn play(&self) {

@@ -365,14 +365,18 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                         | Hit::ClipEdge { clip_id, track_id } => {
                             select_clip(app, &clip_id, &track_id)
                         }
-                        Hit::Row { track_id, .. } | Hit::Header { track_id } => {
+                        Hit::Header { track_id } => {
                             // Show this track's notes, not the previous track's clip.
+                            let keep = app.selected_clip.as_deref().is_some_and(|id| {
+                                app.project.clip(id).is_some_and(|(t, _)| t.id == track_id)
+                            });
                             let first = app
                                 .project
                                 .track(&track_id)
                                 .and_then(|t| t.clips.first())
                                 .map(|c| c.id.clone());
                             match first {
+                                _ if keep => app.selected_track = Some(track_id),
                                 Some(clip_id) => select_clip(app, &clip_id, &track_id),
                                 None => {
                                     app.selected_clip = None;
@@ -380,6 +384,9 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                                     app.selected_track = Some(track_id);
                                 }
                             }
+                        }
+                        Hit::Row { track_id, .. } => {
+                            app.selected_track = Some(track_id);
                         }
                         Hit::Nothing => {}
                     }

@@ -115,7 +115,7 @@ const STEPS: &[Step] = &[
     },
     Step {
         title: "8. Change the sound",
-        body: "On the left, under 'Sound', pick a different sound for the selected track, for example '🔔 Bell'. Press 🔊 to hear it.",
+        body: "On the left, under 'Sound', pick a different sound for the selected track, for example '🔔 Bell'. You'll hear it right away.",
         target: "sound",
         check: |app, b| app.project.tracks.iter().map(|t| &t.instrument).ne(b.instruments.iter()),
     },

@@ -730,7 +730,21 @@ pub fn write_wav(path: &Path, samples: &[f32], sample_rate: u32) -> Result<()> {
     Ok(())
 }
 
+/// Longest song [`render_to_wav`] will write, so a runaway clip can't exhaust memory.
+pub const MAX_RENDER_SECONDS: f64 = 3600.0;
+
 pub fn render_to_wav(project: &Project, path: &Path, sample_rate: u32) -> Result<f64> {
+    if !(8_000..=192_000).contains(&sample_rate) {
+        anyhow::bail!("sample rate must be between 8000 and 192000 Hz (got {sample_rate})");
+    }
+    let seconds = project.length_beats() * 60.0 / project.bpm.max(1.0);
+    if seconds.is_nan() || seconds > MAX_RENDER_SECONDS {
+        anyhow::bail!(
+            "the song is {:.0} minutes long; the limit is {:.0} minutes. Shorten or remove very long clips first.",
+            seconds / 60.0,
+            MAX_RENDER_SECONDS / 60.0
+        );
+    }
     let samples = render(project, sample_rate);
     write_wav(path, &samples, sample_rate)?;
     Ok(samples.len() as f64 / 2.0 / sample_rate as f64)
