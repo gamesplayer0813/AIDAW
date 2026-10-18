@@ -9,6 +9,7 @@ mod piano_roll;
 mod presets;
 mod scale;
 mod settings;
+mod sound;
 
 use std::path::PathBuf;
 

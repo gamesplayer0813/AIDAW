@@ -45,8 +45,12 @@ pub enum Drag {
 pub struct App {
     pub project: Project,
     pub path: Option<PathBuf>,
-    engine: Option<Engine>,
-    engine_error: Option<String>,
+    pub engine: Option<Engine>,
+    pub engine_error: Option<String>,
+    pub show_sound: bool,
+    pub device_names: Vec<String>,
+    /// When Play was last pressed, to notice a device that never starts.
+    play_pressed_at: Option<Instant>,
 
     undo: Vec<Project>,
     redo: Vec<Project>,
@@ -151,9 +155,11 @@ impl App {
         };
         let settings = Settings::load();
         let show_welcome = path.is_none() && settings.show_welcome;
-        let (engine, engine_error) = match Engine::new(&project) {
+        let opened = Engine::new(&project).map_err(|e| format!("{e:#}"));
+        crate::sound::log_engine(&opened);
+        let (engine, engine_error) = match opened {
             Ok(e) => (Some(e), None),
-            Err(e) => (None, Some(format!("{e:#}"))),
+            Err(e) => (None, Some(e)),
         };
         let mut app = App {
             selected_track: project.tracks.first().map(|t| t.id.clone()),
@@ -166,6 +172,9 @@ impl App {
             path,
             engine,
             engine_error,
+            show_sound: false,
+            device_names: Vec::new(),
+            play_pressed_at: None,
             undo: Vec::new(),
             redo: Vec::new(),
             pending_undo: None,
@@ -259,11 +268,69 @@ impl App {
     }
 
     pub fn toggle_play(&mut self) {
+        match &self.engine {
+            Some(e) => {
+                if e.is_playing() {
+                    e.pause();
+                } else {
+                    e.play();
+                    self.play_pressed_at = Some(Instant::now());
+                }
+            }
+            None => {
+                self.status =
+                    "No sound device. Opening the Sound window so you can pick one.".into();
+                self.show_sound = true;
+            }
+        }
+    }
+
+    /// (Re)open audio output, on the default device or a named one.
+    pub fn open_audio(&mut self, device: Option<&str>) {
+        self.engine = None; // release the old device first
+        let opened = match device {
+            Some(name) => Engine::with_device(&self.project, name),
+            None => Engine::new(&self.project),
+        }
+        .map_err(|e| format!("{e:#}"));
+        crate::sound::log_engine(&opened);
+        match opened {
+            Ok(e) => {
+                self.status = format!("Sound now plays through {}", e.device_name());
+                e.test_tone();
+                self.engine = Some(e);
+                self.engine_error = None;
+            }
+            Err(err) => {
+                self.status = "Couldn't open that sound device".into();
+                self.engine_error = Some(err);
+            }
+        }
+    }
+
+    /// If Play was pressed but the device never asked for audio, say so.
+    fn check_audio_alive(&mut self) {
+        let Some(t) = self.play_pressed_at else {
+            return;
+        };
+        if t.elapsed() < Duration::from_millis(1500) {
+            return;
+        }
+        self.play_pressed_at = None;
         if let Some(e) = &self.engine {
-            if e.is_playing() {
-                e.pause();
-            } else {
-                e.play();
+            let d = e.diagnostics();
+            crate::sound::log(&format!(
+                "play: device={:?} callbacks={} peak={:.3} position={:.2} error={:?}",
+                e.device_name(),
+                d.callbacks,
+                d.peak,
+                e.position(),
+                d.error
+            ));
+            if d.callbacks == 0 || d.error.is_some() {
+                self.status =
+                    "The sound device isn't running. Pick another one in the Sound window.".into();
+                self.show_sound = true;
             }
         }
     }
@@ -536,6 +603,10 @@ impl App {
                         self.show_ai_help = true;
                         ui.close_menu();
                     }
+                    if ui.button("🔊 Sound settings / no sound?").clicked() {
+                        self.show_sound = true;
+                        ui.close_menu();
+                    }
                     if ui.button("⌨ Keyboard & mouse").clicked() {
                         self.show_shortcuts = true;
                         ui.close_menu();
@@ -618,17 +689,32 @@ impl App {
                 ui.label(sync).on_hover_text(
                     "The project file the AI edits through aidaw-mcp; changes appear here live.",
                 );
-                match (&self.engine, &self.engine_error) {
-                    (Some(e), _) => {
-                        ui.weak(format!("🔊 {} @ {} Hz", e.device_name(), e.sample_rate()))
+                ui.separator();
+                match &self.engine {
+                    Some(e) => {
+                        let peak = e.diagnostics().peak;
+                        let name = e.device_name().to_string();
+                        if ui
+                            .button(format!("🔊 {name}"))
+                            .on_hover_text("Sound settings: pick speakers, play a test beep")
+                            .clicked()
+                        {
+                            self.show_sound = true;
+                        }
+                        crate::sound::meter(ui, peak).on_hover_text("Output level");
                     }
-                    (None, Some(err)) => ui
-                        .colored_label(Color32::LIGHT_RED, "🔇 No sound device found")
-                        .on_hover_text(format!(
-                            "Plug in speakers or headphones and restart AIDAW.\n\n{err}"
-                        )),
-                    _ => ui.label(""),
-                };
+                    None => {
+                        if ui
+                            .button(
+                                RichText::new("🔇 No sound. Click to fix")
+                                    .color(Color32::LIGHT_RED),
+                            )
+                            .clicked()
+                        {
+                            self.show_sound = true;
+                        }
+                    }
+                }
             });
         });
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
@@ -658,6 +744,7 @@ fn snap_label(s: f64) -> String {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_disk();
+        self.check_audio_alive();
         self.shortcuts(ctx);
         if let Some(e) = &self.engine {
             self.playhead = e.position();
@@ -759,6 +846,12 @@ impl App {
             let mut open = true;
             onboarding::show_shortcuts(ctx, &mut open);
             self.show_shortcuts = open;
+        }
+        if self.show_sound {
+            let mut open = true;
+            crate::sound::show_window(ctx, self, &mut open);
+            self.show_sound &= open;
+            ctx.request_repaint_after(Duration::from_millis(100));
         }
     }
 
