@@ -173,9 +173,12 @@ impl Engine {
     }
 
     pub fn set_project(&self, project: &Project) {
+        // Clone before locking so the audio callback's try_lock isn't starved on big songs.
+        let mut fresh = project.clone();
         if let Ok(mut s) = self.shared.lock() {
-            s.project = project.clone();
+            std::mem::swap(&mut s.project, &mut fresh);
         }
+        // The old project is dropped here, outside the lock.
     }
 
     pub fn play(&self) {
@@ -244,8 +247,10 @@ where
     let cb_shared = shared.clone();
     let cb_stats = stats.clone();
     let err_stats = stats.clone();
-    let mut stereo: Vec<f32> = Vec::with_capacity(8192);
+    // Large enough for any common WASAPI/ALSA period so the callback never allocates.
+    let mut stereo: Vec<f32> = Vec::with_capacity(1 << 15);
     let mut tone_phase = 0.0f32;
+    let tone_fade = (sample_rate * 0.005).max(1.0);
     let mut peak = 0.0f32;
     device.build_output_stream(
         config,
@@ -273,7 +278,11 @@ where
             if tone > 0 {
                 let n = (tone as usize).min(frames);
                 for f in 0..n {
-                    let s = (tone_phase * TAU).sin() * 0.25;
+                    // 5 ms fade in/out so the beep starts and stops without clicks.
+                    let left = (tone as usize - f) as f32;
+                    let elapsed = (sample_rate - left).max(0.0);
+                    let ramp = (left.min(elapsed + 1.0) / tone_fade).min(1.0);
+                    let s = (tone_phase * TAU).sin() * 0.25 * ramp;
                     tone_phase = (tone_phase + 440.0 / sample_rate) % 1.0;
                     stereo[f * 2] += s;
                     stereo[f * 2 + 1] += s;
@@ -295,6 +304,13 @@ where
                         (_, 0) => stereo[f * 2],
                         (_, 1) => stereo[f * 2 + 1],
                         _ => 0.0,
+                    };
+                    // The sequencer already limits; this only guards the test
+                    // tone mix and integer conversion against overflow.
+                    let v = if v.is_finite() {
+                        v.clamp(-1.0, 1.0)
+                    } else {
+                        0.0
                     };
                     *sample = T::from_sample(v);
                 }

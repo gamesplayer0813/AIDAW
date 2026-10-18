@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     pub show_welcome: bool,
     pub tutorial_done: bool,
+    /// Pro mode: every control. Off = Easy mode, the default for new users.
+    pub pro: bool,
 }
 
 impl Default for Settings {
@@ -16,6 +18,7 @@ impl Default for Settings {
         Settings {
             show_welcome: true,
             tutorial_done: false,
+            pro: false,
         }
     }
 }

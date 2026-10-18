@@ -10,9 +10,9 @@ use aidaw_engine::Engine;
 use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, Rect, RichText};
 
 use crate::onboarding::{self, Tutorial, WelcomeChoice};
-use crate::presets;
 use crate::scale::Scale;
 use crate::settings::Settings;
+use aidaw_core::presets;
 
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(400);
@@ -275,7 +275,8 @@ impl App {
     }
 
     pub fn fit_pitch(&self, track_index: usize, pitch: u8) -> u8 {
-        if self.scale_lock && self.scale_active(track_index) {
+        // Easy mode always keeps notes in key.
+        if (self.scale_lock || !self.pro()) && self.scale_active(track_index) {
             self.scale.snap(self.scale_root, pitch)
         } else {
             pitch
@@ -283,6 +284,11 @@ impl App {
     }
 
     // ---- transport -------------------------------------------------------
+
+    /// Pro mode shows every control; Easy mode (the default) only the essentials.
+    pub fn pro(&self) -> bool {
+        self.settings.pro
+    }
 
     pub fn is_playing(&self) -> bool {
         self.engine.as_ref().is_some_and(|e| e.is_playing())
@@ -373,12 +379,21 @@ impl App {
 
     // ---- editing helpers -------------------------------------------------
 
+    /// The grid in beats. Easy mode hides the Grid control and uses 1/16.
+    pub fn grid(&self) -> f64 {
+        if self.pro() {
+            self.snap
+        } else {
+            0.25
+        }
+    }
+
     pub fn snap_beat(&self, beat: f64) -> f64 {
-        (beat / self.snap).round() * self.snap
+        (beat / self.grid()).round() * self.grid()
     }
 
     pub fn snap_floor(&self, beat: f64) -> f64 {
-        (beat / self.snap).floor() * self.snap
+        (beat / self.grid()).floor() * self.grid()
     }
 
     /// Run an [`Op`] from the UI, reporting errors in the status bar.
@@ -572,177 +587,265 @@ impl App {
 
     fn top_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("New song").clicked() {
-                        self.load_project(
-                            starter_project(),
-                            None,
-                            "New song. Click in the piano roll to add notes!",
-                        );
-                        ui.close_menu();
-                    }
-                    if ui.button("Open…").clicked() {
-                        ui.close_menu();
-                        self.open_dialog();
-                    }
-                    if ui.button("Save As…  (Ctrl+S)").clicked() {
-                        ui.close_menu();
-                        self.save_as_dialog();
-                    }
-                    if ui
-                        .button("Export as WAV audio…")
-                        .on_hover_text("Make an audio file you can share or put in other apps")
-                        .clicked()
-                    {
-                        ui.close_menu();
-                        self.export_wav_dialog();
-                    }
-                });
-                ui.menu_button("Edit", |ui| {
-                    if ui
-                        .add_enabled(!self.undo.is_empty(), egui::Button::new("Undo  Ctrl+Z"))
-                        .clicked()
-                    {
-                        self.queued_history = Some(false);
-                        ui.close_menu();
-                    }
-                    if ui
-                        .add_enabled(!self.redo.is_empty(), egui::Button::new("Redo  Ctrl+Y"))
-                        .clicked()
-                    {
-                        self.queued_history = Some(true);
-                        ui.close_menu();
-                    }
-                });
-                let help = ui.menu_button(RichText::new("❓ Help").strong(), |ui| {
-                    if ui.button("🎓 Tutorial (2 minutes)").clicked() {
-                        self.start_tutorial();
-                        ui.close_menu();
-                    }
-                    if ui.button("💬 Let AI make music…").clicked() {
-                        self.show_ai_help = true;
-                        ui.close_menu();
-                    }
-                    if ui.button("🔊 Sound settings / no sound?").clicked() {
-                        self.show_sound = true;
-                        ui.close_menu();
-                    }
-                    if ui.button("⌨ Keyboard & mouse").clicked() {
-                        self.show_shortcuts = true;
-                        ui.close_menu();
-                    }
-                    if ui.button("👋 Welcome screen").clicked() {
-                        self.show_welcome = true;
-                        ui.close_menu();
-                    }
-                });
-                self.ui_rects.insert("help", help.response.rect);
+            ui.add_space(3.0);
+            ui.horizontal(|ui| {
+                crate::mode::switch(ui, self);
                 ui.separator();
-                let playing = self.is_playing();
-                let play = ui
-                    .add(
-                        egui::Button::new(
-                            RichText::new(if playing { "⏸  Pause" } else { "▶  Play" })
-                                .size(17.0)
-                                .strong(),
-                        )
-                        .fill(if playing {
-                            Color32::from_rgb(120, 70, 30)
-                        } else {
-                            Color32::from_rgb(40, 110, 60)
-                        })
-                        .min_size(egui::vec2(96.0, 28.0)),
-                    )
-                    .on_hover_text("Play or pause the song (Space bar)");
-                if play.clicked() {
-                    self.toggle_play();
-                }
-                self.ui_rects.insert("play", play.rect);
-                if ui
-                    .add(
-                        egui::Button::new(RichText::new("⏹").size(17.0))
-                            .min_size(egui::vec2(32.0, 28.0)),
-                    )
-                    .on_hover_text("Stop and go back to the start")
-                    .clicked()
-                {
-                    self.stop();
-                }
-                let bpb = self.project.beats_per_bar.max(1) as f64;
-                let bar = (self.playhead / bpb).floor() as i64 + 1;
-                let beat = (self.playhead % bpb).floor() as i64 + 1;
-                ui.monospace(format!("bar {bar:>3}.{beat}"))
-                    .on_hover_text("Where the song is playing: bar number . beat");
+                self.menus(ui);
                 ui.separator();
-                ui.label("Speed (BPM)").on_hover_text(
-                    "Tempo in beats per minute. 70 = slow ballad, 110 = pop, 170 = drum & bass.",
-                );
+                self.transport(ui);
+                ui.separator();
+                if self.pro() {
+                    ui.label("BPM").on_hover_text(
+                        "Tempo in beats per minute. 70 = slow ballad, 110 = pop, 170 = drum & bass.",
+                    );
+                } else {
+                    ui.label("Speed").on_hover_text(
+                        "How fast the song plays (beats per minute).\n70 = slow and calm · 110 = pop · 140+ = fast and energetic.",
+                    );
+                }
                 let mut bpm = self.project.bpm;
+                if !self.pro() && ui.button("−").on_hover_text("Slower").clicked() {
+                    bpm = (bpm - 5.0).round().max(20.0);
+                }
                 if ui
                     .add(
                         egui::DragValue::new(&mut bpm)
                             .range(20.0..=400.0)
-                            .speed(0.5)
-                            .fixed_decimals(1),
+                            .speed(0.2)
+                            .fixed_decimals(0),
                     )
+                    .on_hover_text("Drag left/right or click to type")
                     .changed()
                 {
                     self.project.bpm = bpm;
                 }
-                ui.label("Grid").on_hover_text(
-                    "Notes and clips snap to this grid. 1/16 is a good default; 1/4 = one beat.",
-                );
-                egui::ComboBox::from_id_salt("snap")
-                    .selected_text(snap_label(self.snap))
-                    .show_ui(ui, |ui| {
-                        for s in [1.0, 0.5, 0.25, 0.125, 1.0 / 3.0, 1.0 / 6.0] {
-                            ui.selectable_value(&mut self.snap, s, snap_label(s));
-                        }
-                    });
+                if !self.pro() && ui.button("+").on_hover_text("Faster").clicked() {
+                    bpm = (bpm + 5.0).round().min(400.0);
+                }
+                if bpm != self.project.bpm {
+                    self.project.bpm = bpm;
+                }
+                if self.pro() {
+                    ui.label("Grid").on_hover_text(
+                        "Notes and clips snap to this grid. 1/16 is a good default; 1/4 = one beat.",
+                    );
+                    egui::ComboBox::from_id_salt("snap")
+                        .selected_text(snap_label(self.snap))
+                        .show_ui(ui, |ui| {
+                            for s in [1.0, 0.5, 0.25, 0.125, 1.0 / 3.0, 1.0 / 6.0] {
+                                ui.selectable_value(&mut self.snap, s, snap_label(s));
+                            }
+                        });
+                }
                 ui.separator();
-                let sync = match &self.path {
-                    Some(p) => {
-                        format!("⟳ {}", p.file_name().and_then(|n| n.to_str()).unwrap_or(""))
+                let ai = ui
+                    .add(
+                        egui::Button::new(RichText::new("✨ Ask AI").size(15.0).strong())
+                            .fill(Color32::from_rgb(70, 60, 140))
+                            .min_size(egui::vec2(92.0, 28.0)),
+                    )
+                    .on_hover_text("Let an AI assistant (Claude, ChatGPT, …) write music into this song");
+                if ai.clicked() {
+                    self.show_ai_help = true;
+                }
+                self.ui_rects.insert("ai", ai.rect);
+                match &self.path {
+                    Some(p) if self.pro() => {
+                        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        ui.label(format!("⟳ {name}")).on_hover_text(
+                            "The project file the AI edits through aidaw-mcp; changes appear here live.",
+                        );
                     }
-                    None => "⚠ not saved yet".into(),
-                };
-                ui.label(sync).on_hover_text(
-                    "The project file the AI edits through aidaw-mcp; changes appear here live.",
-                );
-                ui.separator();
-                match &self.engine {
-                    Some(e) => {
-                        let peak = e.diagnostics().peak;
-                        let name = e.device_name().to_string();
-                        if ui
-                            .button(format!("🔊 {name}"))
-                            .on_hover_text("Sound settings: pick speakers, play a test beep")
-                            .clicked()
-                        {
-                            self.show_sound = true;
-                        }
-                        crate::sound::meter(ui, peak).on_hover_text("Output level");
-                    }
+                    Some(_) => {}
                     None => {
                         if ui
-                            .button(
-                                RichText::new("🔇 No sound. Click to fix")
-                                    .color(Color32::LIGHT_RED),
-                            )
+                            .button(RichText::new("💾 Not saved. Click to save").color(Color32::from_rgb(255, 200, 90)))
+                            .on_hover_text("Save your song to a file. AI tools work on this file too.")
                             .clicked()
                         {
-                            self.show_sound = true;
+                            self.save_as_dialog();
                         }
                     }
                 }
+                ui.separator();
+                self.sound_button(ui);
             });
+            ui.add_space(2.0);
         });
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.weak(&self.status);
+                let failed = [
+                    "Failed",
+                    "Edit failed",
+                    "Save failed",
+                    "Open failed",
+                    "Export failed",
+                    "Couldn't",
+                ]
+                .iter()
+                .any(|p| self.status.starts_with(p));
+                let text = RichText::new(&self.status).size(14.0);
+                ui.label(if failed {
+                    text.color(Color32::LIGHT_RED)
+                } else {
+                    text
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self.pro() {
+                        ui.weak(format!(
+                            "grid {} · key {} {}",
+                            snap_label(self.snap),
+                            crate::scale::ROOTS[self.scale_root as usize % 12],
+                            self.scale.label()
+                        ));
+                    } else {
+                        ui.weak("🐣 Easy mode · switch to 🔧 Pro (top left) for more controls");
+                    }
+                });
             });
         });
+    }
+
+    fn menus(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button(RichText::new("📁 File").size(15.0), |ui| {
+            if ui.button("New song").clicked() {
+                self.load_project(
+                    starter_project(),
+                    None,
+                    "New song. Click in the piano roll to add notes!",
+                );
+                ui.close_menu();
+            }
+            if ui.button("Open…").clicked() {
+                ui.close_menu();
+                self.open_dialog();
+            }
+            if ui.button("Save As…  (Ctrl+S)").clicked() {
+                ui.close_menu();
+                self.save_as_dialog();
+            }
+            if ui
+                .button(if self.pro() {
+                    "Export as WAV audio…"
+                } else {
+                    "Save as audio file…"
+                })
+                .on_hover_text("Make an audio file you can share or put in other apps")
+                .clicked()
+            {
+                ui.close_menu();
+                self.export_wav_dialog();
+            }
+        });
+        let help = ui.menu_button(RichText::new("❓ Help").size(15.0).strong(), |ui| {
+            if ui.button("🎓 Tutorial (2 minutes)").clicked() {
+                self.start_tutorial();
+                ui.close_menu();
+            }
+            if ui.button("✨ Let AI make music…").clicked() {
+                self.show_ai_help = true;
+                ui.close_menu();
+            }
+            if ui.button("🔊 Sound settings / no sound?").clicked() {
+                self.show_sound = true;
+                ui.close_menu();
+            }
+            if ui.button("⌨ Keyboard & mouse").clicked() {
+                self.show_shortcuts = true;
+                ui.close_menu();
+            }
+            if ui.button("👋 Welcome screen").clicked() {
+                self.show_welcome = true;
+                ui.close_menu();
+            }
+        });
+        self.ui_rects.insert("help", help.response.rect);
+        // Undo is the beginner's safety net, so it is a real button, not hidden in a menu.
+        let big = |t: &str| egui::Button::new(RichText::new(t).size(15.0));
+        if ui
+            .add_enabled(!self.undo.is_empty(), big("↩ Undo"))
+            .on_hover_text("Take back the last change (Ctrl+Z). Works for AI changes too.")
+            .clicked()
+        {
+            self.queued_history = Some(false);
+        }
+        if ui
+            .add_enabled(!self.redo.is_empty(), big("↪ Redo"))
+            .on_hover_text("Redo (Ctrl+Y)")
+            .clicked()
+        {
+            self.queued_history = Some(true);
+        }
+    }
+
+    fn transport(&mut self, ui: &mut egui::Ui) {
+        let playing = self.is_playing();
+        let play = ui
+            .add(
+                egui::Button::new(
+                    RichText::new(if playing { "⏸  Pause" } else { "▶  Play" })
+                        .size(17.0)
+                        .strong(),
+                )
+                .fill(if playing {
+                    Color32::from_rgb(120, 70, 30)
+                } else {
+                    Color32::from_rgb(40, 110, 60)
+                })
+                .min_size(egui::vec2(96.0, 30.0)),
+            )
+            .on_hover_text("Play or pause the song (Space bar)");
+        if play.clicked() {
+            self.toggle_play();
+        }
+        self.ui_rects.insert("play", play.rect);
+        if ui
+            .add(egui::Button::new(RichText::new("⏹").size(17.0)).min_size(egui::vec2(32.0, 30.0)))
+            .on_hover_text("Stop and go back to the start")
+            .clicked()
+        {
+            self.stop();
+        }
+        let bpb = self.project.beats_per_bar.max(1) as f64;
+        let bar = (self.playhead / bpb).floor() as i64 + 1;
+        if self.pro() {
+            let beat = (self.playhead % bpb).floor() as i64 + 1;
+            ui.monospace(format!("bar {bar:>3}.{beat}"))
+                .on_hover_text("Where the song is playing: bar number . beat");
+        } else {
+            ui.monospace(format!("bar {bar}"))
+                .on_hover_text("Where the song is playing");
+        }
+    }
+
+    fn sound_button(&mut self, ui: &mut egui::Ui) {
+        match &self.engine {
+            Some(e) => {
+                let peak = e.diagnostics().peak;
+                let label = if self.pro() {
+                    format!("🔊 {}", e.device_name())
+                } else {
+                    "🔊 Sound".to_string()
+                };
+                if ui
+                    .button(label)
+                    .on_hover_text("Sound settings: pick speakers, play a test beep")
+                    .clicked()
+                {
+                    self.show_sound = true;
+                }
+                crate::sound::meter(ui, peak).on_hover_text("Output level");
+            }
+            None => {
+                if ui
+                    .button(RichText::new("🔇 No sound. Click to fix").color(Color32::LIGHT_RED))
+                    .clicked()
+                {
+                    self.show_sound = true;
+                }
+            }
+        }
     }
 }
 

@@ -42,6 +42,8 @@ CI（GitHub Actions, `windows-latest`）每次 PR 都会构建并上传这两个
 
 ### GUI
 
+**🐣 Easy / 🔧 Pro 开关**：窗口左上角那个大开关。Easy（新用户默认）只留必需的东西：大按钮选音色、用「心情」（Happy / Sad / Can't go wrong / Bluesy）代替调式且音符永远在调内、长度按小节算、顶栏直接有 ↩ Undo / ↪ Redo 和 ✨ Ask AI。Pro 显示全部控件：网格、声像、Solo、力度、音色微调（ADSR/滤波）、缩放。切换只改界面，不会动你的歌。
+
 第一次打开会出现欢迎页：可以选 **2 分钟互动教程**（一步步教你播放、画音符、改音色，做对了自动进入下一步）、播放 demo、新建空白歌曲，或者按 3 步把 Claude 接进来。之后随时可以在 **❓ Help** 菜单里重新打开。
 
 新手友好设计：乐器用预设选（Soft Keys / Bass / Warm Pad / Drum Kit …，高级参数折叠起来），点钢琴键能直接试听，画音符时能听到声音；**Key + Stay in key** 会高亮调内音并把音符自动吸附过去，乱点也好听；每个按钮都有悬停说明。
@@ -72,7 +74,19 @@ aidaw.exe examples\demo.aidaw.json
 
 然后在 GUI 里打开同一个文件，让 AI 说：“写一段 100 BPM 的 lo-fi，Am-F-C-G，加鼓和贝斯”，它写的东西会实时出现在 GUI 里。
 
-MCP 工具：`new_project`、`open_project`、`get_project`、`apply_ops`（原子批量）、`add_track`、`update_track`、`remove_track`、`add_clip`、`update_clip`、`remove_clip`、`add_notes`、`remove_notes`、`transpose_clip`、`update_project`、`render_wav`。
+MCP 工具（共 20 个，详见 [docs/LLM_GUIDE.md](docs/LLM_GUIDE.md)）：
+
+- 音乐级：`add_chords`（`"Am F C G"`）、`add_drum_pattern`（`{"kick":"x...x...","snare":"....x..."}`）、`add_melody`（`"C4/1 D4/0.5 r/1 G4/2"`）—— 模型不用自己算音符
+- 工程：`help`、`new_project`、`open_project`、`get_project`、`list_presets`、`update_project`、`render_wav`
+- 底层编辑：`add_track` / `update_track` / `remove_track`、`add_clip` / `update_clip` / `remove_clip`、`add_notes` / `remove_notes` / `transpose_clip`、`apply_ops`（原子批量）
+
+对小模型很宽容：轨道/clip 可以用名字引用、数字可以写成字符串、乐器可以直接写预设名（`"bass"`、`"Warm Pad"`）、位置可以用小节（`bar: 5`）；每个错误都会列出合法值并附一个示例调用。
+
+### 任何 LLM 都能用
+
+- **MCP 客户端**（Claude Desktop / Claude Code / Cursor / Windsurf / Cline…）：如上配置 `aidaw-mcp.exe`
+- **函数调用 API**（OpenAI / Gemini / Anthropic / Ollama…）：`aidaw-mcp tools --format openai|anthropic|gemini` 导出工具定义，再用 `aidaw-mcp call <tool> '<json>' --project song.aidaw.json` 执行
+- **只能跑命令的 agent**：`aidaw-mcp call add_chords --project song.aidaw.json track=Piano chords="Am F C G"`；`aidaw-mcp guide` 打印一页速查表，可以直接贴给任何聊天 AI
 
 `examples/demo.aidaw.json` 就是通过 MCP 接口生成的 4 轨 demo。
 

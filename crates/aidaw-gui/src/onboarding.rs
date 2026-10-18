@@ -115,7 +115,7 @@ const STEPS: &[Step] = &[
     },
     Step {
         title: "8. Change the sound",
-        body: "On the left, under 'Sound', pick a different sound for the selected track, for example '🔔 Bell'. Press 🔊 to hear it.",
+        body: "On the left, under 'Sound', pick a different sound for the selected track, for example '🔔 Bell'. You'll hear it right away.",
         target: "sound",
         check: |app, b| app.project.tracks.iter().map(|t| &t.instrument).ne(b.instruments.iter()),
     },
@@ -127,14 +127,14 @@ const STEPS: &[Step] = &[
     },
     Step {
         title: "10. Stay in key 🎵",
-        body: "Above the piano roll, 'Key' lights up the notes that sound good together. With 'Stay in key' turned on, every note you draw lands on a good-sounding note automatically.\n\nPentatonic is the safest choice: almost anything you draw will sound nice.",
+        body: "Above the notes, the 🎵 row lights up the notes that sound good together, and every note you draw lands on one of them automatically.\n\nIn 🐣 Easy mode pick a Mood (Happy, Sad…). In 🔧 Pro mode you choose any key and can turn 'Stay in key' off.",
         target: "key",
         check: |_, _| false,
     },
     Step {
         title: "You did it! 🏆",
-        body: "That's all you need to make music here.\n\nWant an AI to write music with you? Open Help › 'Let AI make music' and follow the 3 steps. Whatever the AI writes shows up here, and you can change it just like you did now.\n\nYou can replay this tutorial any time from Help.",
-        target: "help",
+        body: "That's all you need to make music here.\n\nThe 🐣 Easy | 🔧 Pro switch at the top left shows more or fewer controls whenever you like. Your song never changes when you flip it.\n\nWant an AI to write music with you? Click ✨ Ask AI at the top and follow the steps. Whatever the AI writes shows up here, and you can change it just like you did now.\n\nYou can replay this tutorial any time from Help.",
+        target: "mode",
         check: |_, _| false,
     },
 ];
@@ -334,7 +334,12 @@ pub fn show_welcome(ctx: &egui::Context, app: &mut App) -> WelcomeChoice {
             {
                 choice = WelcomeChoice::AiHelp;
             }
-            ui.add_space(12.0);
+            ui.add_space(10.0);
+            ui.label(
+                RichText::new("You can switch between 🐣 Easy and 🔧 Pro any time (top left).")
+                    .weak(),
+            );
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
                 if ui
                     .checkbox(
@@ -376,7 +381,7 @@ pub fn show_ai_help(ctx: &egui::Context, app: &mut App, open: &mut bool) {
         .default_width(520.0)
         .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
         .show(ctx, |ui| {
-            ui.label("AIDAW lets an AI assistant such as Claude write music straight into your song. You watch it appear here and can change anything it makes.");
+            ui.label("AIDAW lets an AI assistant write music straight into your song. You watch it appear here and can change anything it makes. Claude is the easiest to set up (below); other AI apps work too.");
             ui.add_space(8.0);
 
             ui.label(RichText::new("Step 1: Save your song").strong());
@@ -428,6 +433,34 @@ pub fn show_ai_help(ctx: &egui::Context, app: &mut App, open: &mut bool) {
             }
             ui.add_space(4.0);
             ui.label("Don't like what it did? Press Ctrl+Z here to undo it.");
+            ui.add_space(8.0);
+            egui::CollapsingHeader::new("Using a different AI (Cursor, ChatGPT, Gemini, Ollama, …)")
+                .show(ui, |ui| {
+                    ui.label("Any app that supports MCP servers (Cursor, Windsurf, Cline, Claude Code…) uses the same aidaw-mcp program as above.");
+                    ui.label("For other AIs, aidaw-mcp also works as a plain command. An AI that can run commands can use it directly, for example:");
+                    let exe = mcp_exe
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "aidaw-mcp".into());
+                    let project = app
+                        .path
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "song.aidaw.json".into());
+                    let cmd = format!(
+                        "\"{exe}\" call add_chords --project \"{project}\" track=Piano chords=\"Am F C G\"\n\"{exe}\" guide\n\"{exe}\" tools --format openai"
+                    );
+                    ui.add(
+                        egui::TextEdit::multiline(&mut cmd.as_str())
+                            .font(egui::TextStyle::Monospace)
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY),
+                    );
+                    if ui.button("📋 Copy").clicked() {
+                        ui.ctx().copy_text(cmd.clone());
+                    }
+                    ui.weak("'guide' prints a cheat sheet to paste into any chat AI. 'tools --format openai' prints function definitions for ChatGPT-style APIs. Full instructions: LLM_GUIDE.md next to aidaw.exe.");
+                });
         });
     if save_clicked {
         app.save_as_dialog();
