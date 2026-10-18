@@ -1,0 +1,15 @@
+[package]
+name = "aidaw-mcp"
+description = "MCP server that lets an AI read and write AIDAW projects"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+aidaw-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+hound = "3.5"
