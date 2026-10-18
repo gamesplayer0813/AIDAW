@@ -21,7 +21,7 @@ All three expose the same tools with the same arguments.
 | `help` | Cheat sheet: time, pitch, notations, and a complete quick-start song |
 | `new_project` / `open_project` | Create or open a project file |
 | `get_project` | Overview of tracks and clips; `detail: "notes"` lists every note, `"json"` gives the raw file |
-| `list_presets` | The 77 instrument presets, grouped by category (see [Sounds](#sounds)); `{"category": "bass"}` lists one group |
+| `list_presets` | The 78 instrument presets, grouped by category (see [Sounds](#sounds)); `{"category": "bass"}` lists one group |
 | `add_chords` | Chord symbols, e.g. `"Am F C G"`, one per bar. Styles: block, arpeggio, pulse |
 | `add_drum_pattern` | Step strings, e.g. `{"kick": "x...x...x...x...", "snare": "....x.......x..."}` |
 | `add_melody` | Compact text, e.g. `"C4/1 D4/0.5 E4/0.5 r/1 G4/2"` (pitch/beats, `r` = rest) |

@@ -27,7 +27,7 @@ DRUMS  kick 36, snare 38, clap 39, hat 42, open_hat 46, tom_low 41, tom_mid 45, 
        Percussion: rim 37, ride_bell 53, tambourine 54, splash 55, cowbell 56, bongo_high 60, bongo_low 61,
        conga_mute 62, conga_high 63, conga_low 64, timbale_high 65, timbale_low 66, agogo_high 67,
        agogo_low 68, shaker 70, claves 75, block_high 76, block_low 77, triangle 81.
-SOUNDS 77 presets in 10 groups (list_presets): keys, bass, lead, pad, pluck, bells, orchestra, retro,
+SOUNDS 78 presets in 10 groups (list_presets): keys, bass, lead, pad, pluck, bells, orchestra, retro,
        fx, drums. Drum kits: drum_kit, drums_808, drums_909, drums_acoustic, drums_lofi, drums_trap,
        drums_electro.
 
@@ -127,7 +127,7 @@ const fn req(name: &'static str, ty: Ty, desc: &'static str) -> Param {
 const TRACK: &str = "track name or id, e.g. \"Bass\" or \"t1\"";
 const CLIP: &str = "clip name or id, e.g. \"c1\" (ids are shown by get_project)";
 const BAR: &str = "1-based bar to start at (bar 1 = beginning of the song)";
-const INSTRUMENT: &str = "preset id (77 of them, see list_presets), e.g. soft_keys, e_piano, organ, bass, \
+const INSTRUMENT: &str = "preset id (78 of them, see list_presets), e.g. soft_keys, e_piano, organ, bass, \
                           bass_808, acid_bass, bright_lead, supersaw, warm_pad, lush_pad, choir, pluck, \
                           nylon_guitar, rock_guitar, marimba, bell, strings, brass, flute, saxophone, \
                           chiptune, riser, drum_kit, drums_808, drums_909, drums_acoustic, drums_lofi, \
