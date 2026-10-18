@@ -1,0 +1,11 @@
+[package]
+name = "aidaw-engine"
+description = "Real-time audio playback for AIDAW (WASAPI on Windows via cpal)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+aidaw-core.workspace = true
+anyhow.workspace = true
+cpal = "0.15"

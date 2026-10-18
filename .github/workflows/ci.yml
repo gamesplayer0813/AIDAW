@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo build --release --workspace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aidaw-windows-x64
+          path: |
+            target/release/aidaw.exe
+            target/release/aidaw-mcp.exe
+            examples/demo.aidaw.json

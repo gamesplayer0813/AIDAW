@@ -1,0 +1,19 @@
+[package]
+name = "aidaw-gui"
+description = "AIDAW desktop editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "aidaw"
+path = "src/main.rs"
+
+[dependencies]
+aidaw-core.workspace = true
+aidaw-engine.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+eframe = "0.31"
+rfd = "0.15"

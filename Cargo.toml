@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = ["crates/aidaw-core", "crates/aidaw-engine", "crates/aidaw-mcp", "crates/aidaw-gui"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+aidaw-core = { path = "crates/aidaw-core" }
+aidaw-engine = { path = "crates/aidaw-engine" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+[profile.dev.package."*"]
+opt-level = 2
