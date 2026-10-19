@@ -2,6 +2,11 @@
 //!
 //! Click empty grid to add a note, drag a note to move it (time + pitch),
 //! drag its right edge to change length, right-click or Delete to remove.
+//! Shift+drag on empty grid selects several notes (Ctrl+drag adds to the
+//! selection, Ctrl+click picks single notes); dragging one of them moves or
+//! lengthens them all. The editing keys live in `App::edit_shortcuts`.
+
+use std::collections::BTreeSet;
 
 use aidaw_core::edit::Op;
 use aidaw_core::{pitch, Note};
@@ -10,7 +15,8 @@ use eframe::egui::{
     StrokeKind,
 };
 
-use crate::app::{track_color, App, Drag};
+use crate::app::{notes_text, track_color, App, Drag, EditFocus};
+use crate::editing;
 use crate::i18n::{tr, trf};
 use crate::icons::{self, Icon};
 use crate::scale::{Scale, ROOTS};
@@ -79,8 +85,31 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             .vertical_scroll_offset(((127 - top.min(127)) as f32 * kh).max(0.0))
             .horizontal_scroll_offset(0.0);
     }
+    // After a keyboard edit (paste, duplicate, arrows), bring the selected
+    // notes into view if they ended up outside it. Offsets are measured from
+    // the corner of the note grid, under the sticky ruler and keyboard.
+    if std::mem::take(&mut app.roll_reveal) {
+        let pitches = app
+            .selected_notes
+            .iter()
+            .filter_map(|&i| clip.notes.get(i).map(|n| n.pitch));
+        let (lo, hi) = (pitches.clone().min(), pitches.max());
+        let beats = editing::span(&clip, &app.selected_notes);
+        if let (Some((offset, view)), Some((start, end)), Some(lo), Some(hi)) =
+            (app.roll_view, beats, lo, hi)
+        {
+            let (x0, x1) = (start as f32 * bw, end as f32 * bw);
+            if x0 < offset.x || x1 > offset.x + view.x - KEYS_W {
+                area = area.horizontal_scroll_offset((x0 - bw).max(0.0));
+            }
+            let (y0, y1) = ((127 - hi) as f32 * kh, (128 - lo) as f32 * kh);
+            if y0 < offset.y || y1 > offset.y + view.y - RULER_H {
+                area = area.vertical_scroll_offset((y0 - 3.0 * kh).max(0.0));
+            }
+        }
+    }
 
-    area.show(ui, |ui| {
+    let shown = area.show(ui, |ui| {
         let (resp, painter) =
             ui.allocate_painter(size.max(ui.available_size()), Sense::click_and_drag());
         let origin = resp.rect.min;
@@ -95,6 +124,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         let y_of = |p: u8| origin.y + RULER_H + (127 - p) as f32 * kh;
         let pitch_of =
             |y: f32| 127 - (((y - origin.y - RULER_H) / kh).floor() as i32).clamp(0, 127);
+        // Key rows counted from the top (pitch 127), not rounded.
+        let row_of = |y: f32| (y - origin.y - RULER_H) / kh;
         let color = track_color(track_index);
         let bpb = app.project.beats_per_bar.max(1) as f64;
 
@@ -160,6 +191,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         );
 
         // Notes: rounded, brighter the harder they are played, with a light top edge.
+        // Selected notes glow; their outline is white while the editing keys act on them.
+        let focused = app.edit_focus == EditFocus::Notes;
         for (idx, n) in clip.notes.iter().enumerate() {
             let r = Rect::from_min_max(
                 pos2(x_of(n.start) + 0.5, y_of(n.pitch) + 1.0),
@@ -171,7 +204,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             if !visible.intersects(r) {
                 continue;
             }
-            let selected = app.selected_note == Some(idx);
+            let selected = app.selected_notes.contains(&idx);
             let fill = if n.start >= clip.length {
                 theme::SURFACE_HI
             } else {
@@ -191,8 +224,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     Stroke::new(1.0_f32, theme::alpha(Color32::WHITE, 70)),
                 );
             }
-            let stroke = if selected {
+            let stroke = if selected && focused {
                 Stroke::new(1.5_f32, Color32::WHITE)
+            } else if selected {
+                Stroke::new(1.5_f32, theme::alpha(Color32::WHITE, 110))
             } else {
                 Stroke::new(1.0_f32, Color32::from_black_alpha(140))
             };
@@ -368,24 +403,56 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             }
         }
 
+        let (shift, ctrl) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
         if resp.drag_started() {
             if let Some(p) = ui.input(|i| i.pointer.press_origin()) {
                 match hit(&clip.notes, p) {
                     Hit::NoteBody { index, offset } => {
-                        app.selected_note = Some(index);
-                        app.drag = Some(Drag::MoveNote {
-                            index,
+                        grab(app, index, shift || ctrl);
+                        let from = app
+                            .selected_notes
+                            .iter()
+                            .filter_map(|&i| clip.notes.get(i).map(|n| (i, n.start, n.pitch)))
+                            .collect();
+                        app.drag = Some(Drag::MoveNotes {
+                            anchor: index,
                             grab_offset: offset,
+                            from,
                         });
                     }
                     Hit::NoteEdge { index } => {
-                        app.selected_note = Some(index);
-                        app.drag = Some(Drag::ResizeNote { index });
+                        grab(app, index, shift || ctrl);
+                        let from = app
+                            .selected_notes
+                            .iter()
+                            .filter_map(|&i| clip.notes.get(i).map(|n| (i, n.duration)))
+                            .collect();
+                        app.drag = Some(Drag::ResizeNotes { anchor: index, from });
+                    }
+                    Hit::Grid { beat, .. } if shift || ctrl => {
+                        // Box select: Shift starts afresh, Ctrl adds to the selection.
+                        app.edit_focus = EditFocus::Notes;
+                        let keep = if ctrl {
+                            app.selected_notes.clone()
+                        } else {
+                            BTreeSet::new()
+                        };
+                        app.drag = Some(Drag::SelectNotes {
+                            beat,
+                            row: row_of(p.y),
+                            keep,
+                        });
                     }
                     Hit::Grid { beat, pitch: p } => {
                         // Drag on empty grid: create a note and immediately resize it.
                         let index = add_note(app, &clip_id, track_index, app.snap_floor(beat).max(0.0), p);
-                        app.drag = index.map(|index| Drag::ResizeNote { index });
+                        app.drag = index.and_then(|index| {
+                            let length = app.project.clip(&clip_id)?.1.notes.get(index)?.duration;
+                            Some(Drag::ResizeNotes {
+                                anchor: index,
+                                from: vec![(index, length)],
+                            })
+                        });
                     }
                     Hit::Ruler(b) => app.seek(clip.start + b),
                     Hit::Keys => {}
@@ -395,31 +462,59 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         if resp.dragged() {
             if let Some(p) = resp.interact_pointer_pos() {
                 let beat = beat_of(p.x);
-                let snapped_move = |grab: f64| app.snap_beat(beat - grab).max(0.0);
                 match app.drag.clone() {
-                    Some(Drag::MoveNote { index, grab_offset }) => {
-                        let start = snapped_move(grab_offset);
-                        let pitch_ = app.fit_pitch(track_index, pitch_of(p.y) as u8);
-                        if let Some(n) = app
-                            .project
-                            .clip_mut(&clip_id)
-                            .and_then(|c| c.notes.get_mut(index))
-                        {
-                            n.start = start;
-                            n.pitch = pitch_;
+                    Some(Drag::MoveNotes {
+                        anchor,
+                        grab_offset,
+                        from,
+                    }) => {
+                        if let Some(&(_, start, pitch_)) = from.iter().find(|f| f.0 == anchor) {
+                            // Time: the grabbed note follows the grid, the rest keep
+                            // their distance to it, and none goes before the clip.
+                            let earliest = from.iter().map(|f| f.1).fold(f64::INFINITY, f64::min);
+                            let moved_by = (app.snap_beat(beat - grab_offset) - start).max(-earliest);
+                            // Pitch: every note moves by as many notes of the key as
+                            // the grabbed one, so a chord stays a chord in key. Counted
+                            // from the grabbed note's row, so a sideways drag leaves
+                            // every pitch alone, even one outside the key.
+                            let (key, root) = (app.key_for(track_index), app.scale_root);
+                            let target = key.snap(root, pitch_of(p.y) as u8);
+                            let steps = key.steps_between(root, key.snap(root, pitch_), target);
+                            let pitches: Option<Vec<u8>> =
+                                from.iter().map(|f| key.step(root, f.2, steps)).collect();
+                            if let Some(c) = app.project.clip_mut(&clip_id) {
+                                for (k, &(i, s, _)) in from.iter().enumerate() {
+                                    if let Some(n) = c.notes.get_mut(i) {
+                                        n.start = s + moved_by;
+                                        if let Some(p) = &pitches {
+                                            n.pitch = p[k];
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
-                    Some(Drag::ResizeNote { index }) => {
+                    Some(Drag::ResizeNotes { anchor, from }) => {
                         let end = app.snap_beat(beat);
                         let snap = app.grid();
-                        if let Some(n) = app
-                            .project
-                            .clip_mut(&clip_id)
-                            .and_then(|c| c.notes.get_mut(index))
-                        {
-                            n.duration = (end - n.start).max(snap);
-                            app.last_note_length = n.duration;
+                        if let Some(c) = app.project.clip_mut(&clip_id) {
+                            let grabbed = c.notes.get(anchor).map(|n| n.start);
+                            let before = from.iter().find(|f| f.0 == anchor).map(|f| f.1);
+                            if let (Some(start), Some(before)) = (grabbed, before) {
+                                let length = (end - start).max(snap);
+                                for &(i, len) in &from {
+                                    if let Some(n) = c.notes.get_mut(i) {
+                                        n.duration = (len + length - before).max(snap.min(len));
+                                    }
+                                }
+                                app.last_note_length = length;
+                            }
                         }
+                    }
+                    Some(Drag::SelectNotes { beat: b0, row, keep }) => {
+                        let mut sel = keep;
+                        sel.extend(editing::in_box(&clip.notes, (b0, beat), (row, row_of(p.y))));
+                        app.selected_notes = sel;
                     }
                     _ => {
                         if p.y < ruler_top + RULER_H {
@@ -433,10 +528,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         // sliding up/down the keyboard plays each key you pass. Dragging a note
         // also keeps it sounding at its current pitch.
         let want = if resp.is_pointer_button_down_on() {
-            if let Some(Drag::MoveNote { index, .. }) = &app.drag {
+            if let Some(Drag::MoveNotes { anchor, .. }) = &app.drag {
                 app.project
                     .clip(&clip_id)
-                    .and_then(|(_, c)| c.notes.get(*index))
+                    .and_then(|(_, c)| c.notes.get(*anchor))
                     .map(|n| n.pitch)
             } else {
                 let on_keys = ui
@@ -457,8 +552,28 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             }
         }
 
+        // The selection box being drawn.
+        if let (Some(Drag::SelectNotes { beat, row, .. }), Some(p)) =
+            (&app.drag, resp.interact_pointer_pos())
+        {
+            let grid_area = Rect::from_min_max(
+                pos2(keys_left + KEYS_W, ruler_top + RULER_H),
+                visible.max,
+            );
+            let corner = pos2(x_of(*beat), origin.y + RULER_H + row * kh);
+            let r = Rect::from_two_pos(corner, p);
+            let painter = painter.with_clip_rect(grid_area.intersect(painter.clip_rect()));
+            painter.rect_filled(r, 2.0, theme::alpha(theme::ACCENT, 28));
+            painter.rect_stroke(
+                r,
+                2.0,
+                Stroke::new(1.0_f32, theme::alpha(theme::ACCENT, 170)),
+                StrokeKind::Inside,
+            );
+        }
+
         if resp.drag_stopped() {
-            if matches!(app.drag, Some(Drag::MoveNote { .. } | Drag::ResizeNote { .. })) {
+            if matches!(app.drag, Some(Drag::MoveNotes { .. } | Drag::ResizeNotes { .. })) {
                 app.ev_note_drags += 1;
             }
             app.drag = None;
@@ -468,10 +583,22 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             if let Some(p) = resp.interact_pointer_pos() {
                 match hit(&clip.notes, p) {
                     Hit::NoteBody { index, .. } | Hit::NoteEdge { index } => {
-                        app.selected_note = Some(index);
+                        app.edit_focus = EditFocus::Notes;
+                        if shift || ctrl {
+                            // Ctrl/Shift+click: add the note to the selection or take it out.
+                            if !app.selected_notes.remove(&index) {
+                                app.selected_notes.insert(index);
+                            }
+                        } else {
+                            app.selected_notes = BTreeSet::from([index]);
+                        }
                         if let Some(n) = clip.notes.get(index) {
                             app.last_note_length = n.duration;
                         }
+                    }
+                    Hit::Grid { .. } if shift || ctrl => {
+                        app.edit_focus = EditFocus::Notes;
+                        app.selected_notes.clear();
                     }
                     Hit::Grid { beat, pitch: p } => {
                         add_note(app, &clip_id, track_index, app.snap_floor(beat).max(0.0), p);
@@ -488,13 +615,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 }
             }
         }
-        if resp.hovered() && !ui.ctx().wants_keyboard_input() {
-            if ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
-            {
-                if let Some(index) = app.selected_note {
-                    remove_note(app, &clip_id, index);
-                }
-            }
+        if resp.hovered() {
             // Ctrl + wheel: horizontal zoom.
             let (zoom, ctrl) = ui.input(|i| (i.zoom_delta(), i.modifiers.command));
             if ctrl && zoom != 1.0 {
@@ -502,6 +623,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             }
         }
     });
+    app.roll_view = Some((shown.state.offset, shown.inner_rect.size()));
 }
 
 fn add_note(
@@ -518,9 +640,11 @@ fn add_note(
     } else {
         app.grid()
     };
+    // A new note is played as hard as the selected one.
     let velocity = app
-        .selected_note
-        .and_then(|i| {
+        .selected_notes
+        .first()
+        .and_then(|&i| {
             app.project
                 .clip(clip_id)
                 .and_then(|(_, c)| c.notes.get(i))
@@ -535,7 +659,8 @@ fn add_note(
         velocity,
     });
     let index = clip.notes.len() - 1;
-    app.selected_note = Some(index);
+    app.selected_notes = BTreeSet::from([index]);
+    app.edit_focus = EditFocus::Notes;
     Some(index)
 }
 
@@ -543,9 +668,55 @@ fn remove_note(app: &mut App, clip_id: &str, index: usize) {
     if let Some(c) = app.project.clip_mut(clip_id) {
         if index < c.notes.len() {
             c.notes.remove(index);
+            app.selected_notes =
+                editing::after_delete(&app.selected_notes, &BTreeSet::from([index]));
         }
     }
-    app.selected_note = None;
+}
+
+/// Pressing on a note: with Ctrl/Shift it joins the selection, otherwise a
+/// note outside the selection becomes the only one selected (pressing on a
+/// selected note keeps the others, so they can all be dragged together).
+fn grab(app: &mut App, index: usize, add: bool) {
+    app.edit_focus = EditFocus::Notes;
+    if add {
+        app.selected_notes.insert(index);
+    } else if !app.selected_notes.contains(&index) {
+        app.selected_notes = BTreeSet::from([index]);
+    }
+}
+
+/// How many notes of the clip are selected, and the first of them (the one
+/// whose values the toolbar shows).
+fn first_selected(app: &App, clip_id: &str) -> Option<(usize, Note)> {
+    let (_, c) = app.project.clip(clip_id)?;
+    let count = app
+        .selected_notes
+        .iter()
+        .filter(|&&i| i < c.notes.len())
+        .count();
+    let first = app.selected_notes.iter().find_map(|&i| c.notes.get(i))?;
+    Some((count, first.clone()))
+}
+
+/// Change every selected note of the clip.
+fn for_selected(app: &mut App, clip_id: &str, change: impl Fn(&mut Note)) {
+    if let Some(c) = app.project.clip_mut(clip_id) {
+        for &i in &app.selected_notes {
+            if let Some(n) = c.notes.get_mut(i) {
+                change(n);
+            }
+        }
+    }
+}
+
+/// "Note C4", or "3 notes" when several are selected.
+fn selection_label(count: usize, first: &Note) -> String {
+    if count == 1 {
+        trf("Note {}", &[&pitch::name(first.pitch)])
+    } else {
+        notes_text(count)
+    }
 }
 
 fn toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usize) {
@@ -632,28 +803,24 @@ fn easy_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: us
                 to: None,
                 pitch: None,
             });
-            app.selected_note = None;
+            app.selected_notes.clear();
         }
-        let selected = app.selected_note;
-        if let Some(n) = selected.and_then(|i| {
-            app.project
-                .clip_mut(clip_id)
-                .and_then(|c| c.notes.get_mut(i))
-        }) {
+        if let Some((count, first)) = first_selected(app, clip_id) {
             ui.separator();
-            ui.label(trf("Note {}", &[&pitch::name(n.pitch)]));
+            ui.label(selection_label(count, &first));
+            let tip = if count == 1 {
+                tr("How hard this note is played")
+            } else {
+                tr("How hard the selected notes are played")
+            };
             for (label, v) in [(tr("Soft"), 50u8), (tr("Medium"), 90), (tr("Loud"), 120)] {
                 let on = match v {
-                    50 => n.velocity < 70,
-                    90 => (70..105).contains(&n.velocity),
-                    _ => n.velocity >= 105,
+                    50 => first.velocity < 70,
+                    90 => (70..105).contains(&first.velocity),
+                    _ => first.velocity >= 105,
                 };
-                if ui
-                    .selectable_label(on, label)
-                    .on_hover_text(tr("How hard this note is played"))
-                    .clicked()
-                {
-                    n.velocity = v;
+                if ui.selectable_label(on, label).on_hover_text(tip).clicked() {
+                    for_selected(app, clip_id, |n| n.velocity = v);
                 }
             }
         }
@@ -687,7 +854,7 @@ fn easy_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: us
         });
         app.ui_rects.insert("key", key.response.rect);
     });
-    theme::hint(ui, tr("click to add a note · drag to move · drag the right edge to make longer · right-click to delete · hold a piano key to hear it"));
+    theme::hint(ui, tr("click to add a note · drag to move · drag the right edge to make longer · right-click to delete · hold a piano key to hear it · Shift+drag to select several"));
 }
 
 fn pro_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usize) {
@@ -742,26 +909,39 @@ fn pro_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usi
                 to: None,
                 pitch: None,
             });
-            app.selected_note = None;
+            app.selected_notes.clear();
+        }
+        if ui
+            .add(icons::button(Icon::Magnet, tr("Quantize")).small())
+            .on_hover_text(tr(
+                "Snap note starts to the grid (Q): the selected notes, or every note in the clip when none is selected",
+            ))
+            .clicked()
+        {
+            app.quantize();
         }
         ui.separator();
-        let selected = app.selected_note;
-        if let Some(n) = selected.and_then(|i| {
-            app.project
-                .clip_mut(clip_id)
-                .and_then(|c| c.notes.get_mut(i))
-        }) {
-            ui.label(trf("Note {}", &[&pitch::name(n.pitch)]));
+        if let Some((count, first)) = first_selected(app, clip_id) {
+            ui.label(selection_label(count, &first));
             ui.label(tr("Loudness"))
                 .on_hover_text(tr("Velocity: how hard the note is played"));
-            ui.add(egui::Slider::new(&mut n.velocity, 1..=127));
+            let mut velocity = first.velocity;
+            if ui.add(egui::Slider::new(&mut velocity, 1..=127)).changed() {
+                for_selected(app, clip_id, |n| n.velocity = velocity);
+            }
             ui.label(tr("Length"))
                 .on_hover_text(tr("Note length in beats"));
-            ui.add(
-                egui::DragValue::new(&mut n.duration)
-                    .range(0.01..=256.0)
-                    .speed(0.05),
-            );
+            let mut length = first.duration;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut length)
+                        .range(0.01..=256.0)
+                        .speed(0.05),
+                )
+                .changed()
+            {
+                for_selected(app, clip_id, |n| n.duration = length);
+            }
         }
     });
     // In a narrow window the zoom sliders get a row of their own.
@@ -807,7 +987,7 @@ fn pro_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usi
     if narrow {
         ui.horizontal(|ui| zoom_controls(ui, app));
     }
-    theme::hint(ui, tr("click the grid to add a note · drag to move · drag the right edge to lengthen · right-click to delete · hold or slide on piano keys to hear them"));
+    theme::hint(ui, tr("click to add a note · drag to move, right edge to lengthen · right-click deletes · Shift+drag selects · Ctrl+C / V / D copy, paste, repeat · Q quantizes"));
 }
 
 fn zoom_controls(ui: &mut egui::Ui, app: &mut App) {

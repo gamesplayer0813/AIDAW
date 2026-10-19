@@ -12,7 +12,8 @@ It works three ways:
 | A model behind a function-calling API (OpenAI/ChatGPT, Anthropic, Gemini, Ollama, LM Studio, vLLM, ...) | `aidaw-mcp tools --format ...` + `aidaw-mcp call ...` |
 | An agent that can only run shell commands | `aidaw-mcp call ...` |
 
-All three expose the same tools with the same arguments.
+All three expose the same tools with the same arguments. A chat AI with no tools at all can
+still write notes for you: see [4. Plain chat](#4-plain-chat-paste-the-answer).
 
 ## The tools
 
@@ -203,6 +204,21 @@ aidaw-mcp call render_wav
 
 On Windows `cmd.exe`, write JSON with escaped double quotes (`"{\"track\": \"Bass\"}"`), or use
 `key=value` pairs, or pipe the JSON in with `-`: `echo {"bpm": 90} | aidaw-mcp call update_project -`.
+
+## 4. Plain chat: paste the answer
+
+No setup: ask any chat AI for a JSON list of notes, copy its whole answer, click a clip in the
+AIDAW app and press `Ctrl+V`. The app finds the list in the answer (words and a ```` ``` ````
+fence around it are fine), keeps each note's place in the bar and pastes it into the bar where
+the playhead is. The **Ask AI** window has a ready-made request to copy. A note looks like:
+
+```json
+[{"pitch": "A4", "start": 0, "duration": 1, "velocity": 100}]
+```
+
+`start` and `duration` are in beats, `pitch` is a note name or a MIDI number, and `velocity`
+(1-127) is optional. `{"notes": [...]}` works too. Notes copied in the app with `Ctrl+C` are
+plain JSON as well, so they can be pasted into a chat for the AI to vary.
 
 ## Music in one minute
 

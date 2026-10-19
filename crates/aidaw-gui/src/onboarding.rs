@@ -151,7 +151,7 @@ impl Tutorial {
     pub fn start(app: &mut App) -> Tutorial {
         app.load_project(demo_project(), None, tr("Tutorial: demo song loaded"));
         app.selected_clip = None;
-        app.selected_note = None;
+        app.selected_notes.clear();
         Tutorial {
             step: 0,
             base: Base::capture(app),
@@ -475,6 +475,21 @@ pub fn show_ai_help(ctx: &egui::Context, app: &mut App, open: &mut bool) {
                     }
                     ui.weak(tr("'guide' prints a cheat sheet to paste into any chat AI. 'tools --format openai' prints function definitions for ChatGPT-style APIs. Full instructions: LLM_GUIDE.md next to aidaw.exe."));
                 });
+            egui::CollapsingHeader::new(tr("No setup at all: paste notes from any chat AI"))
+                .id_salt("chat_ai")
+                .show(ui, |ui| {
+                    ui.label(tr("Too lazy to set anything up? Fine. Give any chat AI (ChatGPT, Gemini, DeepSeek…) this request, copy its whole answer, click a clip here and press Ctrl+V. The notes land in the bar where the playhead is, and Ctrl+Z takes them back if the AI wrote rubbish."));
+                    let mut prompt = tr("Write a 4-bar melody in A minor. Answer with a JSON list of notes like [{\"pitch\": \"A4\", \"start\": 0, \"duration\": 1, \"velocity\": 100}]. start and duration are in beats (4 beats = 1 bar); pitch is a note name or MIDI number.");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut prompt)
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY),
+                    );
+                    if ui.add(icons::button(Icon::Clipboard, tr("Copy"))).clicked() {
+                        ui.ctx().copy_text(prompt.to_string());
+                        app.status = tr("Copied! Paste it into the chat, then copy the AI's answer and press Ctrl+V in a clip.").into();
+                    }
+                });
         });
     if save_clicked {
         app.save_as_dialog();
@@ -524,7 +539,42 @@ pub fn show_shortcuts(ctx: &egui::Context, open: &mut bool) {
                         (tr("Drag a note / its right edge"), tr("Move / make longer")),
                         (tr("Right-click a note"), tr("Delete it")),
                         (tr("Hold or slide on piano keys"), tr("Hear notes")),
-                        (tr("Delete"), tr("Delete the selected note or clip")),
+                        (
+                            tr("Shift+drag on empty grid"),
+                            tr("Select several notes (Ctrl+drag adds more)"),
+                        ),
+                        (
+                            tr("Ctrl+click a note"),
+                            tr("Add it to the selection or take it out"),
+                        ),
+                        ("Ctrl+A", tr("Select every note in the clip")),
+                        (
+                            tr("Drag a selected note"),
+                            tr("Move all selected notes together"),
+                        ),
+                        (
+                            tr("Delete"),
+                            tr("Delete the selected notes, or the clip you clicked last"),
+                        ),
+                        ("Ctrl+C / Ctrl+X", tr("Copy / cut them")),
+                        (
+                            "Ctrl+V",
+                            tr("Paste at the playhead (notes copied from an AI chat work too)"),
+                        ),
+                        (
+                            "Ctrl+D",
+                            tr("Duplicate: repeat them right after themselves"),
+                        ),
+                        (
+                            tr("Left / Right arrow"),
+                            tr("Move selected notes by the grid (Shift: by a bar)"),
+                        ),
+                        (
+                            tr("Up / Down arrow"),
+                            tr("Move selected notes up or down, staying in key (Shift: an octave)"),
+                        ),
+                        ("Q", tr("Snap the selected notes (or all) to the grid")),
+                        ("Esc", tr("Select nothing")),
                         (tr("Ctrl+mouse wheel"), tr("Zoom the piano roll")),
                     ] {
                         ui.label(RichText::new(keys).monospace().strong());

@@ -1,15 +1,16 @@
 //! Arrangement view: one row per track, clips on a beat timeline.
 //!
 //! Click a clip to edit it in the piano roll, drag to move, drag its right
-//! edge to resize, double-click an empty spot to create a clip, Delete to
-//! remove the selected clip. Click the ruler to move the playhead.
+//! edge to resize, double-click an empty spot to create a clip. Clicking
+//! here points the editing keys (Delete, Ctrl+C/X/V/D, arrows) at the
+//! selected clip. Click the ruler to move the playhead.
 
 use aidaw_core::presets;
 use eframe::egui::{
     self, pos2, vec2, Align2, Color32, CornerRadius, FontId, Rect, Sense, Stroke, StrokeKind,
 };
 
-use crate::app::{track_color, App, Drag};
+use crate::app::{track_color, App, Drag, EditFocus};
 use crate::i18n::tr;
 use crate::theme;
 
@@ -47,7 +48,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             theme::section(ui, tr("Your song")).on_hover_text(tr(
                 "Each row is one instrument. The coloured blocks are parts of the song.\nClick a part to see and edit its notes below.",
             ));
-            theme::hint(ui, tr("click a part to edit its notes · double-click an empty spot for a new part · drag to move"));
+            theme::hint(ui, tr("click a part to edit its notes · double-click an empty spot for a new part · drag to move · Ctrl+D repeats the part"));
             return;
         }
         theme::section(ui, tr("Song")).on_hover_text(tr(
@@ -59,7 +60,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 .show_value(false)
                 .text(tr("zoom")),
         );
-        theme::hint(ui, tr("click a clip to edit it · double-click an empty spot for a new clip · drag to move · drag the right edge to make longer"));
+        theme::hint(ui, tr("click a clip to edit it · double-click an empty spot for a new clip · drag to move · drag the right edge to make longer · Ctrl+D duplicates"));
     });
 
     let bpb = app.project.beats_per_bar.max(1) as f64;
@@ -160,6 +161,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                         pos2(x_of(clip.end()) - 1.0, top + ROW_H - 5.0),
                     );
                     let selected = app.selected_clip.as_deref() == Some(clip.id.as_str());
+                    // White outline: the editing keys act on this clip.
+                    let keys_here = selected && app.edit_focus == EditFocus::Clips;
                     if selected {
                         theme::glow(&painter, r, 7, theme::alpha(color, 120), 16);
                     }
@@ -213,8 +216,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     painter.rect_stroke(
                         r,
                         7.0,
-                        if selected {
+                        if keys_here {
                             Stroke::new(1.5_f32, Color32::WHITE)
+                        } else if selected {
+                            Stroke::new(1.5_f32, theme::alpha(Color32::WHITE, 110))
                         } else {
                             Stroke::new(1.0_f32, theme::alpha(color, 140))
                         },
@@ -398,7 +403,11 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
 
             if resp.drag_started() {
                 if let Some(p) = ui.input(|i| i.pointer.press_origin()) {
-                    match hit(&app.project, p) {
+                    let target = hit(&app.project, p);
+                    if !matches!(target, Hit::Ruler(_) | Hit::Nothing) {
+                        app.edit_focus = EditFocus::Clips;
+                    }
+                    match target {
                         Hit::ClipBody {
                             clip_id,
                             track_id,
@@ -462,7 +471,11 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
 
             if resp.clicked() {
                 if let Some(p) = resp.interact_pointer_pos() {
-                    match hit(&app.project, p) {
+                    let target = hit(&app.project, p);
+                    if !matches!(target, Hit::Ruler(_) | Hit::Nothing) {
+                        app.edit_focus = EditFocus::Clips;
+                    }
+                    match target {
                         Hit::Ruler(b) => app.seek(b),
                         Hit::ClipBody {
                             clip_id, track_id, ..
@@ -485,7 +498,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                                 Some(clip_id) => select_clip(app, &clip_id, &track_id),
                                 None => {
                                     app.selected_clip = None;
-                                    app.selected_note = None;
+                                    app.selected_notes.clear();
                                     app.selected_track = Some(track_id);
                                 }
                             }
@@ -505,22 +518,16 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     }
                 }
             }
-            if resp.hovered() || resp.has_focus() {
-                let del = ui.input(|i| {
-                    i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace)
-                });
-                if del && !ui.ctx().wants_keyboard_input() {
-                    app.delete_selected_clip();
-                }
-            }
         });
 }
 
+/// Open a clip in the piano roll. Its notes start unselected, since the
+/// editing keys now act on the clip itself.
 fn select_clip(app: &mut App, clip_id: &str, track_id: &str) {
     if app.selected_clip.as_deref() != Some(clip_id) {
-        app.selected_note = None;
         app.roll_scroll_to_notes = true;
     }
+    app.selected_notes.clear();
     app.selected_clip = Some(clip_id.to_string());
     app.selected_track = Some(track_id.to_string());
 }

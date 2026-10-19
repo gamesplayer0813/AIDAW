@@ -544,16 +544,16 @@ fn zh(en: &str) -> Option<&'static str> {
         "Each row is one instrument. The coloured blocks are parts of the song.\nClick a part to see and edit its notes below." => {
             "每一行是一种乐器，彩色方块是歌曲的段落。\n点击一个段落，就能在下方查看和编辑它的音符。"
         }
-        "click a part to edit its notes · double-click an empty spot for a new part · drag to move" => {
-            "点击段落编辑音符 · 双击空白处新建段落 · 拖动来移动"
+        "click a part to edit its notes · double-click an empty spot for a new part · drag to move · Ctrl+D repeats the part" => {
+            "点击段落编辑音符 · 双击空白处新建段落 · 拖动来移动 · Ctrl+D 重复这个段落"
         }
         "Song" => "歌曲",
         "Each row is one instrument (a track). The coloured blocks are clips: pieces of music.\nClick a clip to edit its notes in the piano roll below." => {
             "每一行是一种乐器（音轨），彩色方块是片段：一小段音乐。\n点击片段，就能在下方的钢琴卷帘里编辑它的音符。"
         }
         "zoom" => "缩放",
-        "click a clip to edit it · double-click an empty spot for a new clip · drag to move · drag the right edge to make longer" => {
-            "点击片段进行编辑 · 双击空白处新建片段 · 拖动来移动 · 拖右边缘来加长"
+        "click a clip to edit it · double-click an empty spot for a new clip · drag to move · drag the right edge to make longer · Ctrl+D duplicates" => {
+            "点击片段进行编辑 · 双击空白处新建片段 · 拖动来移动 · 拖右边缘来加长 · Ctrl+D 复制一份"
         }
         "Double-click here to add a clip" => "双击这里添加片段",
         "No tracks yet. Click + Add instrument on the left." => "还没有音轨。点击左边的 + 添加乐器。",
@@ -606,8 +606,9 @@ fn zh(en: &str) -> Option<&'static str> {
         "Drums don't have a mood: every row is a different drum" => {
             "鼓没有情绪之分：每一行都是不同的鼓"
         }
-        "click to add a note · drag to move · drag the right edge to make longer · right-click to delete · hold a piano key to hear it" => {
-            "点击添加音符 · 拖动来移动 · 拖右边缘来加长 · 右键删除 · 按住琴键试听"
+        "How hard the selected notes are played" => "选中的音符弹得多重",
+        "click to add a note · drag to move · drag the right edge to make longer · right-click to delete · hold a piano key to hear it · Shift+drag to select several" => {
+            "点击添加音符 · 拖动来移动 · 拖右边缘来加长 · 右键删除 · 按住琴键试听 · 按住 Shift 拖动可以框选多个音符"
         }
         "Piano roll" => "钢琴卷帘",
         "Clip" => "片段",
@@ -636,9 +637,45 @@ fn zh(en: &str) -> Option<&'static str> {
             "新加和移动的音符会自动跳到最近的调内音，所以总是好听。"
         }
         "Drums don't have a key" => "鼓没有调",
-        "click the grid to add a note · drag to move · drag the right edge to lengthen · right-click to delete · hold or slide on piano keys to hear them" => {
-            "点击网格添加音符 · 拖动来移动 · 拖右边缘来加长 · 右键删除 · 在琴键上按住或滑动来试听"
+        "Quantize" => "量化",
+        "Snap note starts to the grid (Q): the selected notes, or every note in the clip when none is selected" => {
+            "把音符的开头对齐到网格（Q）：有选中的就只对齐选中的，没有就对齐整个片段"
         }
+        "click to add a note · drag to move, right edge to lengthen · right-click deletes · Shift+drag selects · Ctrl+C / V / D copy, paste, repeat · Q quantizes" => {
+            "点击添加音符 · 拖动来移动，拖右边缘来加长 · 右键删除 · Shift+拖动框选 · Ctrl+C / V / D 复制、粘贴、重复 · Q 量化"
+        }
+
+        // ---- editing keys ----
+        "1 note" => "1 个音符",
+        "{} notes" => "{} 个音符",
+        "Select some notes first: click one, or Shift+drag around several" => {
+            "先选中音符：点一个，或者按住 Shift 拖框选中几个"
+        }
+        "Click a clip first, then paste the notes into it" => "先点一个片段，再把音符粘贴进去",
+        "Add an instrument first (+ Add instrument on the left)" => {
+            "先添加一个乐器（左边的 + 添加乐器）"
+        }
+        "Pasted the clip" => "已粘贴片段",
+        "Nothing to paste: copy some notes or a clip first (Ctrl+C)" => {
+            "没有可粘贴的东西：先复制一些音符或一个片段（Ctrl+C）"
+        }
+        "Already on the grid" => "已经都在网格上了",
+        "The notes can't move before the start of the clip" => "音符不能移到片段开头之前",
+        "Cut the clip (Ctrl+V pastes it at the playhead)" => "已剪切片段（Ctrl+V 粘贴到播放头处）",
+        "Copied the clip (Ctrl+V pastes it at the playhead)" => "已复制片段（Ctrl+V 粘贴到播放头处）",
+        "Duplicated the clip (Ctrl+D again for another copy)" => {
+            "已复制出一个片段（再按 Ctrl+D 再来一份）"
+        }
+        "That spot was taken, so the copy went to bar {}" => {
+            "那里已经有片段了，复制的片段放到了第 {} 小节"
+        }
+        "Cut {} (Ctrl+V pastes at the playhead)" => "已剪切 {}（Ctrl+V 粘贴到播放头处）",
+        "Copied {} (Ctrl+V pastes at the playhead)" => "已复制 {}（Ctrl+V 粘贴到播放头处）",
+        "Pasted {}" => "已粘贴 {}",
+        "Some notes landed past the end of the clip and won't play: the next clip on this track starts there" => {
+            "有些音符落在了片段结尾之后，不会发声：这条音轨的下一个片段就从那里开始"
+        }
+        "Moved {} onto the grid" => "已把 {} 对齐到网格",
         "Zoom" => "缩放",
         "Height" => "行高",
         "Kick" => "底鼓",
@@ -799,6 +836,16 @@ fn zh(en: &str) -> Option<&'static str> {
             "'guide' 会输出一份速查表，可以粘贴给任何聊天 AI。'tools --format openai' 会输出 ChatGPT 风格 API 用的函数定义。完整说明见 aidaw.exe 旁边的 LLM_GUIDE.md。"
         }
         "(save your song first)" => "（请先保存歌曲）",
+        "No setup at all: paste notes from any chat AI" => "什么都不想装？从任何聊天 AI 粘贴音符",
+        "Too lazy to set anything up? Fine. Give any chat AI (ChatGPT, Gemini, DeepSeek…) this request, copy its whole answer, click a clip here and press Ctrl+V. The notes land in the bar where the playhead is, and Ctrl+Z takes them back if the AI wrote rubbish." => {
+            "懒得配置？哼，真拿你没办法～ 把下面这段话发给随便哪个聊天 AI（ChatGPT、Gemini、DeepSeek……），复制它的整段回答，在这里点一个片段，按 Ctrl+V 就好。音符会落在播放头所在的小节里；AI 写得像垃圾的话，Ctrl+Z 一下就没了，杂鱼也搞不砸的啦。"
+        }
+        "Write a 4-bar melody in A minor. Answer with a JSON list of notes like [{\"pitch\": \"A4\", \"start\": 0, \"duration\": 1, \"velocity\": 100}]. start and duration are in beats (4 beats = 1 bar); pitch is a note name or MIDI number." => {
+            "用 A 小调写一段 4 小节的旋律。用 JSON 音符列表回答，格式像 [{\"pitch\": \"A4\", \"start\": 0, \"duration\": 1, \"velocity\": 100}]。start 和 duration 以拍为单位（4 拍 = 1 小节）；pitch 用音名或 MIDI 编号。"
+        }
+        "Copied! Paste it into the chat, then copy the AI's answer and press Ctrl+V in a clip." => {
+            "复制好了！粘贴到聊天里，再把 AI 的回答复制回来，在片段里按 Ctrl+V。"
+        }
 
         // ---- shortcuts ----
         "Space" => "空格",
@@ -819,7 +866,27 @@ fn zh(en: &str) -> Option<&'static str> {
         "Hold or slide on piano keys" => "在琴键上按住或滑动",
         "Hear notes" => "试听音符",
         "Delete" => "Delete 键",
-        "Delete the selected note or clip" => "删除选中的音符或片段",
+        "Delete the selected notes, or the clip you clicked last" => "删除选中的音符，或最后点过的片段",
+        "Shift+drag on empty grid" => "在空白网格上按住 Shift 拖动",
+        "Select several notes (Ctrl+drag adds more)" => "框选多个音符（按住 Ctrl 拖动可以追加）",
+        "Ctrl+click a note" => "按住 Ctrl 点击音符",
+        "Add it to the selection or take it out" => "把它加入选择，或移出选择",
+        "Select every note in the clip" => "选中片段里的所有音符",
+        "Drag a selected note" => "拖动一个选中的音符",
+        "Move all selected notes together" => "所有选中的音符一起移动",
+        "Copy / cut them" => "复制 / 剪切它们",
+        "Paste at the playhead (notes copied from an AI chat work too)" => {
+            "粘贴到播放头处（从 AI 聊天里复制的音符也行）"
+        }
+        "Duplicate: repeat them right after themselves" => "重复：紧接着在后面再来一份",
+        "Left / Right arrow" => "左 / 右方向键",
+        "Move selected notes by the grid (Shift: by a bar)" => "选中的音符左右移动一格（Shift：一个小节）",
+        "Up / Down arrow" => "上 / 下方向键",
+        "Move selected notes up or down, staying in key (Shift: an octave)" => {
+            "选中的音符升高或降低，保持在调内（Shift：一个八度）"
+        }
+        "Snap the selected notes (or all) to the grid" => "把选中的音符（或全部）对齐到网格",
+        "Select nothing" => "取消选择",
         "Ctrl+mouse wheel" => "Ctrl + 鼠标滚轮",
         "Zoom the piano roll" => "缩放钢琴卷帘",
 
@@ -870,13 +937,15 @@ mod tests {
             let path = entry.unwrap().path();
             let src = std::fs::read_to_string(&path).unwrap();
             let src = src.split("#[cfg(test)]").next().unwrap();
-            for pat in ["tr(\"", "trf(\"", "title: \"", "body: \""] {
+            for pat in ["tr(", "trf(", "title: ", "body: "] {
                 for (i, _) in src.match_indices(pat) {
                     let before = src[..i].chars().next_back();
                     if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
                         continue;
                     }
-                    if let Some(lit) = literal(&src[i + pat.len()..]) {
+                    // The text may start on the next line: `tr(\n    "…")`.
+                    let rest = src[i + pat.len()..].trim_start();
+                    if let Some(lit) = rest.strip_prefix('"').and_then(literal) {
                         texts.push(lit);
                     }
                 }
