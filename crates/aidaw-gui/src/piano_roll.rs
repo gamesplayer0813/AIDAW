@@ -920,6 +920,15 @@ fn pro_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usi
         {
             app.quantize();
         }
+        if ui
+            .add(icons::button(Icon::Wave, tr("Humanize")).small())
+            .on_hover_text(tr(
+                "Make the notes sound played: nudge their timing and loudness a little at random. Works on the selected notes, or the whole clip when none is selected",
+            ))
+            .clicked()
+        {
+            app.humanize();
+        }
         ui.separator();
         if let Some((count, first)) = first_selected(app, clip_id) {
             ui.label(selection_label(count, &first));

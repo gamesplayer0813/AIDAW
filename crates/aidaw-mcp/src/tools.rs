@@ -12,7 +12,8 @@ Basics: time is in beats (1 = quarter note); in 4/4 a bar is 4 beats and `bar: 1
 Pitches are names like \"C4\" (middle C = 60), \"F#3\", \"Bb2\" or MIDI numbers. Tracks and clips can be \
 referred to by name (\"Bass\") or id (\"t1\", \"c1\").
 Easiest workflow: new_project -> add_track with a preset (list_presets) -> add_chords / add_melody / \
-add_drum_pattern (they create clips for you) -> get_project to check -> render_wav to listen.
+add_drum_pattern (they create clips for you) -> copy_bars to repeat parts -> get_project to check -> \
+analyze to check the mix -> render_wav to listen.
 Every error message says what was wrong and shows a valid example; read it and retry. Call help for the \
 full cheat sheet.";
 
@@ -77,10 +78,23 @@ LOW-LEVEL TOOLS
   apply_ops {"ops": [{"op": "add_track", "name": "Pad", "instrument": "warm_pad"},
                      {"op": "add_chords", "track": "Pad", "chords": "Am F"}]}  -- all or nothing.
 
+ARRANGE AND POLISH
+  copy_bars {"from_bar": 1, "bars": 4, "to_bar": 5, "times": 3}
+           Repeats bars 1-4 three times (bars 5-16) on every track with notes there; add
+           {"track": "Drums"} for one track. What was in the destination bars is replaced.
+  quantize {"track": "Drums", "grid": 0.25, "swing": 0.6}
+           Snaps note starts to the grid. strength 0-1 (1 = all the way), swing 0.5 straight ..
+           0.75 heavy shuffle. Give "clip", "track" or neither (the whole song).
+  humanize {"track": "Keys", "timing": 0.02, "velocity": 8}
+           Small random timing and velocity changes so programmed parts sound played. Once is
+           enough; the same "seed" gives the same result.
+
 CHECK YOUR WORK
   get_project {}                    compact overview (tracks, clips, bars)
   get_project {"detail": "notes"}   every note as start:PITCH/BEATS
   get_project {"detail": "json"}    raw project JSON
+  analyze {}                        hear the mix as numbers: loudness (LUFS), limiter, low/mid/high
+                                    balance, each track alone, loudness along the song, and tips
 "#;
 
 #[derive(Clone, Copy)]
@@ -318,6 +332,42 @@ pub const TOOLS: &[Tool] = &[
         ],
     },
     Tool {
+        name: "copy_bars",
+        description: "Copy bars to another place, like copy and paste: the notes that start in those bars go to to_bar, repeated `times` times in a row. Works on every track with notes there, or only on `track`; what those tracks had in the destination bars is replaced. Use it to repeat a chorus or extend a loop.",
+        example: r#"{"from_bar": 1, "bars": 4, "to_bar": 5, "times": 3}"#,
+        params: &[
+            req("from_bar", Num, "first bar to copy (1 = the start of the song)"),
+            req("bars", Num, "how many bars to copy"),
+            req("to_bar", Num, "bar where the first copy starts"),
+            p("times", Int, "copies in a row, 1-256 (default 1)"),
+            p("track", Str, "only this track (default: every track with notes in those bars)"),
+        ],
+    },
+    Tool {
+        name: "quantize",
+        description: "Snap note starts to a grid so the timing is tight, optionally with swing (a shuffle feel). Works on one clip, every clip of a track, or the whole song. Lengths are kept.",
+        example: r#"{"track": "Drums", "grid": 0.25, "swing": 0.6}"#,
+        params: &[
+            p("clip", Str, CLIP),
+            p("track", Str, "every clip on this track (default: the whole song)"),
+            p("grid", Num, "grid in beats: 0.25 = sixteenth notes (default), 0.5 = eighths, 1 = quarter notes"),
+            p("strength", Num, "0-1 how far notes move to the grid (default 1 = all the way)"),
+            p("swing", Num, "0.5 straight (default) .. 0.75 heavy shuffle; 0.6 is a light swing. Delays every second grid step, so grid 0.5 swings eighth notes"),
+        ],
+    },
+    Tool {
+        name: "humanize",
+        description: "Make programmed parts sound played: nudge note timing and velocity by small random amounts (the same seed gives the same result). Works on one clip, every clip of a track, or the whole song. Apply it once; each call adds more.",
+        example: r#"{"track": "Keys", "timing": 0.02, "velocity": 10}"#,
+        params: &[
+            p("clip", Str, CLIP),
+            p("track", Str, "every clip on this track (default: the whole song)"),
+            p("timing", Num, "largest shift in beats, 0-0.25 (default 0.02, about 10 ms at 120 BPM)"),
+            p("velocity", Int, "largest velocity change, 0-40 (default 8)"),
+            p("seed", Int, "another number gives another random result"),
+        ],
+    },
+    Tool {
         name: "add_chords",
         description: "Write a chord progression from chord symbols; one chord per bar unless \"Am:2\" gives beats. Voiced around middle C. Creates the clip (and track) if needed.",
         example: r#"{"track": "Keys", "chords": "Am F C G", "bar": 1, "style": "block"}"#,
@@ -367,6 +417,12 @@ pub const TOOLS: &[Tool] = &[
         params: &[req("ops", Ops, "list of {\"op\": tool name, ...arguments}")],
     },
     Tool {
+        name: "analyze",
+        description: "Hear the mix as numbers: renders the song (nothing is written) and reports loudness in LUFS, peak, how hard the limiter works, the low/mid/high balance, each track's level alone, loudness along the song, and tips with calls that fix what stands out. Use it after big changes.",
+        example: "{}",
+        params: &[],
+    },
+    Tool {
         name: "render_wav",
         description: "Render the song to a 16-bit stereo WAV file (defaults to <project>.wav) so it can be heard.",
         example: r#"{"output_path": "song.wav"}"#,
@@ -399,6 +455,15 @@ pub const ALIASES: &[(&str, &str)] = &[
     ("render", "render_wav"),
     ("export_wav", "render_wav"),
     ("batch", "apply_ops"),
+    ("duplicate_bars", "copy_bars"),
+    ("repeat_bars", "copy_bars"),
+    ("copy_section", "copy_bars"),
+    ("quantize_clip", "quantize"),
+    ("humanize_clip", "humanize"),
+    ("analyse", "analyze"),
+    ("analyze_mix", "analyze"),
+    ("check_mix", "analyze"),
+    ("listen", "analyze"),
 ];
 
 pub fn find(name: &str) -> Option<&'static Tool> {

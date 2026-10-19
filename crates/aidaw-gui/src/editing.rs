@@ -5,6 +5,7 @@
 
 use std::collections::BTreeSet;
 
+use aidaw_core::transform;
 use aidaw_core::{Clip, Note};
 use serde::{Deserialize, Serialize};
 
@@ -244,21 +245,24 @@ pub fn transpose_notes(
 /// Snap note starts to the grid: the selected notes, or every note when
 /// nothing is selected. Lengths are kept. Returns how many notes moved.
 pub fn quantize_notes(clip: &mut Clip, sel: &BTreeSet<usize>, grid: f64) -> usize {
-    if grid <= 0.0 || !grid.is_finite() {
-        return 0;
-    }
-    let mut moved = 0;
-    for (i, n) in clip.notes.iter_mut().enumerate() {
-        if !sel.is_empty() && !sel.contains(&i) {
-            continue;
-        }
-        let snapped = ((n.start / grid).round() * grid).max(0.0);
-        if (snapped - n.start).abs() > 1e-9 {
-            n.start = snapped;
-            moved += 1;
-        }
-    }
-    moved
+    let origin = clip.start;
+    transform::quantize(chosen(clip, sel), origin, grid, 1.0, 0.5)
+}
+
+/// Nudge the timing and velocity of the selected notes (or every note when
+/// nothing is selected) a little at random, the way a player would vary
+/// them. Returns how many notes changed.
+pub fn humanize_notes(clip: &mut Clip, sel: &BTreeSet<usize>, seed: u64) -> usize {
+    transform::humanize(chosen(clip, sel), 0.02, 8, seed)
+}
+
+/// The selected notes, or all of them when nothing is selected.
+fn chosen<'a>(clip: &'a mut Clip, sel: &'a BTreeSet<usize>) -> impl Iterator<Item = &'a mut Note> {
+    clip.notes
+        .iter_mut()
+        .enumerate()
+        .filter(move |(i, _)| sel.is_empty() || sel.contains(i))
+        .map(|(_, n)| n)
 }
 
 /// The notes touching the box between beats `b0` and `b1` and key rows

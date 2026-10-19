@@ -593,6 +593,8 @@ pub struct Sequencer {
     gains: Vec<TrackGain>,
     /// Master limiter envelope.
     limit_env: f32,
+    /// Highest limiter envelope since [`Self::take_limiter_reduction_db`].
+    limit_peak: f32,
     limit_release: f32,
     /// Set by [`Self::seek`]: the next block also starts the notes held
     /// across the new playhead position.
@@ -612,6 +614,7 @@ impl Sequencer {
             noise: 0x1234_5678,
             gains: Vec::with_capacity(RESERVED_TRACKS),
             limit_env: 0.0,
+            limit_peak: 0.0,
             limit_release: (-1.0 / (LIMIT_RELEASE_SECONDS * sample_rate)).exp(),
             chase: false,
             send: vec![0.0; MAX_BLOCK].into_boxed_slice(),
@@ -639,6 +642,17 @@ impl Sequencer {
             v.held = false;
         }
         self.voices.retain(|v| !v.done);
+    }
+
+    /// How far the master limiter turned the sound down at most since the
+    /// last call, in dB (0 when it never had to).
+    pub fn take_limiter_reduction_db(&mut self) -> f32 {
+        let env = std::mem::take(&mut self.limit_peak);
+        if env > LIMIT_THRESHOLD {
+            20.0 * (env / LIMIT_THRESHOLD).log10()
+        } else {
+            0.0
+        }
     }
 
     pub fn active_voices(&self) -> usize {
@@ -830,6 +844,7 @@ impl Sequencer {
             } else {
                 peak + (self.limit_env - peak) * self.limit_release
             };
+            self.limit_peak = self.limit_peak.max(self.limit_env);
             let g = if self.limit_env > LIMIT_THRESHOLD {
                 LIMIT_THRESHOLD / self.limit_env
             } else {
@@ -1622,7 +1637,7 @@ pub const MAX_RENDER_SECONDS: f64 = 3600.0;
 /// when the reverb is in use, see [`tail_seconds`]).
 pub const RENDER_TAIL_SECONDS: f64 = 2.0;
 
-fn check_render_args(project: &Project, sample_rate: u32) -> Result<()> {
+pub(crate) fn check_render_args(project: &Project, sample_rate: u32) -> Result<()> {
     if !(8_000..=192_000).contains(&sample_rate) {
         anyhow::bail!("sample rate must be between 8000 and 192000 Hz (got {sample_rate})");
     }

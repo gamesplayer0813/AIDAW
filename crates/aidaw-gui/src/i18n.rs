@@ -638,6 +638,13 @@ fn zh(en: &str) -> Option<&'static str> {
         }
         "Drums don't have a key" => "鼓没有调",
         "Quantize" => "量化",
+        "Humanize" => "人性化",
+        "Make the notes sound played: nudge their timing and loudness a little at random. Works on the selected notes, or the whole clip when none is selected" => {
+            "让音符听起来像真人弹的：随机地稍微挪一点时间、改一点力度。有选中就只改选中的，没有就改整个片段"
+        }
+        "Humanized {}: their timing and loudness vary a little now (Ctrl+Z undoes it)" => {
+            "已人性化 {}：时间和力度都有了一点点变化（Ctrl+Z 可撤销）"
+        }
         "Snap note starts to the grid (Q): the selected notes, or every note in the clip when none is selected" => {
             "把音符的开头对齐到网格（Q）：有选中的就只对齐选中的，没有就对齐整个片段"
         }

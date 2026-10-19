@@ -1,6 +1,7 @@
 //! Core of AIDAW: the project document, editing operations, built-in
 //! instruments and the renderer shared by real-time playback and export.
 
+pub mod analysis;
 pub mod edit;
 pub mod io;
 pub mod model;
@@ -8,6 +9,7 @@ pub mod music;
 pub mod pitch;
 pub mod presets;
 pub mod render;
+pub mod transform;
 
 pub use model::{Clip, DrumKit, Instrument, Note, Project, Reverb, Synth, Track, Waveform};
 

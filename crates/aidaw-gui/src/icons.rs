@@ -37,6 +37,7 @@ pub enum Icon {
     Trash,
     Undo,
     Volume,
+    Wave,
 }
 
 impl Icon {
@@ -70,6 +71,7 @@ impl Icon {
             Icon::Trash => include_image!("../assets/icons/trash.svg"),
             Icon::Undo => include_image!("../assets/icons/undo.svg"),
             Icon::Volume => include_image!("../assets/icons/volume.svg"),
+            Icon::Wave => include_image!("../assets/icons/wave.svg"),
         }
     }
 }

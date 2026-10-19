@@ -100,6 +100,8 @@ pub struct App {
     pub roll_reveal: bool,
     /// The piano roll's scroll offset and visible size, last frame.
     pub roll_view: Option<(egui::Vec2, egui::Vec2)>,
+    /// Changes on every Humanize click, so each one varies the notes anew.
+    humanize_seed: u64,
     pub last_note_length: f64,
     pub playhead: f64,
 
@@ -243,6 +245,9 @@ impl App {
             roll_scroll_to_notes: true,
             roll_reveal: false,
             roll_view: None,
+            humanize_seed: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos() as u64),
             last_note_length: 1.0,
             playhead: 0.0,
             last_poll: Instant::now(),
@@ -1637,6 +1642,20 @@ impl App {
         } else {
             trf("Moved {} onto the grid", &[&notes_text(moved)])
         };
+    }
+
+    /// Loosen the selected notes (or the whole clip) a little, like a player.
+    pub fn humanize(&mut self) {
+        self.humanize_seed = self.humanize_seed.wrapping_add(1);
+        let (sel, seed) = (self.selected_notes.clone(), self.humanize_seed);
+        let Some(clip) = self.open_clip_mut() else {
+            return;
+        };
+        let changed = editing::humanize_notes(clip, &sel, seed);
+        self.status = trf(
+            "Humanized {}: their timing and loudness vary a little now (Ctrl+Z undoes it)",
+            &[&notes_text(changed)],
+        );
     }
 
     /// Left/right: one grid step, or a bar with Shift.

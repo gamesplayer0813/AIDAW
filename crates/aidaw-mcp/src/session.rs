@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
+use aidaw_core::analysis::{self, Analysis, Levels};
 use aidaw_core::edit::{self, Op};
 use aidaw_core::music::{self, ChordStyle};
 use aidaw_core::{
@@ -60,6 +61,14 @@ const NUMERIC_KEYS: &[&str] = &[
     "pitch_env",
     "pitch_decay",
     "drive",
+    "from_bar",
+    "to_bar",
+    "times",
+    "grid",
+    "strength",
+    "swing",
+    "timing",
+    "seed",
 ];
 const BOOL_KEYS: &[&str] = &["mute", "solo", "overwrite"];
 /// Accepted everywhere although not advertised in the schemas.
@@ -232,6 +241,11 @@ impl Session {
                 };
                 let seconds = render::render_to_wav(&project, &out, sr)?;
                 Ok(format!("rendered {seconds:.1}s to {}", out.display()))
+            }
+            "analyze" => {
+                let project = pio::load(self.path()?)?;
+                let measured = analysis::analyze(&project)?;
+                Ok(analysis_report(&project, &measured))
             }
             "apply_ops" => {
                 let ops = match args.remove("ops") {
@@ -417,6 +431,9 @@ const EDIT_TOOLS: &[&str] = &[
     "add_chords",
     "add_drum_pattern",
     "add_melody",
+    "copy_bars",
+    "quantize",
+    "humanize",
 ];
 
 fn is_edit_tool(name: &str) -> bool {
@@ -454,6 +471,8 @@ fn apply_tool(work: &mut Project, tool: &Tool, mut args: Args) -> Result<Value> 
             }
         }
         "add_chords" | "add_drum_pattern" | "add_melody" => return musical(work, tool.name, args),
+        "copy_bars" => return copy_bars(work, args),
+        "quantize" | "humanize" => return groove(work, tool.name, args),
         "add_track" | "update_track" => {
             let existing = match tool.name {
                 "update_track" => {
@@ -858,6 +877,392 @@ fn musical(work: &mut Project, tool: &str, mut args: Args) -> Result<Value> {
     Ok(result)
 }
 
+// ---------------------------------------------------------------------------
+// Arranging tools
+
+/// copy_bars: takes bars, hands the core beats.
+fn copy_bars(work: &mut Project, mut args: Args) -> Result<Value> {
+    let bpb = work.beats_per_bar as f64;
+    let number = |keys: &[&str], what: &str| -> Result<f64> {
+        let v = keys
+            .iter()
+            .find_map(|k| args.get(*k))
+            .ok_or_else(|| anyhow!("missing \"{}\": {what}", keys[0]))?;
+        v.as_f64()
+            .ok_or_else(|| anyhow!("\"{}\" must be a number: {what} (got {v})", keys[0]))
+    };
+    let from_bar = number(&["from_bar", "bar"], "the first bar to copy, e.g. 1")?;
+    let bars = number(&["bars"], "how many bars to copy, e.g. 4")?;
+    let to_bar = number(&["to_bar"], "the bar where the copy starts, e.g. 5")?;
+    if from_bar < 1.0 || to_bar < 1.0 {
+        bail!("bars are numbered from 1 (bar 1 = the start of the song)");
+    }
+    if !(bars > 0.0 && bars <= 4096.0) {
+        bail!("bars must be a number from 1 to 4096 (got {bars})");
+    }
+    let times = match args.get("times") {
+        None => 1,
+        Some(v) => v
+            .as_u64()
+            .filter(|t| (1..=256).contains(t))
+            .ok_or_else(|| anyhow!("times must be a whole number from 1 to 256 (got {v})"))?
+            as u32,
+    };
+    let (from, length, to) = ((from_bar - 1.0) * bpb, bars * bpb, (to_bar - 1.0) * bpb);
+    check_end(to + length * times as f64, bpb)?;
+    let track_ids = match track_query(&mut args) {
+        Some(q) => vec![find_track(work, &q)?.id.clone()],
+        None => Vec::new(),
+    };
+    let result = edit::apply(
+        work,
+        Op::CopyBars {
+            from,
+            length,
+            to,
+            times,
+            track_ids,
+        },
+    )?;
+    let tracks: Vec<String> = result["tracks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|id| work.track(id.as_str()?))
+        .map(|t| format!("{} \"{}\"", t.id, t.name))
+        .collect();
+    let end = to + length * times as f64;
+    let copies = if times == 1 {
+        bar_range(to, end, bpb)
+    } else {
+        format!(
+            "{}, {times} times in a row (through bar {})",
+            bar_range(to, to + length, bpb),
+            fmt_num((end / bpb - 1e-9).ceil())
+        )
+    };
+    let message = format!(
+        "copied {} ({} notes on {}) to {copies}",
+        bar_range(from, from + length, bpb),
+        result["notes_per_copy"],
+        tracks.join(", ")
+    );
+    Ok(
+        json!({"message": message, "tracks": result["tracks"], "notes_per_copy": result["notes_per_copy"]}),
+    )
+}
+
+/// The clips a quantize or humanize call means: `clip`, every clip on
+/// `track`, or else every clip in the song. Also says which, for the reply.
+fn target_clips(work: &Project, args: &mut Args) -> Result<(Vec<String>, String)> {
+    if has_any(args, &["clip", "clip_id", "clip_name"]) {
+        let id = resolve_clip(work, args)?;
+        return Ok((vec![id.clone()], format!("clip {id}")));
+    }
+    if let Some(q) = track_query(args) {
+        let t = find_track(work, &q)?;
+        if t.clips.is_empty() {
+            bail!("track {} \"{}\" has no clips yet", t.id, t.name);
+        }
+        let ids = t.clips.iter().map(|c| c.id.clone()).collect();
+        return Ok((ids, format!("track {} \"{}\"", t.id, t.name)));
+    }
+    let ids: Vec<String> = work
+        .tracks
+        .iter()
+        .flat_map(|t| t.clips.iter().map(|c| c.id.clone()))
+        .collect();
+    if ids.is_empty() {
+        bail!("the song has no clips yet. {}", clip_list(work));
+    }
+    Ok((ids, "the whole song".into()))
+}
+
+/// quantize and humanize.
+fn groove(work: &mut Project, tool: &str, mut args: Args) -> Result<Value> {
+    let (clip_ids, scope) = target_clips(work, &mut args)?;
+    let number = |key: &str, default: f64, lo: f64, hi: f64, what: &str| -> Result<f64> {
+        match args.get(key) {
+            None => Ok(default),
+            Some(v) => v.as_f64().filter(|x| (lo..=hi).contains(x)).ok_or_else(|| {
+                anyhow!("{key} must be a number from {lo} to {hi}: {what} (got {v})")
+            }),
+        }
+    };
+    let (op, done) = if tool == "quantize" {
+        let grid = number(
+            "grid",
+            0.25,
+            1.0 / 64.0,
+            16.0,
+            "the grid in beats, e.g. 0.25 for sixteenth notes or 0.5 for eighths",
+        )?;
+        let strength = number(
+            "strength",
+            1.0,
+            0.0,
+            1.0,
+            "1 snaps all the way, 0.5 half way",
+        )?;
+        let swing = number(
+            "swing",
+            0.5,
+            0.5,
+            0.75,
+            "0.5 is straight, 0.6 a light swing, 0.67 a triplet shuffle",
+        )?;
+        let mut done = format!("quantized {scope} to a grid of {} beats", fmt_num(grid));
+        if swing > 0.5 {
+            done += &format!(" with swing {}", fmt_num(swing));
+        }
+        let op = Op::Quantize {
+            clip_ids,
+            grid,
+            strength,
+            swing,
+        };
+        (op, done)
+    } else {
+        let timing = number(
+            "timing",
+            0.02,
+            0.0,
+            0.25,
+            "the largest timing shift in beats, e.g. 0.02 (about 10 ms at 120 BPM)",
+        )?;
+        let velocity = number(
+            "velocity",
+            8.0,
+            0.0,
+            40.0,
+            "the largest velocity change, e.g. 8",
+        )?;
+        let seed = match args.get("seed") {
+            None => 0,
+            Some(v) => v
+                .as_u64()
+                .or_else(|| v.as_i64().map(|i| i as u64))
+                .ok_or_else(|| anyhow!("seed must be a whole number (got {v})"))?,
+        };
+        let done = format!(
+            "humanized {scope}: timing by up to {} beats, velocity by up to {}",
+            fmt_num(timing),
+            velocity.round()
+        );
+        let op = Op::Humanize {
+            clip_ids,
+            timing,
+            velocity: velocity.round() as u8,
+            seed,
+        };
+        (op, done)
+    };
+    let mut result = edit::apply(work, op)?;
+    let count = result
+        .get("moved")
+        .or_else(|| result.get("changed"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    result["message"] = json!(format!("{done}; {count} notes changed"));
+    Ok(result)
+}
+
+/// "1:05.3"
+fn clock(seconds: f64) -> String {
+    let m = (seconds / 60.0).floor();
+    format!("{}:{:04.1}", m, seconds - m * 60.0)
+}
+
+/// The analyze tool's answer: what was measured, then what to do about it.
+fn analysis_report(p: &Project, a: &Analysis) -> String {
+    let bpb = p.beats_per_bar.max(1) as f64;
+    let bars = (p.length_beats() / bpb - 1e-9).ceil().max(0.0);
+    let mut out = format!(
+        "Song: {} bars at {} BPM, {}.",
+        fmt_num(bars),
+        fmt_num(p.bpm),
+        clock(a.seconds)
+    );
+    let Some(lufs) = a.mix.lufs else {
+        out += "\nThe song is silent: it has no notes yet, or every track with notes is muted \
+                (or silenced by another track's solo).";
+        return out;
+    };
+    out += &format!(
+        "\nLoudness: {lufs:.1} LUFS integrated (streaming services play music at about -14 LUFS), peak {:.1} dBFS.",
+        a.mix.peak_db.unwrap_or(f64::NEG_INFINITY)
+    );
+    out += &if a.limiter_db < 0.5 {
+        "\nLimiter: idle, nothing was squashed.".to_string()
+    } else {
+        format!(
+            "\nLimiter: turned peaks down by up to {:.1} dB; by more than 1 dB {:.0}% of the time.",
+            a.limiter_db,
+            a.limiter_busy * 100.0
+        )
+    };
+    out += &format!(
+        "\nBalance: lows (below 250 Hz) {:.0}%, mids {:.0}%, highs (above 4 kHz) {:.1}% of the energy \
+         (a typical full mix: lows 70-90%, mids 10-25%, highs 1-5%).",
+        a.bands[0] * 100.0,
+        a.bands[1] * 100.0,
+        a.bands[2] * 100.0
+    );
+    let tracks: Vec<String> = a
+        .tracks
+        .iter()
+        .map(|(name, levels)| match levels {
+            Some(Levels {
+                lufs: Some(l),
+                peak_db,
+            }) => format!(
+                "{name} {l:.1} LUFS (peak {:.1})",
+                peak_db.unwrap_or(f64::NEG_INFINITY)
+            ),
+            Some(_) => format!("{name} silent"),
+            None => format!("{name} not heard (muted, or another track is solo)"),
+        })
+        .collect();
+    out += &format!("\nEach track alone: {}.", tracks.join("; "));
+    let sections: Vec<String> = a
+        .sections
+        .iter()
+        .map(|s| {
+            let level = s.lufs.map_or("silent".to_string(), |l| format!("{l:.1}"));
+            if s.bars.0 == s.bars.1 {
+                format!("bar {} {level}", s.bars.0)
+            } else {
+                format!("bars {}-{} {level}", s.bars.0, s.bars.1)
+            }
+        })
+        .collect();
+    out += &format!("\nLoudness along the song (LUFS): {}.", sections.join(", "));
+    let tips = mix_tips(p, a, lufs);
+    if tips.is_empty() {
+        out += "\nNothing stands out: the level and the balance look healthy.";
+    } else {
+        out += "\nTips:";
+        for t in tips {
+            out += &format!("\n- {t}");
+        }
+    }
+    out
+}
+
+/// Plain advice from the numbers, each with a call that would help. The
+/// thresholds sit outside what ordinary mixes measure, so a tip means
+/// something really stands out.
+fn mix_tips(p: &Project, a: &Analysis, lufs: f64) -> Vec<String> {
+    let mut tips = Vec::new();
+    // A gain changed by `db`, in steps of 0.05, within what the tools accept.
+    let gain_after = |gain: f64, db: f64| {
+        ((gain * 10f64.powf(db / 20.0) * 20.0).round() / 20.0).clamp(0.05, 2.0)
+    };
+    let master = p.master_gain as f64;
+    if a.limiter_db > 6.0 || a.limiter_busy > 0.3 {
+        tips.push(format!(
+            "Too hot: the limiter is squashing the mix (up to {:.1} dB), which flattens the punch. \
+             Lower the master, e.g. update_project {{\"master_gain\": {}}}, or the loudest track's gain.",
+            a.limiter_db,
+            fmt_num(gain_after(master, -(a.limiter_db - 2.0).max(3.0)))
+        ));
+    } else if lufs < -18.0 {
+        if master < 1.99 {
+            tips.push(format!(
+                "Quiet: {lufs:.1} LUFS. Raise the master, e.g. update_project {{\"master_gain\": {}}} \
+                 (at most 2), or the track gains.",
+                fmt_num(gain_after(master, (-14.0 - lufs).min(12.0)))
+            ));
+        } else {
+            tips.push(format!(
+                "Quiet: {lufs:.1} LUFS with the master already at 2. Raise the track gains."
+            ));
+        }
+    }
+
+    let [low, _, high] = a.bands;
+    if low > 0.95 {
+        tips.push(format!(
+            "Bass-heavy: {:.0}% of the energy is below 250 Hz, so it will sound boomy and muddy. \
+             Turn down the bass or kick, or add parts higher up (chords, a melody).",
+            low * 100.0
+        ));
+    }
+    if high < 0.003 {
+        tips.push(
+            "Dull: almost nothing above 4 kHz. Hi-hats, a shaker or a brighter synth (a higher \
+             cutoff) add air."
+                .to_string(),
+        );
+    } else if high > 0.15 {
+        tips.push(format!(
+            "Harsh: {:.0}% of the energy is above 4 kHz. Turn down hats and cymbals, or lower the \
+             cutoff of bright synths.",
+            high * 100.0
+        ));
+    }
+
+    // Tracks far below the loudest one: one buried part, or one part
+    // drowning out the rest.
+    let heard: Vec<(&aidaw_core::Track, f64)> = p
+        .tracks
+        .iter()
+        .zip(&a.tracks)
+        .filter_map(|(t, (_, levels))| Some((t, (*levels)?.lufs?)))
+        .collect();
+    if let Some(&(loudest, top)) = heard.iter().max_by(|x, y| x.1.total_cmp(&y.1)) {
+        let buried: Vec<(&aidaw_core::Track, f64)> = heard
+            .iter()
+            .filter(|(_, l)| top - l > 10.0)
+            .map(|&(t, l)| (t, top - l))
+            .collect();
+        let call = |t: &aidaw_core::Track, db: f64| {
+            format!(
+                "update_track {{\"track\": \"{}\", \"gain\": {}}}",
+                t.id,
+                fmt_num(gain_after(t.gain as f64, db))
+            )
+        };
+        if buried.len() >= 2 && buried.len() + 1 == heard.len() {
+            let names: Vec<&str> = buried.iter().map(|(t, _)| t.name.as_str()).collect();
+            let least = buried.iter().map(|b| b.1).fold(f64::INFINITY, f64::min);
+            tips.push(format!(
+                "The {} track drowns out the rest: {} are more than 10 LU quieter. Turn it down, e.g. {}, \
+                 or raise the others.",
+                loudest.name,
+                names.join(", "),
+                call(loudest, -(least - 6.0))
+            ));
+        } else {
+            for (t, gap) in buried {
+                tips.push(format!(
+                    "{} is {gap:.0} LU quieter than {} and may be hard to hear; if it should be heard, \
+                     raise it, e.g. {}.",
+                    t.name,
+                    loudest.name,
+                    call(t, gap - 6.0)
+                ));
+            }
+        }
+    }
+
+    if let Some(start) = a.first_sound.filter(|s| *s > 2.0) {
+        tips.push(format!(
+            "The song starts with {start:.1} s of silence; move the first clips earlier if that isn't on purpose."
+        ));
+    }
+    let last_heard = a.sections.iter().rposition(|s| s.lufs.is_some());
+    for (i, s) in a.sections.iter().enumerate() {
+        if i > 0 && s.lufs.is_none() && last_heard.is_some_and(|last| i < last) {
+            tips.push(format!(
+                "Bars {}-{} are silent in the middle of the song.",
+                s.bars.0, s.bars.1
+            ));
+        }
+    }
+    tips
+}
+
 /// Collect drum lanes from `pattern` (an object, a JSON string, or lines like
 /// "kick: x...") and from top-level keys that are drum names.
 fn drum_lanes(args: &mut Args) -> Result<Vec<(String, String)>> {
@@ -968,6 +1373,7 @@ fn unknown_keys(tool: &Tool, args: &Args) -> Vec<String> {
             || (tool.name == "add_track" && (SYNTH_KEYS.contains(&k.as_str()) || k == "kit"))
             || (tool.name == "add_drum_pattern" && music::drum_note(k).is_some())
             || (tool.name == "add_melody" && k == "melody")
+            || (tool.name == "copy_bars" && k == "bar")
             || (tool.name.starts_with("add_") && k == "instrument")
             || (tool.name == "get_project" && k == "full");
         if !known {
@@ -1539,4 +1945,165 @@ fn overview(p: &Project, only: Option<&str>, with_notes: bool) -> String {
         }
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aidaw_core::analysis::Section;
+    use aidaw_core::Track;
+
+    fn track(id: &str, name: &str) -> Track {
+        Track {
+            id: id.into(),
+            name: name.into(),
+            instrument: Instrument::default_synth(),
+            gain: 0.8,
+            pan: 0.0,
+            mute: false,
+            solo: false,
+            reverb: 0.0,
+            clips: Vec::new(),
+        }
+    }
+
+    /// A song whose tracks measure `levels` (LUFS) alone, in a mix that is
+    /// otherwise healthy.
+    fn measured(levels: &[(&str, f64)]) -> (Project, Analysis) {
+        let mut p = Project::new("test", 120.0);
+        for (i, (name, _)) in levels.iter().enumerate() {
+            p.tracks.push(track(&format!("t{}", i + 1), name));
+        }
+        let heard = |lufs| Levels {
+            lufs: Some(lufs),
+            peak_db: Some(-6.0),
+        };
+        let a = Analysis {
+            seconds: 16.0,
+            mix: heard(-14.0),
+            limiter_db: 0.0,
+            limiter_busy: 0.0,
+            bands: [0.8, 0.18, 0.02],
+            sections: vec![
+                Section {
+                    bars: (1, 4),
+                    lufs: Some(-14.0),
+                },
+                Section {
+                    bars: (5, 8),
+                    lufs: Some(-14.0),
+                },
+            ],
+            first_sound: Some(0.0),
+            tracks: levels
+                .iter()
+                .map(|&(name, lufs)| (name.to_string(), Some(heard(lufs))))
+                .collect(),
+        };
+        (p, a)
+    }
+
+    #[test]
+    fn a_healthy_mix_gets_no_tips() {
+        let (p, a) = measured(&[("Drums", -16.0), ("Bass", -18.0), ("Keys", -25.0)]);
+        assert_eq!(mix_tips(&p, &a, -14.0), Vec::<String>::new());
+    }
+
+    #[test]
+    fn one_loud_track_is_turned_down_and_quiet_ones_raised() {
+        // Like the demo song: the drums are far louder than everything else.
+        let (mut p, mut a) = measured(&[("Drums", -13.7), ("Pad", -26.3), ("Bass", -24.2)]);
+        // A muted track is neither buried nor part of "the rest".
+        p.tracks.push(track("t4", "Choir"));
+        a.tracks.push(("Choir".into(), None));
+        let tips = mix_tips(&p, &a, -13.1);
+        assert_eq!(tips.len(), 1, "{tips:?}");
+        assert!(
+            tips[0].starts_with("The Drums track drowns out the rest: Pad, Bass are"),
+            "{tips:?}"
+        );
+        // The closest is 10.5 LU below, so 4.5 dB down: 0.8 -> 0.48 -> 0.5.
+        assert!(
+            tips[0].contains(r#"update_track {"track": "t1", "gain": 0.5}"#),
+            "{tips:?}"
+        );
+
+        // Two loud tracks and two quiet ones: each quiet one is raised.
+        let (p, a) = measured(&[
+            ("Drums", -14.0),
+            ("Bass", -15.0),
+            ("Pad", -26.0),
+            ("Lead", -25.0),
+        ]);
+        let tips = mix_tips(&p, &a, -13.0);
+        assert_eq!(tips.len(), 2, "{tips:?}");
+        assert!(
+            tips[0].starts_with("Pad is 12 LU quieter than Drums"),
+            "{tips:?}"
+        );
+        // Up 6 dB from 0.8.
+        assert!(
+            tips[0].contains(r#"update_track {"track": "t3", "gain": 1.6}"#),
+            "{tips:?}"
+        );
+        assert!(
+            tips[1].starts_with("Lead is 11 LU quieter than Drums"),
+            "{tips:?}"
+        );
+    }
+
+    #[test]
+    fn level_tone_and_silence_tips() {
+        let (mut p, mut a) = measured(&[("Keys", -14.0)]);
+        a.limiter_db = 9.0;
+        a.limiter_busy = 0.5;
+        let tips = mix_tips(&p, &a, -9.0);
+        // 7 dB down from 0.8: 0.357 -> 0.35.
+        assert!(
+            tips[0].starts_with("Too hot") && tips[0].contains(r#""master_gain": 0.35}"#),
+            "{tips:?}"
+        );
+
+        a.limiter_db = 0.0;
+        a.limiter_busy = 0.0;
+        let tips = mix_tips(&p, &a, -24.0);
+        // 10 dB up would be 2.5; the tools accept at most 2.
+        assert!(
+            tips[0].starts_with("Quiet: -24.0 LUFS") && tips[0].contains(r#""master_gain": 2}"#),
+            "{tips:?}"
+        );
+        p.master_gain = 2.0;
+        let tips = mix_tips(&p, &a, -24.0);
+        assert!(tips[0].contains("master already at 2"), "{tips:?}");
+
+        a.bands = [0.97, 0.029, 0.001];
+        let tips = mix_tips(&p, &a, -14.0);
+        assert!(tips[0].starts_with("Bass-heavy: 97%"), "{tips:?}");
+        assert!(tips[1].starts_with("Dull"), "{tips:?}");
+        a.bands = [0.5, 0.3, 0.2];
+        let tips = mix_tips(&p, &a, -14.0);
+        assert!(tips[0].starts_with("Harsh: 20%"), "{tips:?}");
+
+        a.bands = [0.8, 0.18, 0.02];
+        a.first_sound = Some(3.0);
+        let section = |first, lufs| Section {
+            bars: (first, first + 3),
+            lufs,
+        };
+        // A gap in the middle is worth a tip; the quiet end of the song isn't.
+        a.sections = vec![
+            section(1, Some(-14.0)),
+            section(5, None),
+            section(9, Some(-14.0)),
+            section(13, None),
+        ];
+        let tips = mix_tips(&p, &a, -14.0);
+        assert_eq!(
+            tips,
+            [
+                "The song starts with 3.0 s of silence; move the first clips earlier if that isn't on purpose.",
+                "Bars 5-8 are silent in the middle of the song.",
+            ],
+        );
+    }
 }

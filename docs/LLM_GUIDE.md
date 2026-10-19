@@ -31,6 +31,10 @@ still write notes for you: see [4. Plain chat](#4-plain-chat-paste-the-answer).
 | `add_notes`, `remove_notes`, `transpose_clip` | Note-level edits |
 | `update_project` | Name, tempo, time signature, master volume, reverb room |
 | `apply_ops` | Several edits as one all-or-nothing step |
+| `copy_bars` | Copy bars to another place, repeated `times` times: turn a 4-bar loop into a song |
+| `quantize` | Snap note starts to a grid, with optional strength and swing |
+| `humanize` | Small random timing and velocity changes, so programmed parts sound played |
+| `analyze` | Listen to the mix: loudness, limiter, low/mid/high balance, each track alone, and tips |
 | `render_wav` | Render the song to a WAV file |
 
 The musical tools (`add_chords`, `add_drum_pattern`, `add_melody`) do the note maths for you.
@@ -57,6 +61,45 @@ report the absolute path. The server only ever writes `*.aidaw.json` project fil
 renders; `new_project` completes `"song"` to `song.aidaw.json`, and asking it to overwrite any other
 kind of file is refused. If the human saves the project in the AIDAW app while a tool call is
 running, the call is replayed on the fresh file instead of overwriting their change.
+
+## Arranging and checking the mix
+
+**Repeat parts.** `copy_bars {"from_bar": 1, "bars": 4, "to_bar": 5, "times": 3}` copies the
+notes that start in bars 1-4 to bars 5-8, 9-12 and 13-16 on every track that has notes there;
+add `"track": "Drums"` to copy one track. What those tracks had in the destination bars is
+replaced. Copies go into the clips already there, and new clips fill the gaps, so clips never
+overlap.
+
+**Groove.** `quantize` moves note starts to a `grid` in beats (0.25 = sixteenth notes, the
+default; 0.5 = eighths). `strength` (0-1) moves them only part of the way. `swing` (0.5 straight
+to 0.75 heavy shuffle; 0.6 is light) delays every second grid step, so `{"track": "Drums",
+"grid": 0.5, "swing": 0.6}` swings the eighth notes. `humanize` shifts each note by up to
+`timing` beats (default 0.02) and changes its velocity by up to `velocity` (default 8), at
+random; the same `seed` gives the same result, and each call adds more. Both take a `clip`, a
+`track`, or neither for the whole song, and both work inside `apply_ops`.
+
+**Listening.** `analyze` renders the song in memory (no file is written) and reports what a mix
+engineer checks first. On a song whose drums are far too loud it says:
+
+```
+Song: 8 bars at 100 BPM, 0:19.2.
+Loudness: -13.1 LUFS integrated (streaming services play music at about -14 LUFS), peak -1.1 dBFS.
+Limiter: turned peaks down by up to 1.2 dB; by more than 1 dB 0% of the time.
+Balance: lows (below 250 Hz) 90%, mids 8%, highs (above 4 kHz) 2.6% of the energy (a typical full mix: lows 70-90%, mids 10-25%, highs 1-5%).
+Each track alone: Pad -26.3 LUFS (peak -14.1); Bass -24.2 LUFS (peak -14.6); Lead -24.0 LUFS (peak -14.1); Drums -13.7 LUFS (peak -1.1).
+Loudness along the song (LUFS): bars 1-4 -13.2, bars 5-8 -12.8.
+Tips:
+- The Drums track drowns out the rest: Pad, Bass, Lead are more than 10 LU quieter. Turn it down, e.g. update_track {"track": "t4", "gain": 0.55}, or raise the others.
+```
+
+- **Loudness** is integrated loudness as streaming services measure it (ITU-R BS.1770, gated).
+  About -14 LUFS is normal for finished music; below -18 sounds weak next to other songs.
+- **Limiter**: the master limiter catches peaks above full scale. A few dB now and then is fine;
+  if it works hard most of the time, the mix is too hot and loses punch.
+- **Balance** is the share of the energy in each band. Lows naturally carry most of it.
+- **Each track alone** is each audible track soloed. A part more than 10 LU below the loudest
+  one is hard to hear in the mix.
+- **Tips** appear only when something really stands out, each with a call that fixes it.
 
 ## Sounds
 
