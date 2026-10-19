@@ -154,9 +154,7 @@ fn zh(en: &str) -> Option<&'static str> {
             "AI 通过 aidaw-mcp 编辑的项目文件；修改会实时显示在这里。"
         }
         "grid {} · key {} {}" => "网格 {} · 调 {} {}",
-        "🐣 Easy mode · switch to 🔧 Pro (top left) for more controls" => {
-            "🐣 简单模式 · 切换到左上角的 🔧 专业模式可显示更多控件"
-        }
+        "Easy mode · switch to Pro (top left) for more controls" => "简单模式 · 切换到左上角的专业模式可显示更多控件",
         "Deleted {}. Ctrl+Z (or ↩ Undo) brings it back." => {
             "已删除 {}。按 Ctrl+Z（或 ↩ 撤销）可恢复。"
         }
@@ -169,11 +167,11 @@ fn zh(en: &str) -> Option<&'static str> {
         "WAV audio" => "WAV 音频",
 
         // ---- top bar ----
-        "✨ Ask AI" => "✨ 问 AI",
+        "Ask AI" => "问 AI",
         "Let an AI assistant (Claude, ChatGPT, …) write music into this song" => {
             "让 AI 助手（Claude、ChatGPT……）直接往这首歌里写音乐"
         }
-        "📁 File" => "📁 文件",
+        "File" => "文件",
         "New song" => "新建歌曲",
         "Open…" => "打开…",
         "Save As…  (Ctrl+S)" => "另存为…  (Ctrl+S)",
@@ -182,30 +180,31 @@ fn zh(en: &str) -> Option<&'static str> {
         "Make an audio file you can share or put in other apps" => {
             "生成一个可以分享或导入其他软件的音频文件"
         }
-        "❓ Help" => "❓ 帮助",
-        "🎓 Tutorial (2 minutes)" => "🎓 教程（2 分钟）",
-        "✨ Let AI make music…" => "✨ 让 AI 来作曲…",
-        "🔊 Sound settings / no sound?" => "🔊 声音设置 / 没有声音？",
+        "Help" => "帮助",
+        "Tutorial (2 minutes)" => "教程（2 分钟）",
+        "Let AI make music…" => "让 AI 来作曲…",
+        "Sound settings / no sound?" => "声音设置 / 没有声音？",
         "⌨ Keyboard & mouse" => "⌨ 键盘和鼠标",
-        "👋 Welcome screen" => "👋 欢迎界面",
-        "↩ Undo" => "↩ 撤销",
+        "Keyboard & mouse" => "键盘和鼠标",
+        "Welcome screen" => "欢迎界面",
+        "Undo" => "撤销",
         "Take back the last change (Ctrl+Z). Works for AI changes too." => {
             "撤回上一次修改（Ctrl+Z），AI 做的修改也能撤回。"
         }
-        "↪ Redo" => "↪ 重做",
+        "Redo" => "重做",
         "Redo (Ctrl+Y)" => "重做（Ctrl+Y）",
         "Grid" => "网格",
         "Notes and clips snap to this grid. 1/16 is a good default; 1/4 = one beat." => {
             "音符和片段会对齐到这个网格。1/16 是不错的默认值；1/4 = 一拍。"
         }
         "{} beat" => "{} 拍",
-        "💾 Not saved. Click to save" => "💾 未保存，点击保存",
+        "Not saved. Click to save" => "未保存，点击保存",
         "Save your song to a file. AI tools work on this file too." => {
             "把歌曲保存成文件，AI 工具也在这个文件上工作。"
         }
         "Stop and go back to the start" => "停止并回到开头",
-        "⏸  Pause" => "⏸  暂停",
-        "▶  Play" => "▶  播放",
+        "Pause" => "暂停",
+        "Play" => "播放",
         "Play or pause the song (Space bar)" => "播放或暂停歌曲（空格键）",
         "BAR" => "小节",
         "Where the song is playing: bar number . beat" => "当前播放位置：小节号 . 拍",
@@ -221,36 +220,31 @@ fn zh(en: &str) -> Option<&'static str> {
         "Faster" => "快一点",
         "Output level" => "输出电平",
         "🔊 Sound" => "🔊 声音",
+        "Audio" => "声音",
         "Sound settings: pick speakers, play a test beep" => "声音设置：选择扬声器、播放测试音",
-        "🔇 No sound. Click to fix" => "🔇 没有声音，点击修复",
+        "No sound. Click to fix" => "没有声音，点击修复",
 
         // ---- Easy / Pro ----
-        "🐣 Easy" => "🐣 简单",
-        "🔧 Pro" => "🔧 专业",
+        "Easy" => "简单",
+        "Pro" => "专业",
         "Easy mode: only the essentials, big buttons, everything stays in key.\nYou can switch any time; your song is not changed." => {
             "简单模式：只显示必需的控件，按钮更大，音符始终在调内。\n随时可以切换，歌曲不会被改动。"
         }
         "Pro mode: every control (grid, pan, solo, note velocity, sound shaping, zoom…).\nYou can switch any time; your song is not changed." => {
             "专业模式：显示所有控件（网格、声像、独奏、音符力度、音色调节、缩放……）。\n随时可以切换，歌曲不会被改动。"
         }
-        "Switched to 🔧 Pro mode: every control is shown. Your song is unchanged." => {
-            "已切换到 🔧 专业模式：显示所有控件，歌曲没有变化。"
-        }
-        "Switched to 🐣 Easy mode: just the essentials. Your song is unchanged." => {
-            "已切换到 🐣 简单模式：只显示必需的控件，歌曲没有变化。"
-        }
+        "Switched to Pro mode: every control is shown. Your song is unchanged." => "已切换到专业模式：显示所有控件，歌曲没有变化。",
+        "Switched to Easy mode: just the essentials. Your song is unchanged." => "已切换到简单模式：只显示必需的控件，歌曲没有变化。",
 
         // ---- side bar ----
         "Tracks" => "音轨",
         "Instruments" => "乐器",
-        "➕ Add instrument" => "➕ 添加乐器",
+        "Add instrument" => "添加乐器",
         "Pick a sound for the new track" => "为新音轨选一个音色",
         "Add a new track. Each track plays one instrument." => {
             "添加一条新音轨，每条音轨演奏一种乐器。"
         }
-        "No tracks yet. Click ➕ Add instrument above to start." => {
-            "还没有音轨。点击上方的 ➕ 添加乐器开始吧。"
-        }
+        "No tracks yet. Click + Add instrument above to start." => "还没有音轨。点击上方的 + 添加乐器开始吧。",
         "Select this track to change its sound" => "选中这条音轨来更换音色",
         "Delete this track (Ctrl+Z brings it back)" => "删除这条音轨（Ctrl+Z 可恢复）",
         "Solo: hear ONLY this track" => "独奏：只听这条音轨",
@@ -556,9 +550,7 @@ fn zh(en: &str) -> Option<&'static str> {
             "点击片段进行编辑 · 双击空白处新建片段 · 拖动来移动 · 拖右边缘来加长"
         }
         "Double-click here to add a clip" => "双击这里添加片段",
-        "No tracks yet. Click ➕ Add instrument on the left." => {
-            "还没有音轨。点击左边的 ➕ 添加乐器。"
-        }
+        "No tracks yet. Click + Add instrument on the left." => "还没有音轨。点击左边的 + 添加乐器。",
         "Custom sound" => "自定义音色",
 
         // ---- piano roll ----
@@ -580,11 +572,11 @@ fn zh(en: &str) -> Option<&'static str> {
         "How many bars this part lasts" => "这个段落持续几个小节",
         " bar" => " 小节",
         " bars" => " 小节",
-        "⬇ Lower" => "⬇ 降八度",
+        "Lower" => "降八度",
         "Play every note in this part one octave lower" => "把这个段落的所有音符降低一个八度",
-        "⬆ Higher" => "⬆ 升八度",
+        "Higher" => "升八度",
         "Play every note in this part one octave higher" => "把这个段落的所有音符升高一个八度",
-        "🗑 Clear" => "🗑 清空",
+        "Clear" => "清空",
         "Remove every note in this part (Ctrl+Z to undo)" => {
             "删除这个段落的所有音符（Ctrl+Z 撤销）"
         }
@@ -680,7 +672,7 @@ fn zh(en: &str) -> Option<&'static str> {
         "No output devices found. Plug in speakers or headphones." => {
             "没有找到输出设备。请插上扬声器或耳机。"
         }
-        "⟳ Refresh list" => "⟳ 刷新列表",
+        "Refresh list" => "刷新列表",
 
         // ---- tutorial ----
         "Welcome! Let's make some noise 🎉" => "欢迎！我们来弄出点声音吧 🎉",
@@ -733,7 +725,7 @@ fn zh(en: &str) -> Option<&'static str> {
         "🎓 Tutorial" => "🎓 教程",
         "Step {} of {}" => "第 {} 步，共 {} 步",
         "✔ Nice!" => "✔ 很棒！",
-        "◀ Back" => "◀ 上一步",
+        "Back" => "上一步",
         "Finish 🎉" => "完成 🎉",
         "Next ▶" => "下一步 ▶",
         "Skip this step ▶" => "跳过这一步 ▶",
@@ -771,8 +763,8 @@ fn zh(en: &str) -> Option<&'static str> {
         "Copy this, then in Claude Desktop open Settings › Developer › Edit Config, paste it into claude_desktop_config.json, save, and restart Claude Desktop." => {
             "复制下面的内容，然后在 Claude Desktop 里打开 设置 › 开发者 › 编辑配置，把它粘贴进 claude_desktop_config.json，保存后重启 Claude Desktop。"
         }
-        "📋 Copy" => "📋 复制",
-        "📂 Open Claude config folder" => "📂 打开 Claude 配置文件夹",
+        "Copy" => "复制",
+        "Open Claude config folder" => "打开 Claude 配置文件夹",
         "Already have other servers in that file? Add just the \"aidaw\": {…} part inside your existing \"mcpServers\"." => {
             "那个文件里已经有其他服务器了？只需把 \"aidaw\": {…} 这一段加进现有的 \"mcpServers\" 里。"
         }

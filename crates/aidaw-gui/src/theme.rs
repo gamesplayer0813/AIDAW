@@ -282,6 +282,7 @@ pub fn glow(painter: &Painter, rect: Rect, radius: u8, color: Color32, blur: u8)
 /// that matter most (Play, Ask AI).
 pub fn hero_button(
     ui: &mut egui::Ui,
+    icon: Option<crate::icons::Icon>,
     text: &str,
     color: Color32,
     size: egui::Vec2,
@@ -319,13 +320,19 @@ pub fn hero_button(
         } else {
             Color32::WHITE
         };
-        p.text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            text,
-            bold_font(15.0),
-            ink,
-        );
+        // Icon and text are centred together as one group.
+        let galley = p.layout_no_wrap(text.into(), bold_font(15.0), ink);
+        let icon_w = if icon.is_some() { 16.0 + 7.0 } else { 0.0 };
+        let left = rect.center().x - (icon_w + galley.size().x) / 2.0;
+        if let Some(icon) = icon {
+            let r = Rect::from_center_size(
+                egui::pos2(left + 8.0, rect.center().y),
+                egui::vec2(16.0, 16.0),
+            );
+            crate::icons::paint(ui, r, icon, ink);
+        }
+        let pos = egui::pos2(left + icon_w, rect.center().y - galley.size().y / 2.0);
+        ui.painter().galley(pos, galley, ink);
     }
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);

@@ -12,6 +12,7 @@ use aidaw_engine::Engine;
 use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, Rect, RichText};
 
 use crate::i18n::{self, tr, trf};
+use crate::icons::{self, Icon};
 use crate::onboarding::{self, Tutorial, WelcomeChoice};
 use crate::scale::Scale;
 use crate::settings::Settings;
@@ -697,7 +698,8 @@ impl App {
                                 ui.add_space(4.0);
                                 let ai = theme::hero_button(
                                     ui,
-                                    tr("✨ Ask AI"),
+                                    Some(Icon::Sparkles),
+                                    tr("Ask AI"),
                                     theme::ACCENT,
                                     egui::vec2(108.0, 34.0),
                                 )
@@ -743,10 +745,12 @@ impl App {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if let (Some(p), true) = (&self.path, self.pro()) {
                             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                            ui.label(RichText::new(format!("⟳ {name}")).size(12.0).color(theme::TEXT_DIM))
-                                .on_hover_text(tr(
-                                    "The project file the AI edits through aidaw-mcp; changes appear here live.",
-                                ));
+                            let tip = tr(
+                                "The project file the AI edits through aidaw-mcp; changes appear here live.",
+                            );
+                            ui.label(RichText::new(name).size(12.0).color(theme::TEXT_DIM))
+                                .on_hover_text(tip);
+                            icons::label(ui, Icon::Sync).on_hover_text(tip);
                             ui.label(RichText::new("·").color(theme::TEXT_FAINT));
                         }
                         let text = if self.pro() {
@@ -759,7 +763,7 @@ impl App {
                                 ],
                             )
                         } else {
-                            tr("🐣 Easy mode · switch to 🔧 Pro (top left) for more controls").into()
+                            tr("Easy mode · switch to Pro (top left) for more controls").into()
                         };
                         ui.label(RichText::new(text).size(12.0).color(theme::TEXT_FAINT));
                     });
@@ -768,65 +772,91 @@ impl App {
     }
 
     fn menus(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button(tr("📁 File"), |ui| {
-            if ui.button(tr("New song")).clicked() {
-                self.load_project(
-                    starter_project(),
-                    None,
-                    tr("New song. Click in the piano roll to add notes!"),
-                );
-                ui.close_menu();
-            }
-            if ui.button(tr("Open…")).clicked() {
-                ui.close_menu();
-                self.open_dialog();
-            }
-            if ui.button(tr("Save As…  (Ctrl+S)")).clicked() {
-                ui.close_menu();
-                self.save_as_dialog();
-            }
-            if ui
-                .add_enabled(
-                    self.export.is_none(),
-                    egui::Button::new(if self.pro() {
-                        tr("Export as WAV audio…")
-                    } else {
-                        tr("Save as audio file…")
-                    }),
-                )
-                .on_hover_text(tr("Make an audio file you can share or put in other apps"))
-                .clicked()
-            {
-                ui.close_menu();
-                self.export_wav_dialog();
-            }
-        });
-        let help = ui.menu_button(tr("❓ Help"), |ui| {
-            if ui.button(tr("🎓 Tutorial (2 minutes)")).clicked() {
-                self.start_tutorial();
-                ui.close_menu();
-            }
-            if ui.button(tr("✨ Let AI make music…")).clicked() {
-                self.show_ai_help = true;
-                ui.close_menu();
-            }
-            if ui.button(tr("🔊 Sound settings / no sound?")).clicked() {
-                self.show_sound = true;
-                ui.close_menu();
-            }
-            if ui.button(tr("⌨ Keyboard & mouse")).clicked() {
-                self.show_shortcuts = true;
-                ui.close_menu();
-            }
-            if ui.button(tr("👋 Welcome screen")).clicked() {
-                self.show_welcome = true;
-                ui.close_menu();
-            }
-        });
+        ui.menu_image_text_button(
+            icons::image(Icon::Folder, 16.0, theme::TEXT),
+            tr("File"),
+            |ui| {
+                if ui.button(tr("New song")).clicked() {
+                    self.load_project(
+                        starter_project(),
+                        None,
+                        tr("New song. Click in the piano roll to add notes!"),
+                    );
+                    ui.close_menu();
+                }
+                if ui.button(tr("Open…")).clicked() {
+                    ui.close_menu();
+                    self.open_dialog();
+                }
+                if ui.button(tr("Save As…  (Ctrl+S)")).clicked() {
+                    ui.close_menu();
+                    self.save_as_dialog();
+                }
+                if ui
+                    .add_enabled(
+                        self.export.is_none(),
+                        egui::Button::new(if self.pro() {
+                            tr("Export as WAV audio…")
+                        } else {
+                            tr("Save as audio file…")
+                        }),
+                    )
+                    .on_hover_text(tr("Make an audio file you can share or put in other apps"))
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.export_wav_dialog();
+                }
+            },
+        );
+        let help = ui.menu_image_text_button(
+            icons::image(Icon::Help, 16.0, theme::TEXT),
+            tr("Help"),
+            |ui| {
+                if ui
+                    .add(icons::button(Icon::Cap, tr("Tutorial (2 minutes)")))
+                    .clicked()
+                {
+                    self.start_tutorial();
+                    ui.close_menu();
+                }
+                if ui
+                    .add(icons::button(Icon::Sparkles, tr("Let AI make music…")))
+                    .clicked()
+                {
+                    self.show_ai_help = true;
+                    ui.close_menu();
+                }
+                if ui
+                    .add(icons::button(
+                        Icon::Volume,
+                        tr("Sound settings / no sound?"),
+                    ))
+                    .clicked()
+                {
+                    self.show_sound = true;
+                    ui.close_menu();
+                }
+                if ui
+                    .add(icons::button(Icon::Keyboard, tr("Keyboard & mouse")))
+                    .clicked()
+                {
+                    self.show_shortcuts = true;
+                    ui.close_menu();
+                }
+                if ui
+                    .add(icons::button(Icon::Home, tr("Welcome screen")))
+                    .clicked()
+                {
+                    self.show_welcome = true;
+                    ui.close_menu();
+                }
+            },
+        );
         self.ui_rects.insert("help", help.response.rect);
         // Undo is the beginner's safety net, so it is a real button, not hidden in a menu.
         if ui
-            .add_enabled(!self.undo.is_empty(), egui::Button::new(tr("↩ Undo")))
+            .add_enabled(!self.undo.is_empty(), icons::button(Icon::Undo, tr("Undo")))
             .on_hover_text(tr(
                 "Take back the last change (Ctrl+Z). Works for AI changes too.",
             ))
@@ -835,7 +865,7 @@ impl App {
             self.queued_history = Some(false);
         }
         if ui
-            .add_enabled(!self.redo.is_empty(), egui::Button::new(tr("↪ Redo")))
+            .add_enabled(!self.redo.is_empty(), icons::button(Icon::Redo, tr("Redo")))
             .on_hover_text(tr("Redo (Ctrl+Y)"))
             .clicked()
         {
@@ -863,7 +893,11 @@ impl App {
         }
         if self.path.is_none()
             && ui
-                .button(RichText::new(tr("💾 Not saved. Click to save")).color(theme::WARN))
+                .add(icons::button_colored(
+                    Icon::Save,
+                    tr("Not saved. Click to save"),
+                    theme::WARN,
+                ))
                 .on_hover_text(tr(
                     "Save your song to a file. AI tools work on this file too.",
                 ))
@@ -878,7 +912,7 @@ impl App {
         let playing = self.is_playing();
         if ui
             .add(
-                egui::Button::new(RichText::new("⏹").size(16.0))
+                icons::icon_button(Icon::Stop, 18.0)
                     .corner_radius(17)
                     .min_size(egui::vec2(34.0, 34.0)),
             )
@@ -889,11 +923,8 @@ impl App {
         }
         let play = theme::hero_button(
             ui,
-            if playing {
-                tr("⏸  Pause")
-            } else {
-                tr("▶  Play")
-            },
+            Some(if playing { Icon::Pause } else { Icon::Play }),
+            if playing { tr("Pause") } else { tr("Play") },
             if playing { theme::PAUSE } else { theme::PLAY },
             egui::vec2(104.0, 34.0),
         )
@@ -996,12 +1027,12 @@ impl App {
                     let name = e.device_name();
                     let short: String = name.chars().take(20).collect();
                     let ell = if short.len() < name.len() { "…" } else { "" };
-                    format!("🔊 {short}{ell}")
+                    format!("{short}{ell}")
                 } else {
-                    tr("🔊 Sound").to_string()
+                    tr("Audio").to_string()
                 };
                 if ui
-                    .button(label)
+                    .add(icons::button(Icon::Volume, label))
                     .on_hover_text(tr("Sound settings: pick speakers, play a test beep"))
                     .clicked()
                 {
@@ -1011,8 +1042,10 @@ impl App {
             None => {
                 if ui
                     .add(
-                        egui::Button::new(
-                            RichText::new(tr("🔇 No sound. Click to fix")).color(theme::DANGER),
+                        icons::button_colored(
+                            Icon::Mute,
+                            tr("No sound. Click to fix"),
+                            theme::DANGER,
                         )
                         .fill(theme::alpha(theme::DANGER, 30))
                         .stroke(egui::Stroke::new(1.0_f32, theme::alpha(theme::DANGER, 120))),

@@ -7,6 +7,7 @@ use eframe::egui::{self, Color32, CornerRadius, Sense, Stroke, StrokeKind};
 
 use crate::app::App;
 use crate::i18n::{self, tr, Lang};
+use crate::icons::{self, Icon};
 
 use crate::theme::{self, EASY, PRO};
 
@@ -21,16 +22,18 @@ pub fn switch(ui: &mut egui::Ui, app: &mut App) {
     let resp = frame.show(ui, |ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
         ui.horizontal(|ui| {
-            for (pro, label, color, tip) in [
+            for (pro, icon, label, color, tip) in [
                 (
                     false,
-                    tr("🐣 Easy"),
+                    Icon::Sprout,
+                    tr("Easy"),
                     EASY,
                     tr("Easy mode: only the essentials, big buttons, everything stays in key.\nYou can switch any time; your song is not changed."),
                 ),
                 (
                     true,
-                    tr("🔧 Pro"),
+                    Icon::Sliders,
+                    tr("Pro"),
                     PRO,
                     tr("Pro mode: every control (grid, pan, solo, note velocity, sound shaping, zoom…).\nYou can switch any time; your song is not changed."),
                 ),
@@ -60,13 +63,16 @@ pub fn switch(ui: &mut egui::Ui, app: &mut App) {
                 if r.hovered() && !on {
                     ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 }
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    label,
-                    theme::bold_font(15.0),
-                    if on { theme::CANVAS } else { theme::TEXT_DIM },
+                let ink = if on { theme::CANVAS } else { theme::TEXT_DIM };
+                let galley = ui.painter().layout_no_wrap(label.into(), theme::bold_font(15.0), ink);
+                let left = rect.center().x - (16.0 + 6.0 + galley.size().x) / 2.0;
+                let icon_rect = egui::Rect::from_center_size(
+                    egui::pos2(left + 8.0, rect.center().y),
+                    egui::vec2(16.0, 16.0),
                 );
+                icons::paint(ui, icon_rect, icon, ink);
+                let pos = egui::pos2(left + 22.0, rect.center().y - galley.size().y / 2.0);
+                ui.painter().galley(pos, galley, ink);
                 if r.clicked() && !on {
                     set(app, pro);
                 }
@@ -87,9 +93,9 @@ pub fn set(app: &mut App, pro: bool) {
         app.scale = crate::scale::Scale::Major;
     }
     app.status = if pro {
-        tr("Switched to 🔧 Pro mode: every control is shown. Your song is unchanged.").into()
+        tr("Switched to Pro mode: every control is shown. Your song is unchanged.").into()
     } else {
-        tr("Switched to 🐣 Easy mode: just the essentials. Your song is unchanged.").into()
+        tr("Switched to Easy mode: just the essentials. Your song is unchanged.").into()
     };
 }
 
