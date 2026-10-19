@@ -3,7 +3,7 @@
   "name": "Demo - Night Drive",
   "bpm": 100.0,
   "beats_per_bar": 4,
-  "master_gain": 0.8,
+  "master_gain": 1.0,
   "tracks": [
     {
       "id": "t1",
@@ -17,7 +17,7 @@
         "release": 1.2,
         "cutoff": 1800.0
       },
-      "gain": 0.5,
+      "gain": 0.6,
       "pan": -0.2,
       "mute": false,
       "solo": false,
@@ -209,7 +209,7 @@
         "release": 0.08,
         "cutoff": 900.0
       },
-      "gain": 0.8,
+      "gain": 0.9,
       "pan": 0.0,
       "mute": false,
       "solo": false,
@@ -532,7 +532,7 @@
         "release": 0.3,
         "cutoff": 7000.0
       },
-      "gain": 0.7,
+      "gain": 0.9,
       "pan": 0.2,
       "mute": false,
       "solo": false,
@@ -656,7 +656,7 @@
       "instrument": {
         "type": "drums"
       },
-      "gain": 0.9,
+      "gain": 0.55,
       "pan": 0.0,
       "mute": false,
       "solo": false,

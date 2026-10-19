@@ -79,7 +79,7 @@ random; the same `seed` gives the same result, and each call adds more. Both tak
 `track`, or neither for the whole song, and both work inside `apply_ops`.
 
 **Listening.** `analyze` renders the song in memory (no file is written) and reports what a mix
-engineer checks first. For the demo song it says:
+engineer checks first. On a song whose drums are far too loud it says:
 
 ```
 Song: 8 bars at 100 BPM, 0:19.2.
