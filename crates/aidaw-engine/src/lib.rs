@@ -89,8 +89,8 @@ impl Player {
             self.transport
                 .position
                 .store(self.seq.position().to_bits(), Ordering::Release);
-        } else if self.seq.active_voices() > 0 {
-            // Stopped, but note previews are still ringing.
+        } else if self.seq.is_sounding() {
+            // Stopped, but note previews or the reverb tail are still ringing.
             self.seq.process_voices(&self.project, out);
         } else {
             out.fill(0.0);
@@ -611,7 +611,7 @@ mod tests {
         }
     }
 
-    /// Piano chords held for a whole bar, plus a drum beat.
+    /// Pad chords held for a whole bar (with some reverb), plus a drum beat.
     fn song() -> Project {
         let mut p = Project::new("song", 120.0);
         let keys = presets::find("warm_pad").unwrap().instrument.clone();
@@ -630,12 +630,14 @@ mod tests {
                     instrument: Some(keys),
                     gain: None,
                     pan: None,
+                    reverb: Some(0.4),
                 },
                 Op::AddTrack {
                     name: "Drums".into(),
                     instrument: Some(drums),
                     gain: None,
                     pan: None,
+                    reverb: None,
                 },
                 Op::AddClip {
                     track_id: "t1".into(),
@@ -725,6 +727,24 @@ mod tests {
         assert!(peak(&buf) > 0.01, "chord is heard: {}", peak(&buf));
         // It fades in rather than jumping straight to full level.
         assert!(buf[0].abs() < 1e-3, "{}", buf[0]);
+    }
+
+    #[test]
+    fn pausing_lets_the_reverb_ring_out() {
+        let p = song();
+        let (remote, mut player) = connect(&p, SR);
+        let mut buf = block();
+        remote.play();
+        for _ in 0..40 {
+            player.render(&mut buf);
+        }
+        remote.pause();
+        // The notes fade out within a few milliseconds, the room keeps ringing.
+        for _ in 0..4 {
+            player.render(&mut buf);
+        }
+        assert_eq!(player.seq.active_voices(), 0);
+        assert!(peak(&buf) > 1e-4, "tail cut off: {}", peak(&buf));
     }
 
     #[test]

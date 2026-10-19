@@ -725,3 +725,40 @@ fn big_sound_library_kits_and_synth_knobs() {
     assert!(s.fm_decay > 0.0);
     assert!(c.call("get_project", json!({})).contains("drums_lofi"));
 }
+
+#[test]
+fn reverb_sends_and_the_shared_room() {
+    let dir = temp_dir("reverb");
+    let path = dir.join("song.aidaw.json");
+    let mut c = Client::start();
+    c.call("new_project", json!({"path": path, "overwrite": true}));
+    // Preset tracks start with the same reverb as in the app; custom sounds start dry.
+    c.call(
+        "add_track",
+        json!({"name": "Pad", "instrument": "warm_pad"}),
+    );
+    c.call(
+        "add_track",
+        json!({"name": "Synth", "instrument": {"type": "synth", "waveform": "square"}}),
+    );
+    c.call("add_track", json!({"name": "Bass", "reverb": "0.2"}));
+    c.call("add_chords", json!({"track": "Strings", "chords": "Am F"}));
+    let out = c.call("update_track", json!({"track": "Synth", "reverb": 1.5}));
+    assert!(out.contains("clamped"), "{out}");
+    c.call(
+        "update_project",
+        json!({"reverb_size": 0.8, "reverb_tone": "0.3"}),
+    );
+
+    let p = load(&path);
+    let sends: Vec<f32> = p.tracks.iter().map(|t| t.reverb).collect();
+    assert_eq!(sends, [0.3, 1.0, 0.2, 0.3]);
+    assert_eq!((p.reverb.size, p.reverb.tone), (0.8, 0.3));
+    let overview = c.call("get_project", json!({}));
+    assert!(
+        overview.contains("reverb room 0.80 tone 0.30")
+            && overview.contains("\"Pad\" [warm_pad] gain 0.80 pan 0.00 reverb 0.30"),
+        "{overview}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

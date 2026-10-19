@@ -48,6 +48,18 @@ impl Category {
         }
     }
 
+    /// Reverb send a new track with a preset of this group starts with:
+    /// pads and bells float in the room, basses stay dry and tight.
+    pub fn reverb(self) -> f32 {
+        match self {
+            Category::Pad | Category::Mallets | Category::Orchestra | Category::Fx => 0.3,
+            Category::Pluck => 0.25,
+            Category::Keys | Category::Lead => 0.2,
+            Category::Retro | Category::Drums => 0.1,
+            Category::Bass => 0.0,
+        }
+    }
+
     /// Machine name, e.g. `"keys"`.
     pub fn id(self) -> &'static str {
         match self {

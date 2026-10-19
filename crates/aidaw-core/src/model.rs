@@ -19,8 +19,37 @@ pub struct Project {
     pub beats_per_bar: u32,
     #[serde(default = "default_gain")]
     pub master_gain: f32,
+    /// The shared reverb that tracks send to (see [`Track::reverb`]).
+    #[serde(default, skip_serializing_if = "Reverb::is_default")]
+    pub reverb: Reverb,
     #[serde(default)]
     pub tracks: Vec<Track>,
+}
+
+/// Settings of the shared reverb: one "room" every track can send to.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Reverb {
+    /// Room size 0..1: a small room (short tail) .. a big hall (long tail).
+    #[serde(default = "d_half")]
+    pub size: f32,
+    /// Tone 0..1: dark, soft echoes .. bright, airy ones.
+    #[serde(default = "d_half")]
+    pub tone: f32,
+}
+
+impl Default for Reverb {
+    fn default() -> Self {
+        Reverb {
+            size: 0.5,
+            tone: 0.5,
+        }
+    }
+}
+
+impl Reverb {
+    fn is_default(&self) -> bool {
+        *self == Reverb::default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -38,6 +67,9 @@ pub struct Track {
     pub mute: bool,
     #[serde(default)]
     pub solo: bool,
+    /// How much of this track goes to the shared reverb, 0..1 (0 = dry).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub reverb: f32,
     #[serde(default)]
     pub clips: Vec<Clip>,
 }
@@ -296,6 +328,7 @@ impl Project {
             bpm,
             beats_per_bar: 4,
             master_gain: 0.8,
+            reverb: Reverb::default(),
             tracks: Vec::new(),
         }
     }
@@ -417,6 +450,9 @@ fn d_filter_decay() -> f32 {
 fn d_one() -> f32 {
     1.0
 }
+fn d_half() -> f32 {
+    0.5
+}
 fn d_vibrato_rate() -> f32 {
     5.0
 }
@@ -459,6 +495,23 @@ mod tests {
             serde_json::to_string(&drums).unwrap(),
             r#"{"type":"drums"}"#
         );
+    }
+
+    #[test]
+    fn projects_without_reverb_load_and_save_unchanged() {
+        let json = r#"{"version":1,"name":"x","bpm":120.0,"beats_per_bar":4,"master_gain":0.8,"tracks":[{"id":"t1","name":"A","instrument":{"type":"drums"},"gain":0.8,"pan":0.0,"mute":false,"solo":false,"clips":[]}]}"#;
+        let p: Project = serde_json::from_str(json).unwrap();
+        assert_eq!(p.reverb, Reverb::default());
+        assert_eq!(p.tracks[0].reverb, 0.0);
+        assert_eq!(serde_json::to_string(&p).unwrap(), json);
+
+        let mut q = p.clone();
+        q.reverb.size = 0.75;
+        q.tracks[0].reverb = 0.25;
+        let s = serde_json::to_string(&q).unwrap();
+        assert!(s.contains(r#""reverb":{"size":0.75,"tone":0.5}"#), "{s}");
+        assert!(s.contains(r#""solo":false,"reverb":0.25"#), "{s}");
+        assert_eq!(serde_json::from_str::<Project>(&s).unwrap(), q);
     }
 
     #[test]
