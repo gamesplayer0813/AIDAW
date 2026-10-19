@@ -12,6 +12,9 @@
 //! - Voices never start or stop abruptly: stolen voices, choked hi-hats and
 //!   voices cut by a seek/stop fade out over a few milliseconds, and drum
 //!   tails are faded before the voice is freed.
+//! - Playback that starts in the middle of a held note (after a seek or a
+//!   pause) picks that note up part-way through, fading it in, instead of
+//!   staying silent until the next note starts.
 //! - Track gain, pan and mute/solo changes are ramped per block (no zipper
 //!   noise or clicks).
 //! - The master bus runs through a peak limiter and a soft clipper, so
@@ -37,6 +40,8 @@ const HARD_VOICE_CAP: usize = MAX_VOICES + 32;
 const RESERVED_TRACKS: usize = 64;
 /// Fade time used when a voice is stolen, choked or cut by a seek.
 const FADE_SECONDS: f32 = 0.005;
+/// Fade-in of a note picked up part-way through (see [`Sequencer::seek`]).
+const CHASE_FADE_SECONDS: f32 = 0.02;
 /// Drum voices fade over this long before their length is reached.
 const DRUM_TAIL_SECONDS: f32 = 0.03;
 /// Master limiter ceiling (about -1 dBFS) and release time.
@@ -547,6 +552,8 @@ struct Voice {
     /// Gain of the anti-click fade-out; 1.0 unless `fading`.
     fade: f32,
     fading: bool,
+    /// Gain of the fade-in of a note picked up part-way through; else 1.0.
+    fade_in: f32,
     /// Start fading this many frames into the current block (hi-hat choke).
     fade_at: Option<u32>,
 }
@@ -568,6 +575,9 @@ pub struct Sequencer {
     /// Master limiter envelope.
     limit_env: f32,
     limit_release: f32,
+    /// Set by [`Self::seek`]: the next block also starts the notes held
+    /// across the new playhead position.
+    chase: bool,
 }
 
 impl Sequencer {
@@ -581,6 +591,7 @@ impl Sequencer {
             gains: Vec::with_capacity(RESERVED_TRACKS),
             limit_env: 0.0,
             limit_release: (-1.0 / (LIMIT_RELEASE_SECONDS * sample_rate)).exp(),
+            chase: false,
         }
     }
 
@@ -589,9 +600,12 @@ impl Sequencer {
     }
 
     /// Move the playhead. Voices that are still sounding fade out over a few
-    /// milliseconds instead of being cut (which would click).
+    /// milliseconds instead of being cut (which would click). When playback
+    /// continues, synth notes that are held across the new position start
+    /// sounding right away, part-way through, like in other DAWs.
     pub fn seek(&mut self, beat: f64) {
         self.position = beat.max(0.0);
+        self.chase = true;
         for v in &mut self.voices {
             if v.delay > 0 {
                 // Not started yet: drop silently.
@@ -680,6 +694,9 @@ impl Sequencer {
         let b0 = self.position;
         let b1 = b0 + frames as f64 / frames_per_beat;
         if advance {
+            if std::mem::take(&mut self.chase) {
+                self.chase_notes(project, b0, frames_per_beat);
+            }
             self.spawn_notes(project, b0, b1, frames_per_beat);
         }
 
@@ -693,6 +710,7 @@ impl Sequencer {
         let sr = self.sample_rate;
         let inv_frames = 1.0 / frames as f32;
         let fade_step = 1.0 / (FADE_SECONDS * sr);
+        let fade_in_step = 1.0 / (CHASE_FADE_SECONDS * sr);
 
         for voice in self.voices.iter_mut() {
             let Some(track) = project.tracks.get(voice.track) else {
@@ -727,6 +745,10 @@ impl Sequencer {
                     continue;
                 }
                 let mut s = voice.next(sr, &mut self.noise);
+                if voice.fade_in < 1.0 {
+                    voice.fade_in = (voice.fade_in + fade_in_step).min(1.0);
+                    s *= voice.fade_in;
+                }
                 if voice.fading {
                     voice.fade -= fade_step;
                     if voice.fade <= 0.0 {
@@ -776,6 +798,39 @@ impl Sequencer {
         }
         if advance {
             self.position = b1;
+        }
+    }
+
+    /// Start the synth notes that began before `beat` and are still held
+    /// there, already `beat - start` into their envelopes, fading them in.
+    /// Drum hits are one-shots and are not picked up half-way.
+    fn chase_notes(&mut self, project: &Project, beat: f64, frames_per_beat: f64) {
+        for (ti, track) in project.tracks.iter().enumerate() {
+            if track.instrument.is_drums() {
+                continue;
+            }
+            for clip in &track.clips {
+                if clip.start >= beat || clip.end() <= beat {
+                    continue;
+                }
+                for note in &clip.notes {
+                    if note.start < 0.0 || note.start >= clip.length || note.duration <= 0.0 {
+                        continue;
+                    }
+                    let at = clip.start + note.start;
+                    let held = note.duration.min(clip.length - note.start);
+                    // Notes starting at or after `beat` are spawn_notes' job.
+                    if at >= beat || at + held <= beat {
+                        continue;
+                    }
+                    let gate = (held * frames_per_beat).max(1.0) as u64;
+                    self.spawn(ti, &track.instrument, note.pitch, note.velocity, 0, gate);
+                    if let Some(v) = self.voices.last_mut() {
+                        v.age = ((beat - at) * frames_per_beat) as u64;
+                        v.fade_in = 0.0;
+                    }
+                }
+            }
         }
     }
 
@@ -883,6 +938,7 @@ impl Sequencer {
             held: false,
             fade: 1.0,
             fading: false,
+            fade_in: 1.0,
             fade_at: None,
         });
     }
@@ -1542,6 +1598,72 @@ mod tests {
         // First sample continues smoothly from where we were...
         assert!((next[0].abs() - last).abs() < 0.05);
         // ...and the voice is gone after the short fade.
+        assert_eq!(seq.active_voices(), 0);
+    }
+
+    /// One track holding a single note from beat 0 to beat 8.
+    fn held_note(instrument: Instrument) -> Project {
+        let mut p = Project::new("t", 120.0);
+        p.tracks = demo_project().tracks;
+        p.tracks.truncate(1);
+        p.tracks[0].instrument = instrument;
+        p.tracks[0].clips = vec![crate::Clip {
+            id: "c".into(),
+            name: String::new(),
+            start: 0.0,
+            length: 8.0,
+            notes: vec![crate::Note {
+                pitch: 48,
+                start: 0.0,
+                duration: 8.0,
+                velocity: 100,
+            }],
+        }];
+        p
+    }
+
+    #[test]
+    fn playing_from_the_middle_of_a_held_note_picks_it_up() {
+        let p = held_note(Instrument::Synth(Synth::BASE));
+        let sr = 22_050;
+        let mut seq = Sequencer::new(sr);
+        seq.seek(4.0);
+        let mut buf = vec![0.0f32; 2 * 2048];
+        seq.process(&p, &mut buf);
+        assert!(peak(&buf) > 0.02, "silent: {}", peak(&buf));
+        // Faded in, not switched on at full level (which would click).
+        assert!(peak(&buf[..20]) < 0.01, "{}", peak(&buf[..20]));
+        // Already in its sustain: no second attack.
+        let fade_in = (CHASE_FADE_SECONDS * sr as f32) as usize * 2;
+        let after = peak(&buf[fade_in..fade_in + 400]);
+        assert!(after > 0.02, "{after}");
+
+        // Played on from the start, the same note sounds the same once settled.
+        let mut from_start = Sequencer::new(sr);
+        let mut long = vec![0.0f32; 2 * (sr as usize * 2 + 2048)];
+        from_start.process(&p, &mut long);
+        let settled = peak(&long[long.len() - 1000..]);
+        let chased = peak(&buf[buf.len() - 1000..]);
+        assert!((settled - chased).abs() < 0.02, "{settled} vs {chased}");
+
+        // A seek past the note's end, or before it starts, hears nothing new.
+        let mut seq = Sequencer::new(sr);
+        seq.seek(9.0);
+        let mut quiet = vec![0.0f32; 2 * 2048];
+        seq.process(&p, &mut quiet);
+        assert_eq!(peak(&quiet), 0.0);
+    }
+
+    #[test]
+    fn drum_hits_are_not_picked_up_half_way() {
+        let p = held_note(Instrument::Drums {
+            kit: DrumKit::Standard,
+        });
+        let mut seq = Sequencer::new(22_050);
+        seq.seek(0.1);
+        let mut buf = vec![0.0f32; 2 * 2048];
+        seq.process(&p, &mut buf);
+        assert_eq!(peak(&buf), 0.0);
         assert_eq!(seq.active_voices(), 0);
     }
 

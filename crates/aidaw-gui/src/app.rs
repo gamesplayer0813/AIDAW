@@ -1082,6 +1082,7 @@ impl eframe::App for App {
         self.check_audio_alive();
         self.shortcuts(ctx);
         if let Some(e) = &self.engine {
+            e.maintain();
             self.playhead = e.position();
         }
 
