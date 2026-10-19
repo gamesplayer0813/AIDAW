@@ -328,8 +328,10 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
             egui::CollapsingHeader::new(tr("⚙ Fine-tune the sound"))
                 .default_open(true)
                 .show(ui, |ui| {
+                    // Room for the label column and the value box: a grid wider
+                    // than the panel makes the panel creep wider every frame.
                     ui.spacing_mut().slider_width =
-                        (ui.available_width() - 160.0).clamp(50.0, 160.0);
+                        (ui.available_width() - 190.0).clamp(50.0, 160.0);
                     egui::Grid::new("adsr").num_columns(2).show(ui, |ui| {
                         ui.label(tr("Wave"))
                             .on_hover_text(tr("The basic tone colour"));
@@ -371,7 +373,7 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
                 .default_open(false)
                 .show(ui, |ui| {
                     ui.spacing_mut().slider_width =
-                        (ui.available_width() - 160.0).clamp(50.0, 160.0);
+                        (ui.available_width() - 190.0).clamp(50.0, 160.0);
                     egui::Grid::new("synth_more").num_columns(2).show(ui, |ui| {
                         ui.label(tr("Resonance")).on_hover_text(tr(
                             "A whistling peak at the brightness point (acid, wah)",

@@ -2,6 +2,7 @@
 
 mod app;
 mod arrange;
+mod editing;
 mod i18n;
 mod icons;
 mod inspector;

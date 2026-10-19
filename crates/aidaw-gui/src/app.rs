@@ -1,6 +1,6 @@
 //! Application state, file sync with the AI, undo/redo and the top-level layout.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc};
@@ -11,6 +11,7 @@ use aidaw_core::{io as pio, render, Project};
 use aidaw_engine::Engine;
 use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, Rect, RichText};
 
+use crate::editing::{self, Copied};
 use crate::i18n::{self, tr, trf};
 use crate::icons::{self, Icon};
 use crate::onboarding::{self, Tutorial, WelcomeChoice};
@@ -28,10 +29,41 @@ pub use crate::theme::track_color;
 /// In-progress mouse drags, shared by the arrangement and the piano roll.
 #[derive(Clone, Debug)]
 pub enum Drag {
-    MoveClip { clip_id: String, grab_offset: f64 },
-    ResizeClip { clip_id: String },
-    MoveNote { index: usize, grab_offset: f64 },
-    ResizeNote { index: usize },
+    MoveClip {
+        clip_id: String,
+        grab_offset: f64,
+    },
+    ResizeClip {
+        clip_id: String,
+    },
+    /// Moving the selected notes by the one grabbed (`anchor`). `from` holds
+    /// each note's index, start and pitch when the drag began, so every
+    /// frame works out the move from there.
+    MoveNotes {
+        anchor: usize,
+        grab_offset: f64,
+        from: Vec<(usize, f64, u8)>,
+    },
+    /// Lengthening the selected notes by the one grabbed: (index, length).
+    ResizeNotes {
+        anchor: usize,
+        from: Vec<(usize, f64)>,
+    },
+    /// Drawing a box from this beat and key row to select notes, on top of
+    /// the notes in `keep`.
+    SelectNotes {
+        beat: f64,
+        row: f32,
+        keep: BTreeSet<usize>,
+    },
+}
+
+/// Where the editing keys (Delete, Ctrl+C, Ctrl+D, arrows…) act: the notes
+/// in the piano roll or the clip in the song, whichever was clicked last.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditFocus {
+    Notes,
+    Clips,
 }
 
 pub struct App {
@@ -53,7 +85,9 @@ pub struct App {
 
     pub selected_track: Option<String>,
     pub selected_clip: Option<String>,
-    pub selected_note: Option<usize>,
+    /// Indexes of the selected notes in the selected clip.
+    pub selected_notes: BTreeSet<usize>,
+    pub edit_focus: EditFocus,
     pub drag: Option<Drag>,
 
     /// Grid size in beats.
@@ -62,6 +96,10 @@ pub struct App {
     pub roll_zoom: f32,
     pub roll_key_height: f32,
     pub roll_scroll_to_notes: bool,
+    /// Scroll the selected notes into view (after a keyboard edit moved them).
+    pub roll_reveal: bool,
+    /// The piano roll's scroll offset and visible size, last frame.
+    pub roll_view: Option<(egui::Vec2, egui::Vec2)>,
     pub last_note_length: f64,
     pub playhead: f64,
 
@@ -195,13 +233,16 @@ impl App {
             pending_undo: None,
             queued_history: None,
             selected_clip: None,
-            selected_note: None,
+            selected_notes: BTreeSet::new(),
+            edit_focus: EditFocus::Notes,
             drag: None,
             snap: 0.25,
             arrange_zoom: 28.0,
             roll_zoom: 90.0,
             roll_key_height: 14.0,
             roll_scroll_to_notes: true,
+            roll_reveal: false,
+            roll_view: None,
             last_note_length: 1.0,
             playhead: 0.0,
             last_poll: Instant::now(),
@@ -247,7 +288,8 @@ impl App {
         self.disk_mtime = path.as_deref().and_then(mtime);
         self.path = path;
         self.selected_clip = None;
-        self.selected_note = None;
+        self.selected_notes.clear();
+        self.edit_focus = EditFocus::Notes;
         self.stop();
         self.on_project_changed();
         self.save_at = None;
@@ -260,6 +302,16 @@ impl App {
         if let Some(e) = &self.engine {
             e.set_project(&self.project);
             e.preview(track_index, pitch);
+        }
+    }
+
+    /// Hear a few notes together, e.g. a chord that was just moved.
+    pub fn preview_notes(&self, track_index: usize, pitches: &[u8]) {
+        if let Some(e) = &self.engine {
+            e.set_project(&self.project);
+            for &p in pitches {
+                e.preview(track_index, p);
+            }
         }
     }
 
@@ -291,13 +343,18 @@ impl App {
                 .is_some_and(|t| !t.instrument.is_drums())
     }
 
-    pub fn fit_pitch(&self, track_index: usize, pitch: u8) -> u8 {
-        // Easy mode always keeps notes in key.
+    /// The key notes on this track stay in: the chosen one when "Stay in
+    /// key" applies (always in Easy mode), otherwise every key (`Off`).
+    pub fn key_for(&self, track_index: usize) -> Scale {
         if (self.scale_lock || !self.pro()) && self.scale_active(track_index) {
-            self.scale.snap(self.scale_root, pitch)
+            self.scale
         } else {
-            pitch
+            Scale::Off
         }
+    }
+
+    pub fn fit_pitch(&self, track_index: usize, pitch: u8) -> u8 {
+        self.key_for(track_index).snap(self.scale_root, pitch)
     }
 
     // ---- transport -------------------------------------------------------
@@ -448,13 +505,27 @@ impl App {
         {
             None => {
                 self.selected_clip = None;
-                self.selected_note = None;
+                self.selected_notes.clear();
             }
             Some((_, clip)) => {
-                if self.selected_note.is_some_and(|i| i >= clip.notes.len()) {
-                    self.selected_note = None;
-                }
+                let len = clip.notes.len();
+                self.selected_notes.retain(|&i| i < len);
             }
+        }
+    }
+
+    /// After the whole song was swapped (undo, redo, a reload), note indexes
+    /// may point at other notes: keep the selection only if the open clip
+    /// still has as many notes as before.
+    fn keep_selection_if_same(&mut self, before: &Project) {
+        let count = |p: &Project| {
+            self.selected_clip
+                .as_deref()
+                .and_then(|id| p.clip(id))
+                .map(|(_, c)| c.notes.len())
+        };
+        if count(before) != count(&self.project) {
+            self.selected_notes.clear();
         }
     }
 
@@ -468,7 +539,9 @@ impl App {
 
     fn undo(&mut self) {
         if let Some(prev) = self.undo.pop() {
-            self.redo.push(std::mem::replace(&mut self.project, prev));
+            let before = std::mem::replace(&mut self.project, prev);
+            self.keep_selection_if_same(&before);
+            self.redo.push(before);
             self.on_project_changed();
             self.ev_undos += 1;
             self.status = tr("Undone (Ctrl+Y to redo)").into();
@@ -477,7 +550,9 @@ impl App {
 
     fn redo(&mut self) {
         if let Some(next) = self.redo.pop() {
-            self.undo.push(std::mem::replace(&mut self.project, next));
+            let before = std::mem::replace(&mut self.project, next);
+            self.keep_selection_if_same(&before);
+            self.undo.push(before);
             self.on_project_changed();
             self.status = tr("Redone").into();
         }
@@ -530,6 +605,7 @@ impl App {
             if p != self.project {
                 // Keep the local version on the undo stack so AI edits can be reverted.
                 let local = std::mem::replace(&mut self.project, p);
+                self.keep_selection_if_same(&local);
                 self.push_undo(local);
                 self.on_project_changed();
                 // The file already holds this version; don't write it back.
@@ -1089,6 +1165,7 @@ impl eframe::App for App {
         }
 
         let frame_start = self.project.clone();
+        self.edit_shortcuts(ctx);
 
         self.top_bar(ctx);
         // Panel sizes follow the window, so a small window still shows the
@@ -1264,7 +1341,7 @@ impl App {
         if let Some(v) = self.run_op(op) {
             self.selected_track = Some(track_id.into());
             self.selected_clip = v["clip_id"].as_str().map(String::from);
-            self.selected_note = None;
+            self.selected_notes.clear();
             self.roll_scroll_to_notes = true;
         }
     }
@@ -1272,7 +1349,406 @@ impl App {
     pub fn delete_selected_clip(&mut self) {
         if let Some(id) = self.selected_clip.take() {
             self.run_op(Op::RemoveClip { clip_id: id });
-            self.selected_note = None;
+            self.selected_notes.clear();
+        }
+    }
+}
+
+/// For pasted or duplicated notes that landed where the clip can't grow.
+fn past_the_end() -> &'static str {
+    tr("Some notes landed past the end of the clip and won't play: the next clip on this track starts there")
+}
+
+/// "1 note" / "3 notes".
+pub fn notes_text(n: usize) -> String {
+    if n == 1 {
+        tr("1 note").into()
+    } else {
+        trf("{} notes", &[&n])
+    }
+}
+
+// ---- editing keys ------------------------------------------------------------
+
+impl App {
+    fn bar(&self) -> f64 {
+        self.project.beats_per_bar.max(1) as f64
+    }
+
+    /// The clip open in the piano roll.
+    fn open_clip_mut(&mut self) -> Option<&mut aidaw_core::Clip> {
+        let id = self.selected_clip.as_deref()?;
+        self.project
+            .tracks
+            .iter_mut()
+            .flat_map(|t| t.clips.iter_mut())
+            .find(|c| c.id == id)
+    }
+
+    /// How long the open clip may grow before it runs into the next clip on
+    /// its track.
+    fn room_to_grow(&self) -> f64 {
+        let Some((track, clip)) = self
+            .selected_clip
+            .as_deref()
+            .and_then(|id| self.project.clip(id))
+        else {
+            return f64::INFINITY;
+        };
+        track
+            .clips
+            .iter()
+            .filter(|c| c.id != clip.id && c.start >= clip.start)
+            .map(|c| c.start - clip.start)
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    /// Index of the track whose clip is open in the piano roll.
+    fn open_track(&self) -> Option<usize> {
+        let id = self.selected_clip.as_deref()?;
+        self.project
+            .tracks
+            .iter()
+            .position(|t| t.clips.iter().any(|c| c.id == id))
+    }
+
+    /// Copy, paste, duplicate, delete, nudge and quantize from the keyboard.
+    /// Runs after the frame's undo snapshot, so each of these can be undone.
+    fn edit_shortcuts(&mut self, ctx: &egui::Context) {
+        if ctx.wants_keyboard_input() {
+            return; // typing in a text box: the keys are its own
+        }
+        let (mut copy, mut cut, mut paste) = (false, false, None);
+        let mut fresh_up_down = false;
+        ctx.input(|i| {
+            for e in &i.events {
+                match e {
+                    egui::Event::Copy => copy = true,
+                    egui::Event::Cut => cut = true,
+                    egui::Event::Paste(text) => paste = Some(text.clone()),
+                    egui::Event::Key {
+                        key: Key::ArrowUp | Key::ArrowDown,
+                        pressed: true,
+                        repeat: false,
+                        ..
+                    } => fresh_up_down = true,
+                    _ => {}
+                }
+            }
+        });
+        let duplicate = ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::D));
+        let select_all = ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::A));
+        let (delete, escape, quantize, across, up, shift) = ctx.input(|i| {
+            let plain = !i.modifiers.command && !i.modifiers.alt;
+            let key = |k| plain && i.key_pressed(k);
+            (
+                key(Key::Delete) || key(Key::Backspace),
+                i.key_pressed(Key::Escape),
+                key(Key::Q) && !i.modifiers.shift,
+                key(Key::ArrowRight) as i32 - key(Key::ArrowLeft) as i32,
+                key(Key::ArrowUp) as i32 - key(Key::ArrowDown) as i32,
+                i.modifiers.shift,
+            )
+        });
+
+        // What gets pasted depends on what was copied, not on the focus.
+        if let Some(text) = paste {
+            self.paste(&text);
+        }
+        if select_all {
+            self.edit_focus = EditFocus::Notes;
+            self.select_all_notes();
+        }
+        match self.edit_focus {
+            EditFocus::Notes => {
+                if escape {
+                    self.selected_notes.clear();
+                }
+                if copy || cut {
+                    self.copy_notes(ctx, cut);
+                }
+                if duplicate {
+                    self.duplicate_notes();
+                }
+                if delete {
+                    self.delete_notes();
+                }
+                if quantize {
+                    self.quantize();
+                }
+                if across != 0 {
+                    self.nudge_notes(across, shift);
+                }
+                if up != 0 {
+                    self.transpose_notes(up, shift, fresh_up_down);
+                }
+            }
+            EditFocus::Clips => {
+                if copy || cut {
+                    self.copy_clip(ctx, cut);
+                }
+                if duplicate {
+                    self.duplicate_clip();
+                }
+                if delete {
+                    self.delete_selected_clip();
+                }
+                if across != 0 {
+                    self.nudge_clip(across);
+                }
+            }
+        }
+    }
+
+    pub fn select_all_notes(&mut self) {
+        let count = self
+            .selected_clip
+            .as_deref()
+            .and_then(|id| self.project.clip(id))
+            .map_or(0, |(_, c)| c.notes.len());
+        self.selected_notes = (0..count).collect();
+    }
+
+    fn copy_notes(&mut self, ctx: &egui::Context, cut: bool) {
+        let bar = self.bar();
+        let Some((_, clip)) = self
+            .selected_clip
+            .as_deref()
+            .and_then(|id| self.project.clip(id))
+        else {
+            return;
+        };
+        let notes = editing::copy_notes(clip, &self.selected_notes, bar);
+        if notes.is_empty() {
+            self.status =
+                tr("Select some notes first: click one, or Shift+drag around several").into();
+            return;
+        }
+        let n = notes_text(notes.len());
+        ctx.copy_text(Copied::Notes(notes).to_text());
+        if cut {
+            self.delete_notes();
+            self.status = trf("Cut {} (Ctrl+V pastes at the playhead)", &[&n]);
+        } else {
+            self.status = trf("Copied {} (Ctrl+V pastes at the playhead)", &[&n]);
+        }
+    }
+
+    /// Paste notes into the bar where the playhead is (the clip's first bar
+    /// when the playhead is outside the clip), or a clip onto the selected
+    /// track at the playhead's bar.
+    fn paste(&mut self, text: &str) {
+        let (bar, playhead) = (self.bar(), self.playhead.max(0.0));
+        match Copied::from_text(text) {
+            Some(Copied::Notes(mut notes)) => {
+                editing::to_first_bar(&mut notes, bar);
+                let room = self.room_to_grow();
+                let Some(clip) = self.open_clip_mut() else {
+                    self.status = tr("Click a clip first, then paste the notes into it").into();
+                    return;
+                };
+                let rel = playhead - clip.start;
+                let at = if (0.0..clip.length).contains(&rel) {
+                    editing::bar_start(rel, bar)
+                } else {
+                    0.0
+                };
+                let added = editing::paste_notes(clip, &notes, at, bar, room);
+                self.status = if editing::any_silent(clip, &added) {
+                    past_the_end().into()
+                } else {
+                    trf("Pasted {}", &[&notes_text(added.len())])
+                };
+                self.selected_notes = added;
+                self.edit_focus = EditFocus::Notes;
+                self.roll_reveal = true;
+            }
+            Some(Copied::Clip(clip)) => {
+                let track = self
+                    .selected_track
+                    .clone()
+                    .or_else(|| self.project.tracks.first().map(|t| t.id.clone()));
+                let Some(track_id) = track else {
+                    self.status =
+                        tr("Add an instrument first (+ Add instrument on the left)").into();
+                    return;
+                };
+                let wanted = editing::bar_start(playhead, bar);
+                let start = self.free_spot(&track_id, wanted, clip.length);
+                let op = Op::AddClip {
+                    track_id: track_id.clone(),
+                    start,
+                    length: clip.length,
+                    name: Some(clip.name),
+                    notes: clip.notes,
+                };
+                if let Some(v) = self.run_op(op) {
+                    self.selected_track = Some(track_id);
+                    self.selected_clip = v["clip_id"].as_str().map(String::from);
+                    self.selected_notes.clear();
+                    self.edit_focus = EditFocus::Clips;
+                    self.roll_scroll_to_notes = true;
+                    self.status = if start > wanted {
+                        self.moved_to(start)
+                    } else {
+                        tr("Pasted the clip").into()
+                    };
+                }
+            }
+            None => {
+                self.status =
+                    tr("Nothing to paste: copy some notes or a clip first (Ctrl+C)").into();
+            }
+        }
+    }
+
+    fn duplicate_notes(&mut self) {
+        let (grid, bar, room) = (self.grid(), self.bar(), self.room_to_grow());
+        let sel = self.selected_notes.clone();
+        if let Some(clip) = self.open_clip_mut() {
+            let copies = editing::duplicate_notes(clip, &sel, grid, bar, room);
+            if editing::any_silent(clip, &copies) {
+                self.status = past_the_end().into();
+            }
+            if !copies.is_empty() {
+                self.selected_notes = copies;
+                self.roll_reveal = true;
+            }
+        }
+    }
+
+    fn delete_notes(&mut self) {
+        let sel = std::mem::take(&mut self.selected_notes);
+        if let Some(clip) = self.open_clip_mut() {
+            editing::delete_notes(clip, &sel);
+        }
+    }
+
+    /// Snap the selected notes (or the whole clip) to the grid.
+    pub fn quantize(&mut self) {
+        let grid = self.grid();
+        let sel = self.selected_notes.clone();
+        let Some(clip) = self.open_clip_mut() else {
+            return;
+        };
+        let moved = editing::quantize_notes(clip, &sel, grid);
+        self.status = if moved == 0 {
+            tr("Already on the grid").into()
+        } else {
+            trf("Moved {} onto the grid", &[&notes_text(moved)])
+        };
+    }
+
+    /// Left/right: one grid step, or a bar with Shift.
+    fn nudge_notes(&mut self, dir: i32, by_bar: bool) {
+        let step = if by_bar { self.bar() } else { self.grid() } * dir as f64;
+        let sel = self.selected_notes.clone();
+        if let Some(clip) = self.open_clip_mut() {
+            if editing::move_notes(clip, &sel, step) {
+                self.roll_reveal = true;
+            } else if !sel.is_empty() {
+                self.status = tr("The notes can't move before the start of the clip").into();
+            }
+        }
+    }
+
+    /// Up/down: one note of the key (a semitone when the key is off), or an
+    /// octave with Shift. Plays the moved notes on a fresh key press.
+    fn transpose_notes(&mut self, dir: i32, octave: bool, hear: bool) {
+        let Some(track) = self.open_track() else {
+            return;
+        };
+        let (key, root) = (self.key_for(track), self.scale_root);
+        let sel = self.selected_notes.clone();
+        let Some(clip) = self.open_clip_mut() else {
+            return;
+        };
+        let moved = editing::transpose_notes(clip, &sel, |p| {
+            if octave {
+                u8::try_from(p as i32 + 12 * dir).ok().filter(|p| *p <= 127)
+            } else {
+                key.step(root, p, dir)
+            }
+        });
+        let pitches: Vec<u8> = sel
+            .iter()
+            .filter_map(|&i| clip.notes.get(i).map(|n| n.pitch))
+            .take(6)
+            .collect();
+        self.roll_reveal |= moved;
+        if moved && hear {
+            self.preview_notes(track, &pitches);
+        }
+    }
+
+    fn copy_clip(&mut self, ctx: &egui::Context, cut: bool) {
+        let Some((_, clip)) = self
+            .selected_clip
+            .as_deref()
+            .and_then(|id| self.project.clip(id))
+        else {
+            return;
+        };
+        ctx.copy_text(Copied::Clip(clip.clone()).to_text());
+        if cut {
+            self.delete_selected_clip();
+            self.status = tr("Cut the clip (Ctrl+V pastes it at the playhead)").into();
+        } else {
+            self.status = tr("Copied the clip (Ctrl+V pastes it at the playhead)").into();
+        }
+    }
+
+    /// Put a copy of the selected clip right after it and select the copy,
+    /// so pressing Ctrl+D again keeps repeating it.
+    fn duplicate_clip(&mut self) {
+        let Some((track_id, clip)) = self
+            .selected_clip
+            .as_deref()
+            .and_then(|id| self.project.clip(id))
+            .map(|(t, c)| (t.id.clone(), c.clone()))
+        else {
+            return;
+        };
+        let after = clip.end();
+        let start = self.free_spot(&track_id, after, clip.length);
+        let op = Op::AddClip {
+            track_id: track_id.clone(),
+            start,
+            length: clip.length,
+            name: Some(clip.name),
+            notes: clip.notes,
+        };
+        if let Some(v) = self.run_op(op) {
+            self.selected_track = Some(track_id);
+            self.selected_clip = v["clip_id"].as_str().map(String::from);
+            self.selected_notes.clear();
+            self.status = if start > after {
+                self.moved_to(start)
+            } else {
+                tr("Duplicated the clip (Ctrl+D again for another copy)").into()
+            };
+        }
+    }
+
+    /// Where a clip `length` beats long fits on the track, at `from` or later.
+    fn free_spot(&self, track_id: &str, from: f64, length: f64) -> f64 {
+        let clips = self.project.track(track_id).map_or(&[][..], |t| &t.clips);
+        editing::free_spot(clips, from, length)
+    }
+
+    fn moved_to(&self, start: f64) -> String {
+        let bar = (start / self.bar()).floor() as i64 + 1;
+        trf(
+            "That spot was taken, so the copy went to bar {}",
+            &[&bar.to_string()],
+        )
+    }
+
+    /// Left/right: move the selected clip by a bar.
+    fn nudge_clip(&mut self, dir: i32) {
+        let bar = self.bar();
+        if let Some(clip) = self.open_clip_mut() {
+            clip.start = (clip.start + bar * dir as f64).max(0.0);
         }
     }
 }
