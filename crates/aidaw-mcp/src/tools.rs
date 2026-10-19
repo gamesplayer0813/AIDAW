@@ -31,6 +31,11 @@ SOUNDS 78 presets in 10 groups (list_presets): keys, bass, lead, pad, pluck, bel
        fx, drums. Drum kits: drum_kit, drums_808, drums_909, drums_acoustic, drums_lofi, drums_trap,
        drums_electro.
 
+MIX    Every track has volume (gain), pan and a reverb send (0 dry .. 1 very wet) into one shared reverb
+       room. New tracks start with a sensible amount for their preset (pads 0.3, keys 0.2, drums 0.1,
+       bass 0). Room: update_project {"reverb_size": 0.7, "reverb_tone": 0.4} (size 0 small room ..
+       1 big hall, tone 0 dark .. 1 bright).
+
 PATHS  Relative paths are taken relative to the open project's folder (with no project open: the
        user's Music folder). Results print the absolute path. Only *.aidaw.json (projects) and
        *.wav (renders) are ever written.
@@ -45,6 +50,7 @@ QUICK START (4-bar loop)
   add_melody       {"track": "Bass", "notes": "A2/4 F2/4 C2/4 G2/4"}
   add_track        {"name": "Lead", "instrument": "bright_lead"}
   add_melody       {"track": "Lead", "bar": 1, "notes": "E5/1 D5/0.5 C5/0.5 A4/2 r/4 C5/1 D5/1 E5/2 G5/4"}
+  update_track     {"track": "Lead", "reverb": 0.35}
   render_wav       {}
 
 NOTATIONS
@@ -133,6 +139,8 @@ const INSTRUMENT: &str = "preset id (78 of them, see list_presets), e.g. soft_ke
                           chiptune, riser, drum_kit, drums_808, drums_909, drums_acoustic, drums_lofi, \
                           drums_trap. Loose names work too (\"rhodes\", \"violin\")";
 const KIT: &str = "drum tracks only: standard | 808 | 909 | acoustic | lofi | trap | electro";
+const REVERB: &str = "0-1 how much of this track goes to the shared reverb: 0 dry, 0.2-0.35 typical for keys, \
+                      pads and leads, 0.1 drums, 0 bass. New tracks start with their preset's usual amount";
 const NOTES: &str = "notes as a melody string like \"C4/1 E4/0.5 G4/0.5\" (PITCH/BEATS, r = rest), or an \
                      array of {pitch, start, duration, velocity} with start in beats from the clip start";
 
@@ -183,13 +191,15 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "update_project",
-        description: "Change the project name, bpm (20-400), beats_per_bar or master_gain (0-2).",
-        example: r#"{"bpm": 92}"#,
+        description: "Change the project name, bpm (20-400), beats_per_bar, master_gain (0-2) or the shared reverb room every track can send to (reverb_size, reverb_tone).",
+        example: r#"{"bpm": 92, "reverb_size": 0.7}"#,
         params: &[
             p("name", Str, "song title"),
             p("bpm", Num, "tempo, 20-400"),
             p("beats_per_bar", Int, "time signature numerator, e.g. 4 or 3"),
             p("master_gain", Num, "0-2, 1 = unity"),
+            p("reverb_size", Num, "0-1 shared reverb room: 0 small room (short tail) .. 1 big hall (long tail); default 0.5"),
+            p("reverb_tone", Num, "0-1 shared reverb tone: 0 dark .. 1 bright; default 0.5"),
         ],
     },
     Tool {
@@ -202,11 +212,12 @@ pub const TOOLS: &[Tool] = &[
             p("kit", Str, KIT),
             p("gain", Num, "volume 0-2 (default 0.8)"),
             p("pan", Num, "-1 left .. 1 right"),
+            p("reverb", Num, REVERB),
         ],
     },
     Tool {
         name: "update_track",
-        description: "Change a track's name, instrument preset, drum kit, volume, pan, mute/solo, or tweak its synth sound.",
+        description: "Change a track's name, instrument preset, drum kit, volume, pan, reverb, mute/solo, or tweak its synth sound.",
         example: r#"{"track": "Bass", "instrument": "pluck", "gain": 0.6, "cutoff": 1200}"#,
         params: &[
             req("track", Str, TRACK),
@@ -214,6 +225,7 @@ pub const TOOLS: &[Tool] = &[
             p("instrument", Str, INSTRUMENT),
             p("gain", Num, "volume 0-2, 1 = unity"),
             p("pan", Num, "-1 left .. 1 right"),
+            p("reverb", Num, REVERB),
             p("mute", Bool, "silence the track"),
             p("solo", Bool, "play only soloed tracks"),
             p("kit", Str, KIT),

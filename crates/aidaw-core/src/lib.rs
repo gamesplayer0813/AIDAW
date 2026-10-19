@@ -9,7 +9,7 @@ pub mod pitch;
 pub mod presets;
 pub mod render;
 
-pub use model::{Clip, DrumKit, Instrument, Note, Project, Synth, Track, Waveform};
+pub use model::{Clip, DrumKit, Instrument, Note, Project, Reverb, Synth, Track, Waveform};
 
 #[cfg(test)]
 mod tests {
@@ -75,6 +75,41 @@ mod tests {
         let notes = &p.tracks[0].clips[0].notes;
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].pitch, 72);
+    }
+
+    #[test]
+    fn reverb_settings_are_clamped_and_checked_before_anything_changes() {
+        let mut p = demo();
+        apply_all(
+            &mut p,
+            ops(json!([
+                {"op": "update_track", "track_id": "t1", "reverb": 1.5},
+                {"op": "add_track", "name": "Pad", "reverb": 0.3},
+                {"op": "update_project", "reverb_size": -1, "reverb_tone": 0.25}
+            ])),
+        )
+        .unwrap();
+        assert_eq!(p.tracks[0].reverb, 1.0);
+        assert_eq!(p.tracks[1].reverb, 0.0, "tracks start dry unless told");
+        assert_eq!(p.tracks[2].reverb, 0.3);
+        assert_eq!((p.reverb.size, p.reverb.tone), (0.0, 0.25));
+
+        let before = p.clone();
+        let bad = edit::apply(
+            &mut p,
+            Op::UpdateTrack {
+                track_id: "t1".into(),
+                name: Some("renamed".into()),
+                instrument: None,
+                gain: None,
+                pan: None,
+                mute: None,
+                solo: None,
+                reverb: Some(f32::NAN),
+            },
+        );
+        assert!(bad.is_err());
+        assert_eq!(p, before, "a rejected edit changes nothing");
     }
 
     #[test]

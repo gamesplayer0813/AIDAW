@@ -16,12 +16,18 @@ pub enum Op {
         bpm: Option<f64>,
         beats_per_bar: Option<u32>,
         master_gain: Option<f32>,
+        /// Shared reverb room size 0..1 (small room .. big hall).
+        reverb_size: Option<f32>,
+        /// Shared reverb tone 0..1 (dark .. bright).
+        reverb_tone: Option<f32>,
     },
     AddTrack {
         name: String,
         instrument: Option<Instrument>,
         gain: Option<f32>,
         pan: Option<f32>,
+        /// Reverb send 0..1 (default 0, dry).
+        reverb: Option<f32>,
     },
     UpdateTrack {
         track_id: String,
@@ -31,6 +37,7 @@ pub enum Op {
         pan: Option<f32>,
         mute: Option<bool>,
         solo: Option<bool>,
+        reverb: Option<f32>,
     },
     RemoveTrack {
         track_id: String,
@@ -92,6 +99,14 @@ fn check_notes(notes: &[Note]) -> Result<()> {
     Ok(())
 }
 
+/// A 0..1 amount such as a reverb send, clamped; NaN is refused.
+fn unit(v: f32, what: &str) -> Result<f32> {
+    if v.is_nan() {
+        bail!("{what} must be a number from 0 to 1");
+    }
+    Ok(v.clamp(0.0, 1.0))
+}
+
 fn sort_notes(clip: &mut Clip) {
     clip.notes
         .sort_by(|a, b| a.start.total_cmp(&b.start).then(a.pitch.cmp(&b.pitch)));
@@ -105,7 +120,11 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
             bpm,
             beats_per_bar,
             master_gain,
+            reverb_size,
+            reverb_tone,
         } => {
+            let reverb_size = reverb_size.map(|v| unit(v, "reverb_size")).transpose()?;
+            let reverb_tone = reverb_tone.map(|v| unit(v, "reverb_tone")).transpose()?;
             if let Some(v) = name {
                 project.name = v;
             }
@@ -121,6 +140,12 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
             if let Some(v) = master_gain {
                 project.master_gain = v.clamp(0.0, 2.0);
             }
+            if let Some(v) = reverb_size {
+                project.reverb.size = v;
+            }
+            if let Some(v) = reverb_tone {
+                project.reverb.tone = v;
+            }
             Ok(json!({"ok": true}))
         }
         Op::AddTrack {
@@ -128,7 +153,9 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
             instrument,
             gain,
             pan,
+            reverb,
         } => {
+            let reverb = unit(reverb.unwrap_or(0.0), "reverb")?;
             let id = project.next_id("t");
             project.tracks.push(Track {
                 id: id.clone(),
@@ -138,6 +165,7 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
                 pan: pan.unwrap_or(0.0).clamp(-1.0, 1.0),
                 mute: false,
                 solo: false,
+                reverb,
                 clips: Vec::new(),
             });
             Ok(json!({"track_id": id}))
@@ -150,7 +178,9 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
             pan,
             mute,
             solo,
+            reverb,
         } => {
+            let reverb = reverb.map(|v| unit(v, "reverb")).transpose()?;
             let t = project
                 .track_mut(&track_id)
                 .ok_or_else(|| anyhow!("no track {track_id}"))?;
@@ -171,6 +201,9 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
             }
             if let Some(v) = solo {
                 t.solo = v;
+            }
+            if let Some(v) = reverb {
+                t.reverb = v;
             }
             Ok(json!({"ok": true}))
         }

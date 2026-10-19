@@ -171,6 +171,18 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             ui.spacing_mut().slider_width = (ui.available_width() - 70.0).clamp(40.0, 140.0);
             ui.add(egui::Slider::new(&mut app.project.master_gain, 0.0..=1.5).show_value(true));
         });
+        ui.horizontal(|ui| {
+            ui.label(tr("Reverb room"))
+                .on_hover_text(tr("Size of the shared reverb: small room .. big hall"));
+            ui.spacing_mut().slider_width = (ui.available_width() - 70.0).clamp(40.0, 140.0);
+            ui.add(egui::Slider::new(&mut app.project.reverb.size, 0.0..=1.0).fixed_decimals(2));
+        });
+        ui.horizontal(|ui| {
+            ui.label(tr("Reverb tone"))
+                .on_hover_text(tr("Dark, soft echoes .. bright, airy ones"));
+            ui.spacing_mut().slider_width = (ui.available_width() - 70.0).clamp(40.0, 140.0);
+            ui.add(egui::Slider::new(&mut app.project.reverb.tone, 0.0..=1.0).fixed_decimals(2));
+        });
         ui.separator();
     }
 
@@ -198,6 +210,18 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
         ui.horizontal(|ui| {
             ui.label(tr("Track name"));
             ui.add(egui::TextEdit::singleline(&mut track.name).desired_width(f32::INFINITY));
+        });
+        ui.horizontal(|ui| {
+            ui.label(tr("Reverb")).on_hover_text(tr(
+                "Echo of a room around this sound: 0 = dry and close, more = farther away and more spacious",
+            ));
+            ui.spacing_mut().slider_width =
+                (ui.available_width() - if pro { 70.0 } else { 8.0 }).clamp(40.0, 200.0);
+            ui.add(
+                egui::Slider::new(&mut track.reverb, 0.0..=1.0)
+                    .show_value(pro)
+                    .fixed_decimals(2),
+            );
         });
         let current = presets::name_of(&track.instrument).map_or(tr("⚙ Custom"), tr);
         let mut picked = false;

@@ -17,6 +17,9 @@
 //!   staying silent until the next note starts.
 //! - Track gain, pan and mute/solo changes are ramped per block (no zipper
 //!   noise or clicks).
+//! - Tracks send to one shared stereo reverb (Freeverb-style: damped combs
+//!   into all-passes) with a high-passed input, so basses don't muddy it.
+//!   It sleeps, costing nothing, once its tail has died away.
 //! - The master bus runs through a peak limiter and a soft clipper, so
 //!   stacking many loud tracks never hard-clips or produces NaNs: the output
 //!   is always strictly inside ±1.0.
@@ -28,7 +31,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::model::{DrumKit, Instrument, Project, Synth, Waveform};
+use crate::model::{DrumKit, Instrument, Project, Reverb, Synth, Waveform};
 use crate::pitch;
 
 /// Voices above this count start stealing (with a short fade).
@@ -56,6 +59,22 @@ const SAW_DETUNE: f32 = 1.004;
 
 /// Upper limit of the synth's unison stack.
 const MAX_UNISON: usize = 5;
+
+/// Longest stretch rendered in one pass; longer blocks are split, so the
+/// reverb send buffer can be allocated once, up front.
+const MAX_BLOCK: usize = 1024;
+/// Freeverb's comb and all-pass delays in samples at 44.1 kHz (scaled to
+/// the actual sample rate). The right side is `STEREO_SPREAD` longer.
+const COMB_TUNING: [usize; 8] = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617];
+const ALLPASS_TUNING: [usize; 4] = [556, 441, 341, 225];
+const STEREO_SPREAD: usize = 23;
+/// Gain into the comb bank and out of the reverb.
+const REVERB_IN: f32 = 0.03;
+const REVERB_OUT: f32 = 1.0;
+/// The reverb input is high-passed here so basses and kicks don't boom.
+const REVERB_HP_HZ: f32 = 150.0;
+/// Below this output level the reverb tail counts as gone.
+const REVERB_SILENCE: f32 = 1e-5;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Drum {
@@ -560,8 +579,8 @@ struct Voice {
 
 #[derive(Clone, Copy, Default)]
 struct TrackGain {
-    /// Gains reached at the end of the previous block (left, right).
-    cur: [f32; 2],
+    /// Gains reached at the end of the previous block (left, right, reverb send).
+    cur: [f32; 3],
 }
 
 pub struct Sequencer {
@@ -578,6 +597,9 @@ pub struct Sequencer {
     /// Set by [`Self::seek`]: the next block also starts the notes held
     /// across the new playhead position.
     chase: bool,
+    /// What the tracks send to the reverb in the current block (mono).
+    send: Box<[f32]>,
+    room: Room,
 }
 
 impl Sequencer {
@@ -592,6 +614,8 @@ impl Sequencer {
             limit_env: 0.0,
             limit_release: (-1.0 / (LIMIT_RELEASE_SECONDS * sample_rate)).exp(),
             chase: false,
+            send: vec![0.0; MAX_BLOCK].into_boxed_slice(),
+            room: Room::new(sample_rate),
         }
     }
 
@@ -619,6 +643,11 @@ impl Sequencer {
 
     pub fn active_voices(&self) -> usize {
         self.voices.len()
+    }
+
+    /// Whether anything is still audible: a voice, or the reverb's tail.
+    pub fn is_sounding(&self) -> bool {
+        !self.voices.is_empty() || !self.room.asleep
     }
 
     /// Render `out.len() / 2` stereo frames (interleaved L/R) and advance the playhead.
@@ -685,6 +714,13 @@ impl Sequencer {
     }
 
     fn render_block(&mut self, project: &Project, out: &mut [f32], advance: bool) {
+        for chunk in out.chunks_mut(MAX_BLOCK * 2) {
+            self.render_chunk(project, chunk, advance);
+        }
+    }
+
+    /// [`Self::render_block`] for at most [`MAX_BLOCK`] frames.
+    fn render_chunk(&mut self, project: &Project, out: &mut [f32], advance: bool) {
         out.fill(0.0);
         let frames = out.len() / 2;
         if frames == 0 {
@@ -699,6 +735,8 @@ impl Sequencer {
             }
             self.spawn_notes(project, b0, b1, frames_per_beat);
         }
+        let send = &mut self.send[..frames];
+        send.fill(0.0);
 
         // Per-track gain targets; new tracks start at their target (no fade-in).
         let any_solo = project.any_solo();
@@ -723,10 +761,11 @@ impl Sequencer {
             } else {
                 self.gains[voice.track].cur
             };
-            let silent = from == [0.0, 0.0] && target == [0.0, 0.0];
+            let silent = from == [0.0; 3] && target == [0.0; 3];
             let step = [
                 (target[0] - from[0]) * inv_frames,
                 (target[1] - from[1]) * inv_frames,
+                (target[2] - from[2]) * inv_frames,
             ];
             for frame in 0..frames {
                 if voice.done {
@@ -761,6 +800,7 @@ impl Sequencer {
                     let k = frame as f32;
                     out[frame * 2] += s * (from[0] + step[0] * k);
                     out[frame * 2 + 1] += s * (from[1] + step[1] * k);
+                    send[frame] += s * (from[2] + step[2] * k);
                 }
             }
         }
@@ -768,6 +808,8 @@ impl Sequencer {
         for (g, t) in self.gains.iter_mut().zip(&project.tracks) {
             g.cur = track_gains(t, any_solo);
         }
+
+        self.room.process(&project.reverb, send, out);
 
         // Master: gain -> peak limiter -> soft clipper.
         let master = if project.master_gain.is_finite() {
@@ -974,16 +1016,191 @@ impl Sequencer {
     }
 }
 
-/// Target (left, right) gains of a track: equal-power pan, 0 when inaudible.
-fn track_gains(t: &crate::model::Track, any_solo: bool) -> [f32; 2] {
+/// Target gains of a track: (left, right) with equal-power pan, and its
+/// reverb send, which follows the volume but not the pan. All 0 when the
+/// track is muted or another one is soloed.
+fn track_gains(t: &crate::model::Track, any_solo: bool) -> [f32; 3] {
     let audible = !t.mute && (!any_solo || t.solo);
     if !audible {
-        return [0.0, 0.0];
+        return [0.0; 3];
     }
     let pan = finite_or(t.pan, 0.0).clamp(-1.0, 1.0);
     let angle = (pan + 1.0) * PI / 4.0;
-    let g = finite_or(t.gain, 0.0).max(0.0) * std::f32::consts::SQRT_2;
-    [angle.cos() * g, angle.sin() * g]
+    let gain = finite_or(t.gain, 0.0).max(0.0);
+    let g = gain * std::f32::consts::SQRT_2;
+    let send = gain * finite_or(t.reverb, 0.0).clamp(0.0, 1.0);
+    [angle.cos() * g, angle.sin() * g, send]
+}
+
+/// Comb feedback, damping and input level for the reverb settings: size
+/// 0..1 rings for about 0.6 s (small room) to 5 s (big hall), tone 0..1
+/// goes from dark to bright.
+fn room_params(r: &Reverb) -> (f32, f32, f32) {
+    let size = finite_or(r.size, 0.5).clamp(0.0, 1.0);
+    let tone = finite_or(r.tone, 0.5).clamp(0.0, 1.0);
+    let feedback = 0.7 + 0.25 * size;
+    // Bigger rooms build up more energy. Take back about half of it, so the
+    // size mostly changes how long the tail is, not how loud.
+    let level = ((1.0 - feedback * feedback) / (1.0 - 0.825f32 * 0.825)).powf(0.25);
+    (feedback, 0.05 + 0.4 * (1.0 - tone), level)
+}
+
+/// How long the reverb rings (time to fall by 60 dB), in seconds.
+pub fn reverb_tail_seconds(r: &Reverb) -> f64 {
+    let (feedback, _, _) = room_params(r);
+    let longest = (COMB_TUNING[7] + STEREO_SPREAD) as f64 / 44_100.0;
+    3.0 * longest / -f64::from(feedback).log10()
+}
+
+/// A feedback comb filter with a damping low-pass in the loop.
+struct Comb {
+    buf: Box<[f32]>,
+    pos: usize,
+    lp: f32,
+}
+
+impl Comb {
+    fn new(len: usize) -> Self {
+        Comb {
+            buf: vec![0.0; len.max(1)].into_boxed_slice(),
+            pos: 0,
+            lp: 0.0,
+        }
+    }
+
+    #[inline]
+    fn tick(&mut self, x: f32, feedback: f32, damp: f32) -> f32 {
+        let y = self.buf[self.pos];
+        self.lp = y + (self.lp - y) * damp;
+        self.buf[self.pos] = x + self.lp * feedback;
+        self.pos += 1;
+        if self.pos == self.buf.len() {
+            self.pos = 0;
+        }
+        y
+    }
+}
+
+/// Schroeder all-pass: smears the echoes into a smooth tail.
+struct Allpass {
+    buf: Box<[f32]>,
+    pos: usize,
+}
+
+impl Allpass {
+    fn new(len: usize) -> Self {
+        Allpass {
+            buf: vec![0.0; len.max(1)].into_boxed_slice(),
+            pos: 0,
+        }
+    }
+
+    #[inline]
+    fn tick(&mut self, x: f32) -> f32 {
+        let b = self.buf[self.pos];
+        self.buf[self.pos] = x + b * 0.5;
+        self.pos += 1;
+        if self.pos == self.buf.len() {
+            self.pos = 0;
+        }
+        b - x
+    }
+}
+
+/// The shared stereo reverb (Freeverb): eight damped combs in parallel
+/// into four all-passes in series, per side. All buffers are allocated in
+/// [`Room::new`].
+struct Room {
+    combs: [[Comb; 8]; 2],
+    allpasses: [[Allpass; 4]; 2],
+    /// Input high-pass state and coefficient.
+    hp: f32,
+    hp_coef: f32,
+    /// Frames since the tail fell below [`REVERB_SILENCE`] with no input.
+    quiet: usize,
+    sleep_after: usize,
+    /// Nothing in the buffers and no input: processing is skipped.
+    asleep: bool,
+}
+
+impl Room {
+    fn new(sr: f32) -> Self {
+        let len = |n: usize, side: usize| {
+            ((n + side * STEREO_SPREAD) as f32 * sr / 44_100.0).round() as usize
+        };
+        Room {
+            combs: std::array::from_fn(|side| {
+                std::array::from_fn(|i| Comb::new(len(COMB_TUNING[i], side)))
+            }),
+            allpasses: std::array::from_fn(|side| {
+                std::array::from_fn(|i| Allpass::new(len(ALLPASS_TUNING[i], side)))
+            }),
+            hp: 0.0,
+            hp_coef: one_pole_coef(REVERB_HP_HZ, sr),
+            quiet: 0,
+            sleep_after: (0.05 * sr) as usize,
+            asleep: true,
+        }
+    }
+
+    /// Add the reverb of `send` (one mono sample per frame) to `out`
+    /// (interleaved stereo).
+    fn process(&mut self, settings: &Reverb, send: &[f32], out: &mut [f32]) {
+        let fed = send.iter().any(|x| *x != 0.0);
+        if self.asleep && !fed {
+            return;
+        }
+        self.asleep = false;
+        let (feedback, damp, level) = room_params(settings);
+        let mut peak = 0.0f32;
+        for (x, o) in send.iter().zip(out.as_chunks_mut::<2>().0) {
+            // Anything absurd from a track must not get stuck in the loop.
+            let x = if x.is_finite() {
+                x.clamp(-16.0, 16.0)
+            } else {
+                0.0
+            };
+            self.hp += self.hp_coef * (x - self.hp);
+            let input = (x - self.hp) * (REVERB_IN * level);
+            let [left, right] = &mut self.combs;
+            let mut l = 0.0;
+            let mut r = 0.0;
+            for c in left.iter_mut() {
+                l += c.tick(input, feedback, damp);
+            }
+            for c in right.iter_mut() {
+                r += c.tick(input, feedback, damp);
+            }
+            let [left, right] = &mut self.allpasses;
+            for a in left.iter_mut() {
+                l = a.tick(l);
+            }
+            for a in right.iter_mut() {
+                r = a.tick(r);
+            }
+            o[0] += l * REVERB_OUT;
+            o[1] += r * REVERB_OUT;
+            peak = peak.max(l.abs()).max(r.abs());
+        }
+        if fed || peak * REVERB_OUT > REVERB_SILENCE {
+            self.quiet = 0;
+            return;
+        }
+        self.quiet += send.len();
+        if self.quiet >= self.sleep_after {
+            // Start from exact silence next time (also keeps denormals out).
+            for c in self.combs.iter_mut().flatten() {
+                c.buf.fill(0.0);
+                c.lp = 0.0;
+            }
+            for a in self.allpasses.iter_mut().flatten() {
+                a.buf.fill(0.0);
+            }
+            self.hp = 0.0;
+            self.quiet = 0;
+            self.asleep = true;
+        }
+    }
 }
 
 fn finite_or(x: f32, default: f32) -> f32 {
@@ -1354,9 +1571,23 @@ impl Voice {
     }
 }
 
+/// Seconds rendered after the last clip: [`RENDER_TAIL_SECONDS`] for note
+/// releases, plus the reverb's ring-out when an audible track uses it.
+pub fn tail_seconds(project: &Project) -> f64 {
+    let reverb = project
+        .tracks
+        .iter()
+        .any(|t| t.reverb > 0.0 && project.track_audible(t));
+    if reverb {
+        RENDER_TAIL_SECONDS + reverb_tail_seconds(&project.reverb)
+    } else {
+        RENDER_TAIL_SECONDS
+    }
+}
+
 /// Render the whole project (plus a tail for releases) to interleaved stereo.
 pub fn render(project: &Project, sample_rate: u32) -> Vec<f32> {
-    let total_seconds = project.length_beats() * project.seconds_per_beat() + RENDER_TAIL_SECONDS;
+    let total_seconds = project.length_beats() * project.seconds_per_beat() + tail_seconds(project);
     let total_frames = (total_seconds * sample_rate as f64) as usize;
     let mut seq = Sequencer::new(sample_rate);
     let mut out = vec![0.0f32; total_frames * 2];
@@ -1387,7 +1618,8 @@ pub fn write_wav(path: &Path, samples: &[f32], sample_rate: u32) -> Result<()> {
 /// per hour at 44.1 kHz), not memory.
 pub const MAX_RENDER_SECONDS: f64 = 3600.0;
 
-/// Seconds of silence appended after the last clip so releases can ring out.
+/// Seconds appended after the last clip so releases can ring out (more
+/// when the reverb is in use, see [`tail_seconds`]).
 pub const RENDER_TAIL_SECONDS: f64 = 2.0;
 
 fn check_render_args(project: &Project, sample_rate: u32) -> Result<()> {
@@ -1421,7 +1653,7 @@ pub fn render_to_wav_with_progress(
     mut progress: impl FnMut(f64),
 ) -> Result<f64> {
     check_render_args(project, sample_rate)?;
-    let total_seconds = project.length_beats() * project.seconds_per_beat() + RENDER_TAIL_SECONDS;
+    let total_seconds = project.length_beats() * project.seconds_per_beat() + tail_seconds(project);
     let total_frames = (total_seconds * sample_rate as f64) as usize;
     let spec = hound::WavSpec {
         channels: 2,
@@ -1480,11 +1712,13 @@ mod tests {
     fn many_loud_tracks_stay_inside_full_scale() {
         let mut p = demo_project();
         p.master_gain = 4.0;
+        p.reverb.size = 1.0;
         let base = p.tracks.clone();
         for _ in 0..6 {
             for t in &base {
                 let mut t = t.clone();
                 t.gain = 3.0;
+                t.reverb = 1.0;
                 p.tracks.push(t);
             }
         }
@@ -1500,11 +1734,24 @@ mod tests {
         p.tracks[0].pan = f32::NAN;
         let audio = render(&p, 22_050);
         assert!(audio.iter().all(|s| s.is_finite() && s.abs() < 1.0));
+
+        let mut p = demo_project();
+        p.tracks[0].reverb = f32::NAN;
+        p.tracks[1].reverb = f32::INFINITY;
+        p.reverb.size = f32::NAN;
+        p.reverb.tone = f32::NEG_INFINITY;
+        let audio = render(&p, 22_050);
+        assert!(audio.iter().all(|s| s.is_finite() && s.abs() < 1.0));
+        assert!(peak(&audio) > 0.05);
     }
 
     #[test]
     fn silence_after_release_tail() {
-        let p = demo_project();
+        let mut p = demo_project();
+        // Only the notes' releases here; the reverb's tail has its own test.
+        for t in &mut p.tracks {
+            t.reverb = 0.0;
+        }
         let sr = 22_050;
         let audio = render(&p, sr);
         // The demo's longest release is 1.2 s; the last 0.5 s of the 2 s tail
@@ -1665,6 +1912,90 @@ mod tests {
         seq.process(&p, &mut buf);
         assert_eq!(peak(&buf), 0.0);
         assert_eq!(seq.active_voices(), 0);
+    }
+
+    /// One synth track playing a single one-beat note, with a reverb send.
+    fn blip(reverb: f32) -> Project {
+        let mut p = held_note(Instrument::Synth(Synth::BASE));
+        p.tracks[0].clips[0].notes[0].duration = 1.0;
+        p.tracks[0].reverb = reverb;
+        p
+    }
+
+    #[test]
+    fn reverb_rings_on_after_the_note_and_then_sleeps() {
+        let sr = 22_050;
+        let second = 2 * sr as usize;
+        // After one second the note (0.5 s) and its release (0.25 s) are over...
+        let mut dry = Sequencer::new(sr);
+        let mut buf = vec![0.0f32; second];
+        dry.process(&blip(0.0), &mut buf);
+        assert_eq!(peak(&buf[second - 2000..]), 0.0);
+        assert!(!dry.is_sounding());
+        // ...but with a reverb send the room is still ringing.
+        let mut wet = Sequencer::new(sr);
+        wet.process(&blip(0.5), &mut buf);
+        assert_eq!(wet.active_voices(), 0);
+        assert!(wet.is_sounding());
+        let tail = &buf[second - 2000..];
+        assert!(peak(tail) > 1e-3, "audible tail: {}", peak(tail));
+        // A wide tail: left and right differ.
+        let side = tail
+            .chunks(2)
+            .map(|f| (f[0] - f[1]).abs())
+            .fold(0.0, f32::max);
+        assert!(side > 1e-4, "{side}");
+        // A few seconds later it has died away and costs nothing.
+        for _ in 0..5 {
+            wet.process(&blip(0.5), &mut buf);
+        }
+        assert!(!wet.is_sounding());
+        assert_eq!(peak(&buf), 0.0);
+    }
+
+    #[test]
+    fn muted_tracks_send_nothing_to_the_reverb() {
+        let mut p = blip(1.0);
+        p.tracks[0].mute = true;
+        let mut seq = Sequencer::new(22_050);
+        let mut buf = vec![0.0f32; 2 * 22_050];
+        seq.process(&p, &mut buf);
+        assert_eq!(peak(&buf), 0.0);
+        assert!(!seq.is_sounding());
+    }
+
+    #[test]
+    fn a_bigger_room_rings_longer_and_the_render_waits_for_it() {
+        let small = Reverb {
+            size: 0.0,
+            tone: 0.5,
+        };
+        let big = Reverb {
+            size: 1.0,
+            tone: 0.5,
+        };
+        let (s, b) = (reverb_tail_seconds(&small), reverb_tail_seconds(&big));
+        assert!(s < 1.0 && b > 3.0, "{s} {b}");
+        let mut p = blip(0.0);
+        p.reverb = big;
+        assert_eq!(tail_seconds(&p), RENDER_TAIL_SECONDS);
+        p.tracks[0].reverb = 0.3;
+        assert_eq!(tail_seconds(&p), RENDER_TAIL_SECONDS + b);
+        // By the end of the render the tail has faded to nothing audible.
+        let audio = render(&p, 22_050);
+        let end = peak(&audio[audio.len() - 2000..]);
+        assert!(end < 2e-3, "{end}");
+    }
+
+    #[test]
+    fn blocks_longer_than_the_send_buffer_are_split() {
+        let p = blip(0.5);
+        let mut seq = Sequencer::new(22_050);
+        let mut buf = vec![0.0f32; 2 * (3 * MAX_BLOCK + 7)];
+        seq.process(&p, &mut buf);
+        assert!(peak(&buf) > 0.01);
+        let beats = buf.len() as f64 / 2.0 / 22_050.0 * 2.0;
+        assert!((seq.position() - beats).abs() < 1e-9);
     }
 
     #[test]

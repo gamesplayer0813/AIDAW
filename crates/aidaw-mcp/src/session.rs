@@ -24,6 +24,9 @@ const NUMERIC_KEYS: &[&str] = &[
     "master_gain",
     "gain",
     "pan",
+    "reverb",
+    "reverb_size",
+    "reverb_tone",
     "bar",
     "bars",
     "start",
@@ -432,6 +435,9 @@ fn apply_tool(work: &mut Project, tool: &Tool, mut args: Args) -> Result<Value> 
         ("gain", 0.0, 2.0),
         ("master_gain", 0.0, 2.0),
         ("pan", -1.0, 1.0),
+        ("reverb", 0.0, 1.0),
+        ("reverb_size", 0.0, 1.0),
+        ("reverb_tone", 0.0, 1.0),
     ] {
         if let Some(x) = args.get(key).and_then(Value::as_f64) {
             if !(lo..=hi).contains(&x) {
@@ -465,6 +471,15 @@ fn apply_tool(work: &mut Project, tool: &Tool, mut args: Args) -> Result<Value> 
                     .and_then(presets::find)
                 {
                     args.insert("instrument".into(), serde_json::to_value(&p.instrument)?);
+                }
+            }
+            if tool.name == "add_track" && !args.contains_key("reverb") {
+                // The same starting reverb as picking that preset in the app.
+                let inst = args
+                    .get("instrument")
+                    .and_then(|v| serde_json::from_value::<Instrument>(v.clone()).ok());
+                if let Some(p) = inst.as_ref().and_then(presets::of) {
+                    args.insert("reverb".into(), json!(p.category.reverb()));
                 }
             }
         }
@@ -641,6 +656,7 @@ fn musical(work: &mut Project, tool: &str, mut args: Args) -> Result<Value> {
                             instrument: Some(preset.instrument.clone()),
                             gain: None,
                             pan: None,
+                            reverb: Some(preset.category.reverb()),
                         },
                     )?;
                     let id = r["track_id"].as_str().expect("track id").to_string();
@@ -1470,22 +1486,25 @@ fn overview(p: &Project, only: Option<&str>, with_notes: bool) -> String {
     let bpb = p.beats_per_bar as f64;
     let len = p.length_beats();
     let mut s = format!(
-        "\"{}\" — {} BPM, {}/4, {} beats ({} bars), {} track(s)",
+        "\"{}\" — {} BPM, {}/4, {} beats ({} bars), {} track(s), reverb room {:.2} tone {:.2}",
         p.name,
         p.bpm,
         p.beats_per_bar,
         fmt_num(len),
         fmt_num((len / bpb).ceil()),
-        p.tracks.len()
+        p.tracks.len(),
+        p.reverb.size,
+        p.reverb.tone,
     );
     for t in p.tracks.iter().filter(|t| only.is_none_or(|id| t.id == id)) {
         s.push_str(&format!(
-            "\n- {} \"{}\" [{}] gain {:.2} pan {:.2}{}{}",
+            "\n- {} \"{}\" [{}] gain {:.2} pan {:.2} reverb {:.2}{}{}",
             t.id,
             t.name,
             instrument_label(&t.instrument),
             t.gain,
             t.pan,
+            t.reverb,
             if t.mute { " MUTED" } else { "" },
             if t.solo { " SOLO" } else { "" }
         ));

@@ -25,10 +25,10 @@ All three expose the same tools with the same arguments.
 | `add_chords` | Chord symbols, e.g. `"Am F C G"`, one per bar. Styles: block, arpeggio, pulse |
 | `add_drum_pattern` | Step strings, e.g. `{"kick": "x...x...x...x...", "snare": "....x.......x..."}` |
 | `add_melody` | Compact text, e.g. `"C4/1 D4/0.5 E4/0.5 r/1 G4/2"` (pitch/beats, `r` = rest) |
-| `add_track`, `update_track`, `remove_track` | Tracks, instruments, volume, pan, mute and solo, plus synth tweaks |
+| `add_track`, `update_track`, `remove_track` | Tracks, instruments, volume, pan, reverb, mute and solo, plus synth tweaks |
 | `add_clip`, `update_clip`, `remove_clip` | Clips (blocks of notes on a track) |
 | `add_notes`, `remove_notes`, `transpose_clip` | Note-level edits |
-| `update_project` | Name, tempo, time signature, master volume |
+| `update_project` | Name, tempo, time signature, master volume, reverb room |
 | `apply_ops` | Several edits as one all-or-nothing step |
 | `render_wav` | Render the song to a WAV file |
 
@@ -100,6 +100,14 @@ left out keeps its value:
 | `drive` | 0-1 | Warmth to distortion |
 
 Example: `update_track {"track": "Lead", "instrument": "analog_lead", "resonance": 0.7, "vibrato": 25}`.
+
+**Reverb.** All tracks share one reverb room. A track's `reverb` (0-1) says how much of it goes
+there: 0 is dry, 0.2-0.35 suits keys, pads and leads, about 0.1 suits drums, and basses usually
+stay at 0. New tracks start with their preset's usual amount (pads, bells, orchestra and fx 0.3,
+plucks 0.25, keys and leads 0.2, drums and retro 0.1, basses 0); custom sounds start dry. Set it
+with `update_track {"track": "Lead", "reverb": 0.35}`. `update_project {"reverb_size": 0.7,
+"reverb_tone": 0.4}` changes the room itself: size 0 is a small room, 1 a big hall (longer
+tail); tone 0 is dark, 1 bright. `get_project` shows every track's reverb and the room settings.
 
 ## 1. MCP clients
 

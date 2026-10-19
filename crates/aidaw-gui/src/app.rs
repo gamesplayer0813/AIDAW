@@ -109,12 +109,14 @@ fn starter_project() -> Project {
             instrument: Some(keys.instrument.clone()),
             gain: None,
             pan: None,
+            reverb: Some(keys.category.reverb()),
         },
         Op::AddTrack {
             name: tr("Drums").into(),
             instrument: Some(drums.instrument.clone()),
             gain: None,
             pan: None,
+            reverb: Some(drums.category.reverb()),
         },
         Op::AddClip {
             track_id: "t1".into(),
@@ -1236,6 +1238,7 @@ impl App {
             instrument: Some(preset.instrument.clone()),
             gain: None,
             pan: None,
+            reverb: Some(preset.category.reverb()),
         }) {
             let id = v["track_id"].as_str().map(String::from);
             // Give the new track an empty clip so there is something to draw in right away.
