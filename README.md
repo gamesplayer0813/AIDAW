@@ -185,6 +185,15 @@ CI（GitHub Actions，`windows-latest`）每个 PR 都会跑上面这些，并�
 - [ ] 音频回调零分配、引擎与 UI 之间改为无锁命令队列
 - [ ] AI 侧：`render_wav` 后回传音频分析（响度/频谱），让 AI 能「听」自己的作品
 
+## 许可证
+
+AIDAW 用 [MIT 许可证](LICENSE)，随便用、随便改、拿去卖钱都行，只要保留版权声明和协议原文就好。出了事不许赖本小姐哦♡
+
+内嵌在程序里的两套字体是别人家的，走 SIL Open Font License 1.1，协议原文在这里，分发的时候要一起带上，别弄丢了笨蛋：
+
+- Inter：[`crates/aidaw-gui/assets/Inter-LICENSE.txt`](crates/aidaw-gui/assets/Inter-LICENSE.txt)
+- Noto Sans SC（子集）：[`crates/aidaw-gui/assets/NotoSansSC-LICENSE.txt`](crates/aidaw-gui/assets/NotoSansSC-LICENSE.txt)
+
 ---
 
 > 好啦，说明书写到这么细了，要是还不会用……那就真的是无可救药的杂鱼了呢♡
