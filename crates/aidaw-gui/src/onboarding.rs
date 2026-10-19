@@ -9,6 +9,7 @@ use eframe::egui::{self, Align2, Color32, Id, LayerId, Order, RichText, Stroke, 
 
 use crate::app::App;
 use crate::i18n::{tr, trf};
+use crate::icons::{self, Icon};
 
 pub const DEMO_SONG: &str = include_str!("../../../examples/demo.aidaw.json");
 
@@ -240,7 +241,11 @@ pub fn show_tutorial(ctx: &egui::Context, app: &mut App, tut: &mut Tutorial) -> 
                 );
             }
             ui.horizontal(|ui| {
-                if tut.step > 0 && ui.button(tr("◀ Back")).clicked() {
+                if tut.step > 0
+                    && ui
+                        .add(icons::button(Icon::ChevronLeft, tr("Back")))
+                        .clicked()
+                {
                     tut.go(app, tut.step - 1);
                 }
                 let last = tut.step + 1 == STEPS.len();
@@ -415,11 +420,12 @@ pub fn show_ai_help(ctx: &egui::Context, app: &mut App, open: &mut bool) {
                     .desired_width(f32::INFINITY),
             );
             ui.horizontal(|ui| {
-                if ui.button(tr("📋 Copy")).clicked() {
+                if ui.add(icons::button(Icon::Clipboard, tr("Copy"))).clicked() {
                     ui.ctx().copy_text(config.clone());
                     app.status = tr("Copied! Paste it into Claude Desktop's config file.").into();
                 }
-                if cfg!(windows) && ui.button(tr("📂 Open Claude config folder")).clicked() {
+                if cfg!(windows)
+                    && ui.add(icons::button(Icon::Folder, tr("Open Claude config folder"))).clicked() {
                     if let Some(appdata) = std::env::var_os("APPDATA") {
                         let dir = std::path::PathBuf::from(appdata).join("Claude");
                         let _ = std::process::Command::new("explorer").arg(dir).spawn();
@@ -464,7 +470,7 @@ pub fn show_ai_help(ctx: &egui::Context, app: &mut App, open: &mut bool) {
                             .desired_rows(3)
                             .desired_width(f32::INFINITY),
                     );
-                    if ui.button(tr("📋 Copy")).clicked() {
+                    if ui.add(icons::button(Icon::Clipboard, tr("Copy"))).clicked() {
                         ui.ctx().copy_text(cmd.clone());
                     }
                     ui.weak(tr("'guide' prints a cheat sheet to paste into any chat AI. 'tools --format openai' prints function definitions for ChatGPT-style APIs. Full instructions: LLM_GUIDE.md next to aidaw.exe."));

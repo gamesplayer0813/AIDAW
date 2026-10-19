@@ -12,6 +12,7 @@ use eframe::egui::{
 
 use crate::app::{track_color, App, Drag};
 use crate::i18n::{tr, trf};
+use crate::icons::{self, Icon};
 use crate::scale::{Scale, ROOTS};
 use crate::theme;
 
@@ -594,19 +595,25 @@ fn easy_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: us
         }
         ui.separator();
         if !drums {
-            for (label, st, tip) in [
+            for (icon, label, st, tip) in [
                 (
-                    tr("⬇ Lower"),
+                    Icon::ArrowDown,
+                    tr("Lower"),
                     -12,
                     tr("Play every note in this part one octave lower"),
                 ),
                 (
-                    tr("⬆ Higher"),
+                    Icon::ArrowUp,
+                    tr("Higher"),
                     12,
                     tr("Play every note in this part one octave higher"),
                 ),
             ] {
-                if ui.button(label).on_hover_text(tip).clicked() {
+                if ui
+                    .add(icons::button(icon, label))
+                    .on_hover_text(tip)
+                    .clicked()
+                {
                     app.run_op(Op::TransposeClip {
                         clip_id: clip_id.into(),
                         semitones: st,
@@ -615,7 +622,7 @@ fn easy_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: us
             }
         }
         if ui
-            .button(tr("🗑 Clear"))
+            .add(icons::button(Icon::Trash, tr("Clear")))
             .on_hover_text(tr("Remove every note in this part (Ctrl+Z to undo)"))
             .clicked()
         {
@@ -707,13 +714,17 @@ fn pro_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usi
         ui.separator();
         ui.label(tr("Move all notes"))
             .on_hover_text(tr("Transpose: shift every note in this clip up or down"));
-        for (label, st, tip) in [
-            ("⏬", -12, tr("Down one octave")),
-            ("🔽", -1, tr("Down a little (one semitone)")),
-            ("🔼", 1, tr("Up a little (one semitone)")),
-            ("⏫", 12, tr("Up one octave")),
+        for (icon, st, tip) in [
+            (Icon::ChevronsDown, -12, tr("Down one octave")),
+            (Icon::ChevronDown, -1, tr("Down a little (one semitone)")),
+            (Icon::ChevronUp, 1, tr("Up a little (one semitone)")),
+            (Icon::ChevronsUp, 12, tr("Up one octave")),
         ] {
-            if ui.small_button(label).on_hover_text(tip).clicked() {
+            if ui
+                .add(icons::icon_button(icon, 14.0).small())
+                .on_hover_text(tip)
+                .clicked()
+            {
                 app.run_op(Op::TransposeClip {
                     clip_id: clip_id.into(),
                     semitones: st,
@@ -721,7 +732,7 @@ fn pro_toolbar(ui: &mut egui::Ui, app: &mut App, clip_id: &str, track_index: usi
             }
         }
         if ui
-            .small_button(tr("🗑 Clear"))
+            .add(icons::button(Icon::Trash, tr("Clear")).small())
             .on_hover_text(tr("Remove every note in this clip (Ctrl+Z to undo)"))
             .clicked()
         {

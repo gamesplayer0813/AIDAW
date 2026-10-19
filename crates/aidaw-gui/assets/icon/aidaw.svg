@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1d2133"/>
+      <stop offset="1" stop-color="#0b0d13"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8b6cff"/>
+      <stop offset="1" stop-color="#3de0ff"/>
+    </linearGradient>
+    <linearGradient id="bar" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0" stop-color="#8b6cff"/>
+      <stop offset="1" stop-color="#3de0ff"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.62" r="0.5">
+      <stop offset="0" stop-color="#8b6cff" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#8b6cff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bg)"/>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#glow)"/>
+  <rect x="11" y="11" width="234" height="234" rx="53" fill="none" stroke="url(#rim)" stroke-width="6" opacity="0.9"/>
+  <!-- five note bars: a little rising melody -->
+  <g fill="url(#bar)">
+    <rect x="48"  y="132" width="24" height="76"  rx="12"/>
+    <rect x="84"  y="96"  width="24" height="112" rx="12"/>
+    <rect x="120" y="68"  width="24" height="140" rx="12"/>
+    <rect x="156" y="110" width="24" height="98"  rx="12"/>
+    <rect x="192" y="146" width="24" height="62"  rx="12"/>
+  </g>
+  <!-- AI sparkle -->
+  <path d="M196 34 C199 56 206 63 228 66 C206 69 199 76 196 98 C193 76 186 69 164 66 C186 63 193 56 196 34 Z" fill="#ffffff"/>
+  <circle cx="160" cy="36" r="6" fill="#ff4f8b"/>
+</svg>

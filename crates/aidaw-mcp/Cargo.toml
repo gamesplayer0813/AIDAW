@@ -13,3 +13,6 @@ serde_json.workspace = true
 
 [dev-dependencies]
 hound = "3.5"
+
+[build-dependencies]
+winresource = "0.1"

@@ -253,7 +253,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 painter.text(
                     pos2(origin.x + 20.0, origin.y + RULER_H + 24.0),
                     Align2::LEFT_CENTER,
-                    tr("No tracks yet. Click ➕ Add instrument on the left."),
+                    tr("No tracks yet. Click + Add instrument on the left."),
                     FontId::proportional(15.0),
                     theme::TEXT_DIM,
                 );

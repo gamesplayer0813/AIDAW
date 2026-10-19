@@ -9,6 +9,7 @@ use eframe::egui::{self, Color32, RichText};
 
 use crate::app::App;
 use crate::i18n::{tr, trf};
+use crate::icons::{self, Icon};
 
 pub fn log(line: &str) {
     let Some(path) = std::env::current_exe()
@@ -112,7 +113,7 @@ pub fn show_window(ctx: &egui::Context, app: &mut App, open: &mut bool) {
         if app.device_names.is_empty() {
             ui.weak(tr("No output devices found. Plug in speakers or headphones."));
         }
-        if ui.button(tr("⟳ Refresh list")).clicked() {
+        if ui.add(icons::button(Icon::Sync, tr("Refresh list"))).clicked() {
             app.device_names = output_device_names();
         }
     });

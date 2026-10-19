@@ -7,6 +7,7 @@ use eframe::egui::{self, RichText};
 
 use crate::app::{track_color, App};
 use crate::i18n::{tr, trf};
+use crate::icons::{self, Icon};
 use crate::theme;
 use aidaw_core::presets::{self, Category, Preset};
 
@@ -16,7 +17,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
     ui.horizontal(|ui| {
         theme::section(ui, if pro { tr("Tracks") } else { tr("Instruments") });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.menu_button(RichText::new(tr("➕ Add instrument")).strong(), |ui| {
+            let plus = icons::image(Icon::Plus, 16.0, theme::TEXT);
+            ui.menu_image_text_button(plus, RichText::new(tr("Add instrument")).strong(), |ui| {
                 ui.label(RichText::new(tr("Pick a sound for the new track")).weak());
                 for c in Category::ALL {
                     ui.menu_button(tr(c.label()), |ui| {
@@ -37,7 +39,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
 
     if app.project.tracks.is_empty() {
         ui.add_space(8.0);
-        ui.label(tr("No tracks yet. Click ➕ Add instrument above to start."));
+        ui.label(tr("No tracks yet. Click + Add instrument above to start."));
     }
 
     egui::ScrollArea::vertical()
@@ -78,7 +80,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                             // Only on the selected track, so a stray click can't delete one.
                             if selected
                                 && ui
-                                    .small_button("🗑")
+                                    .add(icons::icon_button(Icon::Trash, 14.0).small())
                                     .on_hover_text(tr("Delete this track (Ctrl+Z brings it back)"))
                                     .clicked()
                             {
@@ -102,7 +104,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                         let slider = ((ui.available_width() - 110.0 * per_row - 50.0) / per_row)
                             .clamp(40.0, 140.0);
                         let volume = |ui: &mut egui::Ui, gain: &mut f32| {
-                            ui.label("🔉").on_hover_text(tr("Volume"));
+                            icons::label(ui, Icon::Volume).on_hover_text(tr("Volume"));
                             ui.spacing_mut().slider_width = slider;
                             ui.add(egui::Slider::new(gain, 0.0..=1.5).show_value(true))
                                 .on_hover_text(tr(
@@ -135,7 +137,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                         }
                     } else {
                         ui.horizontal(|ui| {
-                            ui.label("🔉").on_hover_text(tr("Volume"));
+                            icons::label(ui, Icon::Volume).on_hover_text(tr("Volume"));
                             ui.spacing_mut().slider_width = ui.available_width() - 8.0;
                             ui.add(egui::Slider::new(&mut track.gain, 0.0..=1.5).show_value(false))
                                 .on_hover_text(tr("How loud this instrument is"));
