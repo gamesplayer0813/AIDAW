@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::model::{Clip, Instrument, Note, Project, Track};
+use crate::transform;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -76,6 +77,59 @@ pub enum Op {
         clip_id: String,
         semitones: i32,
     },
+    /// Copy the notes that start in [from, from + length) beats to `to`,
+    /// `times` times in a row, on `track_ids` (empty: every track with notes
+    /// there). What those tracks had in the destination is replaced.
+    CopyBars {
+        from: f64,
+        length: f64,
+        to: f64,
+        #[serde(default = "one")]
+        times: u32,
+        #[serde(default)]
+        track_ids: Vec<String>,
+    },
+    /// Snap note starts in these clips to a grid of `grid` beats; see
+    /// [`transform::quantize`] for `strength` and `swing`.
+    Quantize {
+        clip_ids: Vec<String>,
+        #[serde(default = "sixteenth")]
+        grid: f64,
+        #[serde(default = "full")]
+        strength: f64,
+        #[serde(default = "straight")]
+        swing: f64,
+    },
+    /// Small random changes to timing (up to `timing` beats) and velocity
+    /// (up to `velocity`) in these clips; see [`transform::humanize`].
+    Humanize {
+        clip_ids: Vec<String>,
+        #[serde(default = "light_timing")]
+        timing: f64,
+        #[serde(default = "light_touch")]
+        velocity: u8,
+        #[serde(default)]
+        seed: u64,
+    },
+}
+
+fn one() -> u32 {
+    1
+}
+fn sixteenth() -> f64 {
+    0.25
+}
+fn full() -> f64 {
+    1.0
+}
+fn straight() -> f64 {
+    0.5
+}
+fn light_timing() -> f64 {
+    0.02
+}
+fn light_touch() -> u8 {
+    8
 }
 
 fn opt_pitch<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u8>, D::Error> {
@@ -105,6 +159,22 @@ fn unit(v: f32, what: &str) -> Result<f32> {
         bail!("{what} must be a number from 0 to 1");
     }
     Ok(v.clamp(0.0, 1.0))
+}
+
+/// The clips with these ids, or an error naming the first one missing.
+fn clips_mut<'a>(project: &'a mut Project, ids: &[String]) -> Result<Vec<&'a mut Clip>> {
+    if ids.is_empty() {
+        bail!("no clips given");
+    }
+    if let Some(id) = ids.iter().find(|id| project.clip(id).is_none()) {
+        bail!("no clip {id}");
+    }
+    Ok(project
+        .tracks
+        .iter_mut()
+        .flat_map(|t| t.clips.iter_mut())
+        .filter(|c| ids.contains(&c.id))
+        .collect())
 }
 
 fn sort_notes(clip: &mut Clip) {
@@ -309,6 +379,48 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
                 n.pitch = (n.pitch as i32 + semitones).clamp(0, 127) as u8;
             }
             Ok(json!({"ok": true}))
+        }
+        Op::CopyBars {
+            from,
+            length,
+            to,
+            times,
+            track_ids,
+        } => {
+            let copied = transform::copy_bars(project, &track_ids, from, length, to, times)?;
+            let tracks: Vec<&str> = copied.iter().map(|c| c.track_id.as_str()).collect();
+            let notes: usize = copied.iter().map(|c| c.notes).sum();
+            Ok(json!({"tracks": tracks, "notes_per_copy": notes, "copies": times}))
+        }
+        Op::Quantize {
+            clip_ids,
+            grid,
+            strength,
+            swing,
+        } => {
+            if !(grid.is_finite() && grid > 0.0) {
+                bail!("grid must be > 0 beats, e.g. 0.25 for sixteenth notes");
+            }
+            let mut moved = 0;
+            for c in clips_mut(project, &clip_ids)? {
+                moved += transform::quantize(&mut c.notes, c.start, grid, strength, swing);
+                sort_notes(c);
+            }
+            Ok(json!({"moved": moved}))
+        }
+        Op::Humanize {
+            clip_ids,
+            timing,
+            velocity,
+            seed,
+        } => {
+            let mut changed = 0;
+            for c in clips_mut(project, &clip_ids)? {
+                let seed = transform::clip_seed(seed, c);
+                changed += transform::humanize(&mut c.notes, timing, velocity, seed);
+                sort_notes(c);
+            }
+            Ok(json!({"changed": changed}))
         }
     }
 }

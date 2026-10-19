@@ -762,3 +762,82 @@ fn reverb_sends_and_the_shared_room() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn arranging_and_listening_tools() {
+    let dir = temp_dir("arrange");
+    let path = dir.join("song.aidaw.json");
+    let mut c = Client::start();
+    c.call(
+        "new_project",
+        json!({"path": path, "overwrite": true, "bpm": 120}),
+    );
+    c.call(
+        "add_drum_pattern",
+        json!({"track": "Drums", "pattern": {"kick": "x...x...x...x...", "hat": "x.x.x.x.x.x.x.x."}}),
+    );
+    c.call("add_chords", json!({"track": "Keys", "chords": "Am F"}));
+    c.call("add_melody", json!({"track": "Bass", "notes": "A2/4 F2/4"}));
+
+    // Repeat bars 1-2 three times on every track: a 2-bar loop becomes 8 bars.
+    let out = c.call(
+        "copy_bars",
+        json!({"from_bar": 1, "bars": 2, "to_bar": 3, "times": 3}),
+    );
+    assert!(out.contains("through bar 8"), "{out}");
+    let p = load(&path);
+    assert_eq!(p.length_beats(), 32.0);
+    let keys = p.tracks.iter().find(|t| t.name == "Keys").unwrap();
+    assert_eq!(keys.clips.len(), 4, "a clip per copy");
+    // Only the drums, given by name, with "bar" as the start.
+    c.call(
+        "copy_bars",
+        json!({"track": "Drums", "bar": 1, "bars": "1", "to_bar": 9}),
+    );
+    assert_eq!(load(&path).length_beats(), 36.0);
+    let err = c.call_err("copy_bars", json!({"from_bar": 20, "bars": 1, "to_bar": 1}));
+    assert!(err.contains("nothing to copy"), "{err}");
+
+    // Swing the hats, then loosen the keys a little.
+    let out = c.call(
+        "quantize",
+        json!({"track": "Drums", "grid": 0.5, "swing": 0.6}),
+    );
+    assert!(out.contains("swing 0.6"), "{out}");
+    let p = load(&path);
+    let drums = p.tracks.iter().find(|t| t.name == "Drums").unwrap();
+    assert!(drums.clips[0]
+        .notes
+        .iter()
+        .any(|n| (n.start - 0.6).abs() < 1e-9));
+    c.call(
+        "humanize",
+        json!({"track": "Keys", "velocity": 10, "seed": 3}),
+    );
+    let p = load(&path);
+    let keys = p.tracks.iter().find(|t| t.name == "Keys").unwrap();
+    assert!(keys.clips[0].notes.iter().any(|n| n.velocity != 90));
+    assert!(c
+        .call_err("quantize", json!({"swing": 0.9}))
+        .contains("0.75"));
+    // Both work inside apply_ops too.
+    c.call(
+        "apply_ops",
+        json!({"ops": [{"op": "quantize", "clip": "c1"}, {"op": "humanize", "clip": "c1", "timing": 0}]}),
+    );
+
+    let before = load(&path);
+    let report = c.call("analyze", json!({}));
+    for part in [
+        "LUFS integrated",
+        "Limiter",
+        "Balance",
+        "Each track alone: Drums",
+        "bars 1-4",
+    ] {
+        assert!(report.contains(part), "{part} missing from:\n{report}");
+    }
+    // The file is untouched: analyze only listens.
+    assert_eq!(load(&path), before);
+    std::fs::remove_dir_all(&dir).ok();
+}
