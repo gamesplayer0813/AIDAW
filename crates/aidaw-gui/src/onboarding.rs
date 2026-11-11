@@ -535,6 +535,23 @@ pub fn show_shortcuts(ctx: &egui::Context, open: &mut bool) {
                         ),
                         (tr("Double-click a track row"), tr("New clip")),
                         (tr("Drag a clip / its right edge"), tr("Move / make longer")),
+                        (tr("Alt+drag a clip"), tr("Copy it")),
+                        (
+                            "S",
+                            tr("Cut the clip at the playhead in two"),
+                        ),
+                        (
+                            "L",
+                            tr("Loop on / off (drag in the strip above the bar numbers to choose the part)"),
+                        ),
+                        (
+                            tr("Drag a track's name"),
+                            tr("Change the order of the tracks"),
+                        ),
+                        (
+                            tr("Right-click a clip, a track or the ruler"),
+                            tr("More: cut, loop, colour, move, delete"),
+                        ),
                         (tr("Click the piano roll grid"), tr("Add a note")),
                         (tr("Drag a note / its right edge"), tr("Move / make longer")),
                         (tr("Right-click a note"), tr("Delete it")),

@@ -147,6 +147,17 @@ impl History {
         self.pending = None;
     }
 
+    /// The song was just changed in a way that is not an edit to undo, such
+    /// as the AI's playhead request: make the same change to the version
+    /// last seen and to the one from before the gesture in progress, so it
+    /// starts no undo step.
+    pub fn not_an_edit(&mut self, change: impl Fn(&mut Project)) {
+        change(&mut self.seen.project);
+        if let Some(before) = &mut self.pending {
+            change(&mut before.project);
+        }
+    }
+
     /// Forget every step, for a song from another file.
     pub fn clear(&mut self) {
         self.undo.clear();
@@ -248,6 +259,32 @@ mod tests {
         h.end_gesture(&song(140.0));
         assert!(!h.can_undo());
         assert!(!h.notice(&song(140.0), || None), "seen already");
+    }
+
+    #[test]
+    fn a_change_that_is_not_an_edit_starts_no_step() {
+        let cued = |bpm: f64| {
+            let mut p = song(bpm);
+            p.transport.cue = Some(aidaw_core::Cue {
+                beat: 16.0,
+                play: None,
+                id: 7,
+            });
+            p
+        };
+        let mut h = History::new(&song(100.0));
+        h.not_an_edit(|p| p.transport.cue = cued(0.0).transport.cue);
+        assert!(!h.notice(&cued(100.0), || None), "only the cue changed");
+        assert!(!h.can_undo());
+
+        // During a gesture: the step it makes doesn't bring the old cue back,
+        // and a gesture that changed nothing else is still no step.
+        let mut h = History::new(&song(100.0));
+        h.notice(&song(110.0), || None);
+        h.not_an_edit(|p| p.transport.cue = cued(0.0).transport.cue);
+        h.notice(&cued(100.0), || None);
+        h.end_gesture(&cued(100.0));
+        assert!(!h.can_undo());
     }
 
     #[test]

@@ -50,7 +50,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             let mut preview = None;
             for (i, track) in app.project.tracks.iter_mut().enumerate() {
                 let selected = app.selected_track.as_deref() == Some(track.id.as_str());
-                let color = track_color(i);
+                let color = track_color(track);
                 let (fill, stroke) = if selected {
                     (
                         theme::mix(theme::SURFACE, color, 0.14),
@@ -210,6 +210,11 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
         ui.horizontal(|ui| {
             ui.label(tr("Track name"));
             ui.add(egui::TextEdit::singleline(&mut track.name).desired_width(f32::INFINITY));
+        });
+        ui.horizontal(|ui| {
+            ui.label(tr("Colour"))
+                .on_hover_text(tr("The colour of this track's row and clips"));
+            color_swatches(ui, track);
         });
         ui.horizontal(|ui| {
             ui.label(tr("Reverb")).on_hover_text(tr(
@@ -470,5 +475,57 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
             }
             ui.weak(tr("Each row in the piano roll is a different drum: Kick, Snare, Clap, Hi-hats, Toms, cymbals and percussion (cowbell, shaker, congas...) are labelled on the keyboard."));
         }
+    }
+}
+
+/// The palette as little dots, the track's colour ringed; a click picks
+/// one. Returns whether the colour changed.
+pub fn color_swatches(ui: &mut egui::Ui, track: &mut aidaw_core::Track) -> bool {
+    use aidaw_core::color;
+    let current = track.rgb();
+    let custom = !color::PALETTE.iter().any(|(_, c)| *c == current);
+    let mut changed = false;
+    ui.spacing_mut().item_spacing.x = 3.0;
+    let swatches = custom
+        .then_some(("", current))
+        .into_iter()
+        .chain(color::PALETTE.iter().copied());
+    for (name, rgb) in swatches {
+        let (rect, resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), egui::Sense::click());
+        let fill = egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]);
+        let painter = ui.painter();
+        painter.circle_filled(rect.center(), 6.0, fill);
+        if rgb == current {
+            painter.circle_stroke(rect.center(), 8.0, egui::Stroke::new(1.5_f32, theme::TEXT));
+        } else if resp.hovered() {
+            painter.circle_stroke(
+                rect.center(),
+                8.0,
+                egui::Stroke::new(1.0_f32, theme::alpha(theme::TEXT, 120)),
+            );
+        }
+        let resp = resp
+            .on_hover_text(color_label(name))
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if resp.clicked() && !name.is_empty() && rgb != current {
+            // The colour the track would get anyway is stored as no choice.
+            track.color = (rgb != track.auto_rgb()).then(|| color::hex(rgb));
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn color_label(name: &str) -> &'static str {
+    match name {
+        "blue" => tr("Blue"),
+        "orange" => tr("Orange"),
+        "green" => tr("Green"),
+        "purple" => tr("Purple"),
+        "yellow" => tr("Yellow"),
+        "cyan" => tr("Cyan"),
+        "pink" => tr("Pink"),
+        "violet" => tr("Violet"),
+        _ => tr("This track's own colour (picked by the AI)"),
     }
 }

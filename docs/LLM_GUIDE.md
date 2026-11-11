@@ -26,7 +26,7 @@ still write notes for you: see [4. Plain chat](#4-plain-chat-paste-the-answer).
 | `add_chords` | Chord symbols, e.g. `"Am F C G"`, one per bar. Styles: block, arpeggio, pulse |
 | `add_drum_pattern` | Step strings, e.g. `{"kick": "x...x...x...x...", "snare": "....x.......x..."}` |
 | `add_melody` | Compact text, e.g. `"C4/1 D4/0.5 E4/0.5 r/1 G4/2"` (pitch/beats, `r` = rest) |
-| `add_track`, `update_track`, `remove_track` | Tracks, instruments, volume, pan, reverb, mute and solo, plus synth tweaks |
+| `add_track`, `update_track`, `remove_track` | Tracks, instruments, volume, pan, reverb, mute and solo, row order and colour, plus synth tweaks |
 | `add_clip`, `update_clip`, `remove_clip` | Clips (blocks of notes on a track) |
 | `add_notes`, `remove_notes`, `transpose_clip` | Note-level edits |
 | `update_project` | Name, tempo, time signature, master volume, reverb room |
@@ -34,6 +34,10 @@ still write notes for you: see [4. Plain chat](#4-plain-chat-paste-the-answer).
 | `copy_bars` | Copy bars to another place, repeated `times` times: turn a 4-bar loop into a song |
 | `quantize` | Snap note starts to a grid, with optional strength and swing |
 | `humanize` | Small random timing and velocity changes, so programmed parts sound played |
+| `split_clip` | Cut clips in two at a bar, so the parts can be moved, copied or removed on their own |
+| `set_loop` | Make the app repeat some bars (or a clip) while the human listens |
+| `set_playhead` | Put the app's playhead at a bar, and start or stop playback there |
+| `undo` | Take back your own last edit(s); never what the human changed in the app |
 | `analyze` | Listen to the mix: loudness, limiter, low/mid/high balance, each track alone, and tips |
 | `render_wav` | Render the song to a WAV file |
 
@@ -100,6 +104,37 @@ Tips:
 - **Each track alone** is each audible track soloed. A part more than 10 LU below the loudest
   one is hard to hear in the mix.
 - **Tips** appear only when something really stands out, each with a call that fixes it.
+
+## Cutting, ordering and showing the human
+
+**Cut a clip.** `split_clip {"clip": "c2", "bar": 5}` cuts clip c2 in two at the start of bar 5
+(`"bar": 5.5` is half way through it, `"beat"` takes an absolute beat instead). Notes that start
+before the cut stay, shortened to end there; the rest move to a new clip that starts at the cut
+and keeps the name. With `"track"` instead of `"clip"` it cuts that track's clips crossing the
+bar, with neither every clip crossing it.
+
+**Track order and colour.** `update_track {"track": "Bass", "position": 1, "color": "orange"}`
+moves Bass to the top row and colours it orange. Colours are names (blue, orange, green, purple,
+yellow, cyan, pink, violet, red, teal, white, gray), hex codes like `"#ff8a3d"`, or `"auto"` for
+the track's own colour. A track keeps its colour when other tracks are added, deleted or moved.
+
+**Point the human at your change.** While the AIDAW app has the song open:
+
+- `set_loop {"from_bar": 5, "bars": 4}` makes the app repeat bars 5-8; add `"play": true` to start
+  playing them at once. `{"clip": "Chorus"}` loops one clip, `{"on": false}` plays the whole song
+  again (the loop stays marked for later).
+- `set_playhead {"bar": 9}` moves the app's playhead to bar 9; `"play": true` also starts
+  playback there, `false` stops it. While a loop is on, Play starts inside the loop.
+
+Both are stored in the project file (its `transport` section) and picked up by the app within
+half a second. They never change the music: `render_wav` and `analyze` always play the whole song
+from the start, and `undo` leaves them alone.
+
+**Undo.** `undo` takes back the last edit made through these tools, `{"steps": 3}` the last
+three. The last 30 edits per song are kept on disk (in the user's app data folder), so this works
+across separate `aidaw-mcp call` runs too. If the human changed the song in the app after your
+edit, `undo` refuses and changes nothing rather than throw their work away: make a new edit
+instead. The human can undo anything, yours included, with `Ctrl+Z` in the app.
 
 ## Sounds
 

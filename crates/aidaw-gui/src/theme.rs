@@ -48,19 +48,12 @@ pub const OK: Color32 = rgb(0x4c, 0xe0, 0x9a);
 pub const EASY: Color32 = rgb(0x2e, 0xd5, 0x8e);
 pub const PRO: Color32 = rgb(0x8b, 0x6c, 0xff);
 
-pub const TRACK_COLORS: [Color32; 8] = [
-    rgb(0x5b, 0x8c, 0xff),
-    rgb(0xff, 0x8a, 0x3d),
-    rgb(0x3d, 0xdc, 0x97),
-    rgb(0xc8, 0x6b, 0xfa),
-    rgb(0xff, 0xd2, 0x3f),
-    rgb(0x2e, 0xd9, 0xff),
-    rgb(0xff, 0x5c, 0x8a),
-    rgb(0x9d, 0x8c, 0xff),
-];
-
-pub fn track_color(index: usize) -> Color32 {
-    TRACK_COLORS[index % TRACK_COLORS.len()]
+/// A track's colour: the one picked for it, or one that follows from its id
+/// (see [`aidaw_core::Track::rgb`]), so it stays with the track when tracks
+/// are added, deleted or moved.
+pub fn track_color(track: &aidaw_core::Track) -> Color32 {
+    let [r, g, b] = track.rgb();
+    rgb(r, g, b)
 }
 
 /// Linear mix of two colours (`t` = 0 → `a`, 1 → `b`), fully opaque.
