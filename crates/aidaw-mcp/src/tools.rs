@@ -796,6 +796,7 @@ fn type_name(ty: Ty) -> &'static str {
         Notes => "string or array",
         Drums => "object",
         Ops => "array",
+        Points => "string or array",
     }
 }
 

@@ -742,8 +742,9 @@ impl App {
             };
         }
         self.drag = None; // it held indexes into the old song
-                          // A selected automation point stays selected only while its lane
-                          // has as many points as before; otherwise its index names another.
+
+        // A selected automation point stays selected only while its lane
+        // has as many points as before; otherwise its index names another.
         let points = |p: &Project| {
             self.selected_point
                 .as_ref()
@@ -2676,5 +2677,54 @@ mod tests {
             "loaded in order"
         );
         assert_eq!(fs::read_to_string(&broken).unwrap(), "{ this is not a song");
+    }
+
+    #[test]
+    fn lanes_the_ai_writes_open_and_undo_never_selects_another_point() {
+        use aidaw_core::automation::{Lane, Param, Point};
+        let dir = TempDir::new("lanes");
+        let path = dir.0.join("song.aidaw.json");
+        let mine = song(&[(60, 0.0)]);
+        pio::save(&mine, &path).unwrap();
+        let mut a = app(mine.clone(), Some(path.clone()));
+        let ctx = egui::Context::default();
+
+        // The AI fades the keys in over the first bar.
+        let mut theirs = mine.clone();
+        let mut fade = Lane::new(Param::Volume);
+        fade.points = vec![Point::new(0.0, 0.0), Point::new(4.0, 0.8)];
+        theirs.tracks[0].automation.push(fade);
+        write_later(&path, &serde_json::to_string(&theirs).unwrap());
+        poll_now(&mut a);
+        assert!(a.lanes_open.contains("t1"), "the AI's lane opens by itself");
+        assert!(!a.lanes_open.contains("t2") && !a.master_lanes_open);
+
+        // A click on the line adds a point between the two and selects it.
+        let lane = LaneKey::new(Some("t1"), Param::Volume);
+        let points = |a: &App| lane.lane(&a.project).map_or(0, |l| l.points.len());
+        frame(&mut a, &ctx, vec![button(false)], |a, _| {
+            let i = crate::lanes::add_point(a, &lane, 2.0, 0.4).unwrap();
+            a.selected_point = Some((lane.clone(), i));
+            a.edit_focus = EditFocus::Automation;
+        });
+        assert_eq!(a.selected_point, Some((lane.clone(), 1)));
+        // Index 1 is the AI's last point again after undo: not the one picked.
+        a.undo();
+        assert_eq!((points(&a), a.selected_point.clone()), (2, None));
+        a.redo();
+        assert_eq!(points(&a), 3);
+
+        // Delete takes the selected point, and Ctrl+Z brings it back.
+        frame(&mut a, &ctx, vec![button(false)], |a, _| {
+            a.selected_point = Some((lane.clone(), 0));
+        });
+        frame(&mut a, &ctx, vec![key(Key::Delete)], |a, ctx| {
+            a.edit_shortcuts(ctx)
+        });
+        assert_eq!((points(&a), a.selected_point.clone()), (2, None));
+        assert_eq!(lane.lane(&a.project).unwrap().points[0].beat, 2.0);
+        a.undo();
+        assert_eq!(points(&a), 3);
+        assert_eq!(lane.value_at(&a.project, 0.0), Some(0.0));
     }
 }
