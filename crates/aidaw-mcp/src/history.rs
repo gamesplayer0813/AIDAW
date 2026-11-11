@@ -55,10 +55,12 @@ fn fnv(bytes: &[u8]) -> u64 {
 }
 
 /// A short fingerprint of the music (the loop region and playhead requests
-/// left out: undo neither restores nor minds them).
+/// left out: undo neither restores nor minds them). Notes count in playing
+/// order, the order the file is read in.
 fn fingerprint(p: &Project) -> String {
     let mut music = p.clone();
     music.transport = Default::default();
+    music.sort_notes();
     let json = serde_json::to_vec(&music).unwrap_or_default();
     format!("{:016x}-{}", fnv(&json), json.len())
 }

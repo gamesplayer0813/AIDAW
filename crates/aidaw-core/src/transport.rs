@@ -84,14 +84,21 @@ impl Project {
     }
 
     /// Whether both versions hold the same music, whatever their loop
-    /// regions and playhead requests are.
+    /// regions and playhead requests are, and in whatever order their notes
+    /// are listed (an editor may hold them out of order for a moment).
     pub fn same_music(&self, other: &Project) -> bool {
-        if self.transport == other.transport {
-            return self == other;
+        if self.transport == other.transport && self == other {
+            return true;
         }
         let mut a = self.clone();
         a.transport = other.transport.clone();
-        a == *other
+        if a == *other || (a.notes_sorted() && other.notes_sorted()) {
+            return a == *other;
+        }
+        let mut b = other.clone();
+        a.sort_notes();
+        b.sort_notes();
+        a == b
     }
 }
 
@@ -182,6 +189,26 @@ mod tests {
         assert!(a.same_music(&b) && b.same_music(&a));
         assert_ne!(a, b);
         b.bpm = 90.0;
+        assert!(!a.same_music(&b));
+    }
+
+    #[test]
+    fn same_music_ignores_the_order_of_the_notes() {
+        let mut a = Project::new("x", 120.0);
+        let ops = serde_json::from_value(serde_json::json!([
+            {"op": "add_track", "name": "Keys"},
+            {"op": "add_clip", "track_id": "t1", "start": 0, "length": 4, "notes": [
+                {"pitch": 60, "start": 0, "duration": 1},
+                {"pitch": 62, "start": 1, "duration": 1},
+                {"pitch": 64, "start": 2, "duration": 1}]}
+        ]))
+        .unwrap();
+        crate::edit::apply_all(&mut a, ops).unwrap();
+        let mut b = a.clone();
+        b.tracks[0].clips[0].notes.swap(0, 2);
+        assert_ne!(a, b);
+        assert!(a.same_music(&b) && b.same_music(&a));
+        b.tracks[0].clips[0].notes[0].velocity = 90;
         assert!(!a.same_music(&b));
     }
 }
