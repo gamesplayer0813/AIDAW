@@ -77,6 +77,7 @@ pub trait Rack: Send {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::automation::{Param, Point};
     use crate::edit::{apply_all, Op};
     use crate::model::{Instrument, Note, PluginRef, Project};
     use crate::render::{self, Sequencer};
@@ -273,6 +274,41 @@ mod tests {
         p.tracks[1].mute = true;
         let out = run(&mut seq, &p, &mut rack, 2048);
         assert!(out[1000..].iter().all(|s| s.abs() < 1e-6));
+    }
+
+    #[test]
+    fn automation_moves_a_plugin_tracks_volume_but_not_its_sound() {
+        let mut p = song(vec![note(60, 0.0, 8.0)]);
+        // The volume fades from unity to silence over the first two beats.
+        let fade = Op::SetAutomation {
+            track_id: Some("t2".into()),
+            param: Param::Volume,
+            points: vec![Point::new(0.0, 1.0), Point::new(2.0, 0.0)],
+        };
+        apply_all(&mut p, vec![fade]).unwrap();
+        let mut rack = FakeRack::new(vec![(None, false), (Some(1), false)]);
+        let mut seq = Sequencer::new(SR);
+        let out = run(&mut seq, &p, &mut rack, 3 * FRAMES_PER_BEAT as usize);
+        let at = |beat: f64| out[(beat * FRAMES_PER_BEAT as f64) as usize * 2];
+        // The bus (0.25 for the held note) follows the lane like a fader.
+        let lane = &p.tracks[1].automation[0];
+        for beat in [0.25, 0.5, 1.0, 1.5] {
+            let want = 0.25 * lane.value_at(beat).unwrap() * p.master_gain;
+            assert!((at(beat) - want).abs() < 0.005, "beat {beat}: {}", at(beat));
+        }
+        assert!(at(2.5).abs() < 1e-6, "{}", at(2.5));
+
+        // The plugin makes its own sound: the synth's settings are not its.
+        let cutoff = Op::SetAutomation {
+            track_id: Some("t2".into()),
+            param: Param::Cutoff,
+            points: vec![Point::new(0.0, 500.0)],
+        };
+        let err = apply_all(&mut p, vec![cutoff]).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("plays the plugin Fake"),
+            "{err:#}"
+        );
     }
 
     #[test]

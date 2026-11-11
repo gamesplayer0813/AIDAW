@@ -7,6 +7,7 @@ mod history;
 mod i18n;
 mod icons;
 mod inspector;
+mod lanes;
 mod mode;
 mod onboarding;
 mod piano_roll;

@@ -21,7 +21,7 @@ still write notes for you: see [4. Plain chat](#4-plain-chat-paste-the-answer).
 |---|---|
 | `help` | Cheat sheet: time, pitch, notations, and a complete quick-start song |
 | `new_project` / `open_project` | Create or open a project file |
-| `get_project` | Overview of tracks and clips; `detail: "notes"` lists every note, `"json"` gives the raw file |
+| `get_project` | Overview of tracks, clips and automation; `detail: "notes"` lists every note and automation point, `"json"` gives the raw file |
 | `list_presets` | The 78 instrument presets, grouped by category (see [Sounds](#sounds)); `{"category": "bass"}` lists one group |
 | `add_chords` | Chord symbols, e.g. `"Am F C G"`, one per bar. Styles: block, arpeggio, pulse |
 | `add_drum_pattern` | Step strings, e.g. `{"kick": "x...x...x...x...", "snare": "....x.......x..."}` |
@@ -38,6 +38,7 @@ still write notes for you: see [4. Plain chat](#4-plain-chat-paste-the-answer).
 | `set_loop` | Make the app repeat some bars (or a clip) while the human listens |
 | `set_playhead` | Put the app's playhead at a bar, and start or stop playback there |
 | `undo` | Take back your own last edit(s); never what the human changed in the app |
+| `automate` | Make a setting move over time: fades, filter sweeps, pan moves, reverb swells, a song fade-out; repeat, scale or clear the points |
 | `list_plugins` | The VST®3 instruments and effects installed on this computer |
 | `add_effect`, `update_effect`, `remove_effect` | A track's effect plugins: add, switch off or on, reorder, remove |
 | `plugin_params`, `set_plugin_params` | Read and turn a plugin's knobs by name, with values like `"800 Hz"` or `"-6 dB"` |
@@ -142,6 +143,64 @@ across separate `aidaw-mcp call` runs too. If the human changed the song in the 
 edit, `undo` refuses and changes nothing rather than throw their work away: make a new edit
 instead. The human can undo anything, yours included, with `Ctrl+Z` in the app.
 
+## Automation
+
+`automate` draws a line that a setting follows over time. Give a `param` and `points`, each a
+bar and a value; between points the value glides, before the first point and after the last it
+stays put.
+
+```
+automate {"track": "Pad", "param": "cutoff", "points": [{"bar": 1, "value": 300}, {"bar": 9, "value": 8000}]}
+```
+
+opens the pad's filter over 8 bars. Points can also be written as text, `"1:300 9:8000"`
+(`BAR:VALUE`, optionally `:SHAPE`), or as pairs, `[[1, 300], [9, 8000]]`. Bars may be fractional
+(`1.5` is half way through bar 1 in 4/4), or a point can give `beat` instead of `bar`.
+
+| `param` | On | Values |
+|---|---|---|
+| `volume` | any track | 0-2 like `update_track`'s `gain` (0.8 default, 1 unity); `"-6dB"` works too |
+| `pan` | any track | -1 left .. 0 centre .. 1 right |
+| `reverb` | any track | 0-1, the send to the shared reverb |
+| `cutoff` | synth tracks | Hz, 20-20000; it glides evenly in pitch, so 200 -> 3200 passes 800 half way |
+| `resonance`, `drive`, `sub`, `noise` | synth tracks | 0-1 |
+| `fm` | synth tracks | 0-10; only sine and triangle waves have FM |
+| `vibrato` | synth tracks | depth in cents, 0-100 |
+| `master_volume` | the song (no `track`) | 0-2 like `update_project`'s `master_gain` |
+| `reverb_size`, `reverb_tone` | the song (no `track`) | 0-1, the shared reverb room |
+
+- **Shapes.** Each point says how the value moves on to the next one: `linear` (the default),
+  `smooth` (eased in and out) or `hold` (stays, then jumps at the next point). Set one for all
+  points with `"shape"`, or per point. Two points on the same bar make a jump.
+- **Replacing.** New points replace what the lane had between the first and the last of them;
+  points outside that range stay.
+- **Fixed values.** While a setting has points, its fixed value (`update_track` `gain`, a synth's
+  `cutoff`, `update_project` `master_gain` ...) is not heard. Changing it then warns you; clear
+  the lane to go back to it.
+- **Repeats.** `"every_bars": 1` repeats the points every bar until the end of the song, `"times"`
+  limits the copies. Copies may touch but not overlap.
+- **Scaling.** `{"track": "Pad", "param": "volume", "scale": 0.5}` multiplies a lane's values
+  (about -6 dB for volume); `from_bar`/`to_bar` limit it. `analyze` suggests this when an
+  automated track is too loud.
+- **Clearing.** `{"track": "Pad", "param": "cutoff", "clear": true}` removes a lane;
+  `from_bar`/`to_bar` clear part of it, and `"param": "all"` clears every lane of a track (or,
+  without a track, of the song).
+- `automate` works inside `apply_ops` too: `{"op": "automate", "track": "Pad", "param": "cutoff",
+  "points": "1:300 9:8000"}`.
+- `copy_bars` copies notes only; repeat automation with `every_bars`.
+
+Recipes:
+
+```
+Fade the song out:  automate {"param": "master_volume", "points": "29:1 33:0"}
+Build-up riser:     automate {"track": "Lead", "param": "cutoff", "points": "13:400 17:12000", "shape": "smooth"}
+Side-chain pump:    automate {"track": "Pad", "param": "volume", "points": "1:0.2 1.1:0.8 1.25:0.8 1.25:0.2", "every_bars": 0.25}
+Auto-pan:           automate {"track": "Keys", "param": "pan", "points": "1:-0.7 2:0.7 3:-0.7", "shape": "smooth", "every_bars": 2}
+```
+
+In the AIDAW app the lanes open under their tracks, so the human sees what you wrote and can
+drag the points.
+
 ## Plugins
 
 AIDAW hosts VST3 instruments and effects that are installed on the computer (VST is a
@@ -184,6 +243,10 @@ settings, never the plugin itself. Knobs you set are stored as overrides on top 
 settings; when the human opens the plugin's window in the app and changes something, the app
 saves the plugin's settings again. `get_project` shows plugin tracks and effect chains;
 `detail: "json"` leaves the settings out (they are binary).
+
+**Automation.** `automate` moves a plugin track's `volume`, `pan` and `reverb` like any track's.
+The synth settings (`cutoff`, `drive` ...) belong to the built-in synth, and a plugin's own knobs
+can't be automated yet.
 
 **When a plugin is missing.** A song made on another computer can name plugins that are not
 installed here. Their tracks are silent (a missing effect is skipped), and `render_wav` and

@@ -16,7 +16,13 @@
 //!   pause) picks that note up part-way through, fading it in, instead of
 //!   staying silent until the next note starts.
 //! - Track gain, pan and mute/solo changes are ramped per block (no zipper
-//!   noise or clicks).
+//!   noise or clicks), and so is the master volume.
+//! - Automation (see [`crate::automation`]) moves track volume, pan and
+//!   reverb send per block, and the synth settings of sounding notes every
+//!   [`CONTROL_FRAMES`] frames, gliding within each block, so filter sweeps
+//!   and fades are smooth. A synth track whose filter is automated always
+//!   uses the state-variable filter, so its notes never switch filters
+//!   mid-way.
 //! - Tracks send to one shared stereo reverb (Freeverb-style: damped combs
 //!   into all-passes) with a high-passed input, so basses don't muddy it.
 //!   It sleeps, costing nothing, once its tail has died away.
@@ -39,7 +45,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::model::{DrumKit, Instrument, Project, Reverb, Synth, Waveform};
+use crate::automation::{self, Param};
+use crate::model::{DrumKit, Instrument, Project, Reverb, Synth, Track, Waveform};
 use crate::pitch;
 use crate::rack::{NoteEvent, Rack, Transport};
 
@@ -88,6 +95,27 @@ const REVERB_OUT: f32 = 1.0;
 const REVERB_HP_HZ: f32 = 150.0;
 /// Below this output level the reverb tail counts as gone.
 const REVERB_SILENCE: f32 = 1e-5;
+
+/// Synth notes pick up automated settings this often, in frames.
+const CONTROL_FRAMES: usize = 16;
+/// The synth settings automation can move, in the order of [`SynthMod`]'s
+/// arrays.
+const MOD_PARAMS: [Param; 7] = [
+    Param::Cutoff,
+    Param::Resonance,
+    Param::Drive,
+    Param::Fm,
+    Param::Vibrato,
+    Param::Sub,
+    Param::Noise,
+];
+const MOD_CUTOFF: usize = 0;
+const MOD_RESONANCE: usize = 1;
+const MOD_DRIVE: usize = 2;
+const MOD_FM: usize = 3;
+const MOD_VIBRATO: usize = 4;
+const MOD_SUB: usize = 5;
+const MOD_NOISE: usize = 6;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Drum {
@@ -457,6 +485,10 @@ struct SynthVoice {
     k: f32,
     g: f32,
     cutoff: f32,
+    /// The cutoff and resonance as set (before the SVF's corrections), for
+    /// automation that moves only one of them.
+    base_cutoff: f32,
+    resonance: f32,
     filter_env: f32,
     filter_decay: f32,
     unison: usize,
@@ -479,13 +511,6 @@ impl SynthVoice {
         let cutoff = finite_or(p.cutoff, 20_000.0).clamp(20.0, 20_000.0);
         let resonance = finite_or(p.resonance, 0.0).clamp(0.0, 1.0);
         let filter_env = finite_or(p.filter_env, 0.0).clamp(0.0, 8.0);
-        // Two cascaded one-poles are -3 dB at ~0.644x their corner,
-        // so shift the corner up to keep the cutoff where users set it.
-        let lp_coef = one_pole_coef(cutoff / 0.6436, sr);
-        // The SVF at zero resonance is that same two-pole response; as the
-        // resonance rises the peak should sit right at the cutoff.
-        let svf_cutoff = cutoff * (1.0 / 0.6436f32).powf(1.0 - resonance.min(0.5) * 2.0);
-        let k = 2.0 - 1.9 * resonance;
         let auto_unison = p.unison.is_none() && p.detune.is_none() && p.waveform == Waveform::Saw;
         let detune = finite_or(p.detune.unwrap_or(14.0), 0.0).clamp(0.0, 100.0);
         let unison = match p.unison {
@@ -508,17 +533,19 @@ impl SynthVoice {
             2 => 0.62,
             n => 0.88 / (n as f32).sqrt(),
         };
-        SynthVoice {
+        let mut sv = SynthVoice {
             waveform: p.waveform,
             attack: finite_or(p.attack, 0.0).max(0.001),
             decay: finite_or(p.decay, 0.0).max(0.001),
             sustain: finite_or(p.sustain, 1.0).clamp(0.0, 1.0),
             release: finite_or(p.release, 0.0).max(0.005),
-            lp_coef,
+            lp_coef: 0.0,
             svf: resonance > 0.0 || filter_env > 0.0,
-            k,
-            g: svf_g(svf_cutoff, sr),
-            cutoff: svf_cutoff,
+            k: 0.0,
+            g: 0.0,
+            cutoff,
+            base_cutoff: cutoff,
+            resonance,
             filter_env,
             filter_decay: finite_or(p.filter_decay, 0.3).max(0.001),
             unison,
@@ -534,8 +561,129 @@ impl SynthVoice {
             pitch_env: finite_or(p.pitch_env, 0.0).clamp(-48.0, 48.0),
             pitch_decay: finite_or(p.pitch_decay, 0.05).max(0.001),
             drive: finite_or(p.drive, 0.0).clamp(0.0, 1.0),
+        };
+        sv.set_cascade(cutoff, sr);
+        sv.set_svf(cutoff, resonance, sr);
+        sv
+    }
+
+    /// Two cascaded one-poles are -3 dB at ~0.644x their corner, so shift
+    /// the corner up to keep the cutoff where users set it.
+    fn set_cascade(&mut self, cutoff: f32, sr: f32) {
+        self.lp_coef = one_pole_coef(cutoff / 0.6436, sr);
+    }
+
+    /// The SVF at zero resonance is that same two-pole response; as the
+    /// resonance rises the peak should sit right at the cutoff.
+    fn set_svf(&mut self, cutoff: f32, resonance: f32, sr: f32) {
+        let svf_cutoff = cutoff * (1.0 / 0.6436f32).powf(1.0 - resonance.min(0.5) * 2.0);
+        self.k = 2.0 - 1.9 * resonance;
+        self.cutoff = svf_cutoff;
+        self.g = svf_g(svf_cutoff, sr);
+    }
+
+    /// Move the automated settings to where `m` has them `frame` frames into
+    /// the block.
+    fn follow(&mut self, m: &SynthMod, frame: f32, sr: f32) {
+        let on = |i: usize| m.mask & (1 << i) != 0;
+        let at = |i: usize| m.start[i] + m.step[i] * frame;
+        if on(MOD_CUTOFF) || on(MOD_RESONANCE) {
+            let cutoff = if on(MOD_CUTOFF) {
+                finite_or(at(MOD_CUTOFF).exp2(), 20_000.0).clamp(20.0, 20_000.0)
+            } else {
+                self.base_cutoff
+            };
+            if self.svf {
+                let resonance = if on(MOD_RESONANCE) {
+                    finite_or(at(MOD_RESONANCE), 0.0).clamp(0.0, 1.0)
+                } else {
+                    self.resonance
+                };
+                self.set_svf(cutoff, resonance, sr);
+            } else {
+                // Started before the filter was automated: it keeps its
+                // plain filter (and no resonance) until the next note.
+                self.set_cascade(cutoff, sr);
+            }
+        }
+        let level = |i: usize, max: f32| finite_or(at(i), 0.0).clamp(0.0, max);
+        if on(MOD_DRIVE) {
+            self.drive = level(MOD_DRIVE, 1.0);
+        }
+        if on(MOD_FM) {
+            self.fm = level(MOD_FM, 10.0);
+        }
+        if on(MOD_VIBRATO) {
+            self.vibrato = level(MOD_VIBRATO, 200.0);
+        }
+        if on(MOD_SUB) {
+            self.sub = level(MOD_SUB, 1.0);
+        }
+        if on(MOD_NOISE) {
+            self.noise = level(MOD_NOISE, 1.0);
         }
     }
+}
+
+/// Where automation has a synth's settings during one block: the value at
+/// the start (the cutoff as log2 of Hz, so it glides in octaves) and the
+/// change per frame.
+#[derive(Clone, Copy, Default)]
+struct SynthMod {
+    /// Bit `i` set: [`MOD_PARAMS`]`[i]` is automated.
+    mask: u8,
+    start: [f32; MOD_PARAMS.len()],
+    step: [f32; MOD_PARAMS.len()],
+}
+
+/// What automation does to one track during one block.
+#[derive(Clone, Copy, Default)]
+struct TrackAuto {
+    /// Volume, pan and reverb send at the end of the block, where automated.
+    mix: [Option<f32>; 3],
+    synth: SynthMod,
+}
+
+impl TrackAuto {
+    /// The track's automation from beat `b0` to `b1`, `frames` frames later.
+    /// Like [`automation::find`], the first lane of a setting with points
+    /// counts (a hand-edited file could have two).
+    fn of(track: &Track, b0: f64, b1: f64, frames: usize) -> TrackAuto {
+        let mut out = TrackAuto::default();
+        for lane in &track.automation {
+            let (Some(v0), Some(v1)) = (lane.value_at(b0), lane.value_at(b1)) else {
+                continue;
+            };
+            match lane.param {
+                Param::Volume => _ = out.mix[0].get_or_insert(v1),
+                Param::Pan => _ = out.mix[1].get_or_insert(v1),
+                Param::Reverb => _ = out.mix[2].get_or_insert(v1),
+                p => {
+                    let Some(i) = MOD_PARAMS.iter().position(|m| *m == p) else {
+                        continue;
+                    };
+                    if out.synth.mask & (1 << i) != 0 {
+                        continue;
+                    }
+                    let (v0, v1) = if i == MOD_CUTOFF {
+                        (v0.max(1.0).log2(), v1.max(1.0).log2())
+                    } else {
+                        (v0, v1)
+                    };
+                    out.synth.mask |= 1 << i;
+                    out.synth.start[i] = v0;
+                    out.synth.step[i] = (v1 - v0) / frames.max(1) as f32;
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Whether the track's filter cutoff or resonance is automated.
+fn filter_moves(track: &Track) -> bool {
+    automation::find(&track.automation, Param::Cutoff).is_some()
+        || automation::find(&track.automation, Param::Resonance).is_some()
 }
 
 /// `g` coefficient of the TPT state-variable filter.
@@ -588,6 +736,8 @@ struct Voice {
     fade_in: f32,
     /// Start fading this many frames into the current block (hi-hat choke).
     fade_at: Option<u32>,
+    /// Automation has set this synth note's settings at least once.
+    followed: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -679,11 +829,14 @@ impl PluginNote {
     }
 }
 
-/// Advance `voice` by one frame: its sample (0 while it waits to start), or
-/// `None` once it is done.
+/// Advance `voice` by one frame, `frame` frames into the block: its sample
+/// (0 while it waits to start), or `None` once it is done. A synth note
+/// takes its track's automated settings from `follow`.
 #[inline]
 fn tick(
     voice: &mut Voice,
+    frame: usize,
+    follow: Option<&SynthMod>,
     sr: f32,
     rng: &mut u32,
     fade_step: f32,
@@ -703,6 +856,12 @@ fn tick(
     if voice.delay > 0 {
         voice.delay -= 1;
         return Some(0.0);
+    }
+    if let (Some(m), Kind::Synth(sv)) = (follow, &mut voice.kind) {
+        if frame.is_multiple_of(CONTROL_FRAMES) || !voice.followed {
+            sv.follow(m, frame as f32, sr);
+            voice.followed = true;
+        }
     }
     let mut s = voice.next(sr, rng);
     if voice.fade_in < 1.0 {
@@ -751,6 +910,11 @@ pub struct Sequencer {
     /// Clip notes started so far (tests check that none is missed).
     #[cfg(test)]
     notes_started: usize,
+    /// Each track's automation in the current block.
+    auto: Vec<TrackAuto>,
+    /// Master volume reached at the end of the previous block (NaN before
+    /// the first block).
+    master: f32,
 }
 
 impl Sequencer {
@@ -775,6 +939,8 @@ impl Sequencer {
             cycle: None,
             #[cfg(test)]
             notes_started: 0,
+            auto: Vec::with_capacity(RESERVED_TRACKS),
+            master: f32::NAN,
         }
     }
 
@@ -943,7 +1109,7 @@ impl Sequencer {
             return;
         };
         let gate = (self.sample_rate * 0.35) as u64;
-        self.spawn(track, &t.instrument, pitch_, 100, 0, gate);
+        self.spawn(track, t, pitch_, 100, 0, gate);
     }
 
     /// Start a preview note that keeps sounding until [`Self::release_held`]
@@ -953,7 +1119,7 @@ impl Sequencer {
         let Some(t) = project.tracks.get(track) else {
             return;
         };
-        if self.spawn(track, &t.instrument, pitch_, 100, 0, u64::MAX) {
+        if self.spawn(track, t, pitch_, 100, 0, u64::MAX) {
             if let Some(n) = self.plugin_notes.last_mut() {
                 n.held = true;
             }
@@ -1011,9 +1177,19 @@ impl Sequencer {
         let send = &mut self.send[..frames];
         send.fill(0.0);
 
+        // Automation follows the playhead, also while stopped (previews
+        // sound the way the song does there).
+        let (a0, a1) = (b0, if advance { b1 } else { b0 });
+        let n_tracks = project.tracks.len();
+        if self.auto.len() < n_tracks {
+            self.auto.resize(n_tracks, TrackAuto::default());
+        }
+        for (a, t) in self.auto.iter_mut().zip(&project.tracks) {
+            *a = TrackAuto::of(t, a0, a1, frames);
+        }
+
         // Per-track gain targets; new tracks start at their target (no fade-in).
         let any_solo = project.any_solo();
-        let n_tracks = project.tracks.len();
         let old_len = self.gains.len();
         if old_len < n_tracks {
             self.gains.resize(n_tracks, TrackGain::default());
@@ -1024,9 +1200,9 @@ impl Sequencer {
         let fade_in_step = 1.0 / (CHASE_FADE_SECONDS * sr);
         // Gains of track `i` across this block: where they start, and the
         // step per frame towards where they end.
-        let gains = &self.gains;
-        let ramp = |i: usize, track: &crate::model::Track| {
-            let target = track_gains(track, any_solo);
+        let (gains, autos) = (&self.gains, &self.auto);
+        let ramp = |i: usize, track: &Track| {
+            let target = track_gains(track, any_solo, autos[i].mix);
             let from = if i >= old_len { target } else { gains[i].cur };
             let step = [
                 (target[0] - from[0]) * inv_frames,
@@ -1054,6 +1230,9 @@ impl Sequencer {
                 continue;
             };
             let noise = &mut self.noise;
+            // Synth notes follow their track's automated settings.
+            let auto = &autos[voice.track].synth;
+            let follow = (auto.mask != 0).then_some(auto);
             // On a track with plugins the voice goes into the track's bus;
             // its gains are applied when the bus is mixed.
             if let Some([l, r]) = rack
@@ -1062,7 +1241,8 @@ impl Sequencer {
                 .and_then(|r| r.bus(voice.track))
             {
                 for frame in 0..frames {
-                    let Some(s) = tick(voice, sr, noise, fade_step, fade_in_step) else {
+                    let Some(s) = tick(voice, frame, follow, sr, noise, fade_step, fade_in_step)
+                    else {
                         break;
                     };
                     l[frame] += s;
@@ -1072,7 +1252,7 @@ impl Sequencer {
             }
             let (from, step, silent) = ramp(voice.track, track);
             for frame in 0..frames {
-                let Some(s) = tick(voice, sr, noise, fade_step, fade_in_step) else {
+                let Some(s) = tick(voice, frame, follow, sr, noise, fade_step, fade_in_step) else {
                     break;
                 };
                 if !silent {
@@ -1145,21 +1325,36 @@ impl Sequencer {
         }
         self.clock += frames as u64;
 
-        for (g, t) in self.gains.iter_mut().zip(&project.tracks) {
-            g.cur = track_gains(t, any_solo);
+        for ((g, t), a) in self.gains.iter_mut().zip(&project.tracks).zip(&self.auto) {
+            g.cur = track_gains(t, any_solo, a.mix);
         }
 
-        self.room.process(&project.reverb, send, out);
-
-        // Master: gain -> peak limiter -> soft clipper.
-        let master = if project.master_gain.is_finite() {
-            project.master_gain.max(0.0)
-        } else {
-            0.0
+        let room = Reverb {
+            size: project
+                .automated(Param::ReverbSize, a1)
+                .unwrap_or(project.reverb.size),
+            tone: project
+                .automated(Param::ReverbTone, a1)
+                .unwrap_or(project.reverb.tone),
         };
-        for f in out.as_chunks_mut::<2>().0 {
-            let mut l = f[0] * master;
-            let mut r = f[1] * master;
+        self.room.process(&room, send, out);
+
+        // Master: gain (ramped from the last block's) -> peak limiter -> soft clipper.
+        let master = project
+            .automated(Param::MasterVolume, a1)
+            .unwrap_or(project.master_gain);
+        let master = finite_or(master, 0.0).max(0.0);
+        let master_from = if self.master.is_nan() {
+            master
+        } else {
+            self.master
+        };
+        let master_step = (master - master_from) * inv_frames;
+        self.master = master;
+        for (k, f) in out.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+            let gain = master_from + master_step * k as f32;
+            let mut l = f[0] * gain;
+            let mut r = f[1] * gain;
             if !l.is_finite() || !r.is_finite() {
                 l = 0.0;
                 r = 0.0;
@@ -1213,7 +1408,7 @@ impl Sequencer {
                     let gate = (held * frames_per_beat).max(1.0) as u64;
                     let age = ((beat - at) * frames_per_beat) as u64;
                     let plugin_notes = self.plugin_notes.len();
-                    if self.spawn(ti, &track.instrument, note.pitch, note.velocity, 0, gate) {
+                    if self.spawn(ti, track, note.pitch, note.velocity, 0, gate) {
                         // A plugin starts the note now, for what is left of
                         // it (unless all its note slots are taken).
                         if self.plugin_notes.len() > plugin_notes {
@@ -1255,32 +1450,25 @@ impl Sequencer {
                     let held = note.duration.min(clip.length - note.start);
                     let delay = ((at - b0) * frames_per_beat) as u32;
                     let gate = (held * frames_per_beat).max(1.0) as u64;
-                    self.spawn(
-                        ti,
-                        &track.instrument,
-                        note.pitch,
-                        note.velocity,
-                        delay,
-                        gate,
-                    );
+                    self.spawn(ti, track, note.pitch, note.velocity, delay, gate);
                 }
             }
         }
     }
 
-    /// Start a note on `inst`: a voice of a built-in instrument, or (returns
-    /// true) a note on a plugin instrument.
+    /// Start a note on track `t`: a voice of a built-in instrument, or
+    /// (returns true) a note on a plugin instrument.
     fn spawn(
         &mut self,
         track: usize,
-        inst: &Instrument,
+        t: &Track,
         pitch_: u8,
         vel: u8,
         delay: u32,
         gate: u64,
     ) -> bool {
         let sr = self.sample_rate;
-        let kind = match inst {
+        let kind = match &t.instrument {
             Instrument::Vst3(_) => {
                 if self.plugin_notes.len() < MAX_PLUGIN_NOTES {
                     self.next_note_id = self.next_note_id.wrapping_add(1) & i32::MAX;
@@ -1302,7 +1490,11 @@ impl Sequencer {
                 }
                 return true;
             }
-            Instrument::Synth(p) => Kind::Synth(SynthVoice::new(p, sr)),
+            Instrument::Synth(p) => {
+                let mut sv = SynthVoice::new(p, sr);
+                sv.svf |= filter_moves(t);
+                Kind::Synth(sv)
+            }
             Instrument::Drums { kit } => {
                 let kit = kit_params(*kit);
                 let drum = Drum::from_note(pitch_, kit);
@@ -1367,6 +1559,7 @@ impl Sequencer {
             fading: false,
             fade_in: 1.0,
             fade_at: None,
+            followed: false,
         });
         false
     }
@@ -1417,17 +1610,18 @@ fn sort_events(events: &mut [NoteEvent]) {
 
 /// Target gains of a track: (left, right) with equal-power pan, and its
 /// reverb send, which follows the volume but not the pan. All 0 when the
-/// track is muted or another one is soloed.
-fn track_gains(t: &crate::model::Track, any_solo: bool) -> [f32; 3] {
+/// track is muted or another one is soloed. `auto` holds automated volume,
+/// pan and send, which win over the track's own settings.
+fn track_gains(t: &Track, any_solo: bool, auto: [Option<f32>; 3]) -> [f32; 3] {
     let audible = !t.mute && (!any_solo || t.solo);
     if !audible {
         return [0.0; 3];
     }
-    let pan = finite_or(t.pan, 0.0).clamp(-1.0, 1.0);
+    let pan = finite_or(auto[1].unwrap_or(t.pan), 0.0).clamp(-1.0, 1.0);
     let angle = (pan + 1.0) * PI / 4.0;
-    let gain = finite_or(t.gain, 0.0).max(0.0);
+    let gain = finite_or(auto[0].unwrap_or(t.gain), 0.0).max(0.0);
     let g = gain * std::f32::consts::SQRT_2;
-    let send = gain * finite_or(t.reverb, 0.0).clamp(0.0, 1.0);
+    let send = gain * finite_or(auto[2].unwrap_or(t.reverb), 0.0).clamp(0.0, 1.0);
     [angle.cos() * g, angle.sin() * g, send]
 }
 
@@ -1805,7 +1999,14 @@ impl Voice {
         };
         if sv.drive > 0.0 {
             let g = 1.0 + 5.0 * sv.drive;
-            y = (y * g).tanh() / g.tanh();
+            let shaped = (y * g).tanh() / g.tanh();
+            // Below 0.1 the drive fades in from the clean sound, so turning
+            // it up from 0 (by hand or automation) never jumps.
+            y = if sv.drive >= 0.1 {
+                shaped
+            } else {
+                y + (shaped - y) * sv.drive * 10.0
+            };
         }
         y * self.env * 0.3
     }
@@ -1973,12 +2174,24 @@ impl Voice {
 /// Seconds rendered after the last clip: [`RENDER_TAIL_SECONDS`] for note
 /// releases, plus the reverb's ring-out when an audible track uses it.
 pub fn tail_seconds(project: &Project) -> f64 {
+    let sends = |t: &Track| match automation::find(&t.automation, Param::Reverb) {
+        Some(lane) => lane.range().is_some_and(|(_, most)| most > 0.0),
+        None => t.reverb > 0.0,
+    };
     let reverb = project
         .tracks
         .iter()
-        .any(|t| t.reverb > 0.0 && project.track_audible(t));
+        .any(|t| sends(t) && project.track_audible(t));
     if reverb {
-        RENDER_TAIL_SECONDS + reverb_tail_seconds(&project.reverb)
+        // The room as it is when the song ends is the one that rings out.
+        let end = project.length_beats();
+        let room = Reverb {
+            size: project
+                .automated(Param::ReverbSize, end)
+                .unwrap_or(project.reverb.size),
+            ..project.reverb
+        };
+        RENDER_TAIL_SECONDS + reverb_tail_seconds(&room)
     } else {
         RENDER_TAIL_SECONDS
     }
@@ -2659,5 +2872,254 @@ mod tests {
         for kit in &DrumKit::ALL[1..] {
             assert_ne!(render_kit(&mut p, *kit), base, "{kit:?}");
         }
+    }
+
+    // ---- automation ----
+
+    fn lane(param: Param, points: &[(f64, f32)]) -> crate::Lane {
+        crate::Lane {
+            param,
+            points: points
+                .iter()
+                .map(|&(b, v)| crate::Point::new(b, v))
+                .collect(),
+        }
+    }
+
+    /// A dry synth note held for 8 beats (4 s at 120 bpm), at full volume.
+    fn dry_note() -> Project {
+        let mut p = held_note(Instrument::Synth(Synth::BASE));
+        let t = &mut p.tracks[0];
+        (t.gain, t.pan, t.reverb, t.mute, t.solo) = (1.0, 0.0, 0.0, false, false);
+        p.master_gain = 1.0;
+        p
+    }
+
+    fn rms(buf: &[f32]) -> f32 {
+        (buf.iter().map(|s| s * s).sum::<f32>() / buf.len().max(1) as f32).sqrt()
+    }
+
+    /// Stereo frames `from..to` seconds into `buf`.
+    fn secs(buf: &[f32], sr: u32, from: f64, to: f64) -> &[f32] {
+        let i = |t: f64| ((t * sr as f64) as usize * 2).min(buf.len());
+        &buf[i(from)..i(to)]
+    }
+
+    #[test]
+    fn a_volume_lane_fades_the_track_the_way_a_fader_would() {
+        let sr = 22_050;
+        let plain = dry_note();
+        let mut faded = dry_note();
+        let fade = lane(Param::Volume, &[(0.0, 1.0), (2.0, 0.0)]);
+        faded.tracks[0].automation = vec![fade.clone()];
+        let (a, b) = (render(&plain, sr), render(&faded, sr));
+        // Gain along the way follows the lane (beats are half seconds).
+        for beat in [0.25, 0.5, 1.0, 1.5] {
+            let t = beat * 0.5;
+            let ratio =
+                rms(secs(&b, sr, t - 0.01, t + 0.01)) / rms(secs(&a, sr, t - 0.01, t + 0.01));
+            let want = fade.value_at(beat).unwrap();
+            assert!(
+                (ratio - want).abs() < 0.05 + want * 0.1,
+                "beat {beat}: {ratio} vs {want}"
+            );
+        }
+        // Half way down a fader is far quieter than half the level.
+        assert!(fade.value_at(1.0).unwrap() < 0.2);
+        // Once at 0 the track is silent, and it stays there after the last point.
+        assert_eq!(peak(secs(&b, sr, 1.05, 4.0)), 0.0);
+        assert!(peak(secs(&a, sr, 1.05, 4.0)) > 0.05);
+    }
+
+    #[test]
+    fn a_pan_lane_moves_the_sound_from_left_to_right() {
+        let sr = 22_050;
+        let mut p = dry_note();
+        // Hard left for two beats, then a jump to hard right.
+        p.tracks[0].automation = vec![lane(Param::Pan, &[(0.0, -1.0), (2.0, -1.0), (2.0, 1.0)])];
+        let audio = render(&p, sr);
+        let side = |buf: &[f32], ch: usize| {
+            peak(&buf.iter().skip(ch).step_by(2).copied().collect::<Vec<_>>())
+        };
+        let left_part = secs(&audio, sr, 0.0, 0.95);
+        assert!(side(left_part, 0) > 0.05);
+        assert!(side(left_part, 1) < 1e-6, "{}", side(left_part, 1));
+        // One block later the jump is done (ramped, so it does not click).
+        let right_part = secs(&audio, sr, 1.1, 3.9);
+        assert!(side(right_part, 1) > 0.05);
+        assert!(side(right_part, 0) < 1e-6, "{}", side(right_part, 0));
+    }
+
+    /// How bright a stretch of sound is: its slope relative to its level.
+    fn brightness(buf: &[f32]) -> f32 {
+        let left: Vec<f32> = buf.iter().step_by(2).copied().collect();
+        let slope: Vec<f32> = left.windows(2).map(|w| w[1] - w[0]).collect();
+        rms(&slope) / rms(&left).max(1e-9)
+    }
+
+    #[test]
+    fn a_brightness_lane_sweeps_the_filter_smoothly() {
+        let sr = 22_050;
+        let mut p = dry_note();
+        p.tracks[0].automation = vec![lane(Param::Cutoff, &[(0.0, 150.0), (8.0, 8_000.0)])];
+        let audio = render(&p, sr);
+        assert!(audio.iter().all(|s| s.is_finite() && s.abs() < 1.0));
+        let at = |t: f64| brightness(secs(&audio, sr, t, t + 0.1));
+        let (dark, mid, bright) = (at(0.4), at(2.0), at(3.8));
+        assert!(dark < mid && mid < bright, "{dark} {mid} {bright}");
+        assert!(bright > dark * 3.0, "{dark} {bright}");
+        // No zipper steps: neighbouring frames never jump.
+        let left: Vec<f32> = audio.iter().step_by(2).copied().collect();
+        let biggest = left
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0, f32::max);
+        let plain = render(&dry_note(), sr);
+        let plain_left: Vec<f32> = plain.iter().step_by(2).copied().collect();
+        let plain_biggest = plain_left
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0, f32::max);
+        assert!(
+            biggest <= plain_biggest * 1.05,
+            "{biggest} vs {plain_biggest}"
+        );
+    }
+
+    #[test]
+    fn synth_lanes_change_the_sound_and_drums_ignore_them() {
+        let sr = 22_050;
+        let plain = render(&dry_note(), sr);
+        for param in [
+            Param::Drive,
+            Param::Fm,
+            Param::Vibrato,
+            Param::Sub,
+            Param::Noise,
+            Param::Resonance,
+        ] {
+            let mut p = dry_note();
+            if param == Param::Fm {
+                // FM only bends sine and triangle waves.
+                let Instrument::Synth(s) = &mut p.tracks[0].instrument else {
+                    unreachable!()
+                };
+                s.waveform = Waveform::Sine;
+            }
+            let before = render(&p, sr);
+            let max = param.info().max;
+            p.tracks[0].automation = vec![lane(param, &[(0.0, max * 0.8)])];
+            let audio = render(&p, sr);
+            assert!(
+                audio.iter().all(|s| s.is_finite() && s.abs() < 1.0),
+                "{param:?}"
+            );
+            assert!(audio != before, "{param:?} did nothing");
+        }
+        // A lane at a synth's own setting leaves it as it was.
+        let mut same = dry_note();
+        same.tracks[0].automation = vec![
+            lane(Param::Drive, &[(0.0, 0.0)]),
+            lane(Param::Sub, &[(0.0, 0.0)]),
+        ];
+        assert!(render(&same, sr) == plain);
+        // Drums have no filter or oscillators to move (a hand-edited file
+        // could still ask): they play on unchanged.
+        let mut drums = held_note(Instrument::Drums {
+            kit: DrumKit::Standard,
+        });
+        let plain_drums = render(&drums, sr);
+        drums.tracks[0].automation = vec![
+            lane(Param::Cutoff, &[(0.0, 100.0)]),
+            lane(Param::Fm, &[(0.0, 9.0)]),
+        ];
+        assert!(render(&drums, sr) == plain_drums);
+    }
+
+    #[test]
+    fn drive_automation_from_zero_fades_in_without_a_jump() {
+        let sr = 22_050;
+        let level = |drive: f32| {
+            let mut p = dry_note();
+            p.tracks[0].automation = vec![lane(Param::Drive, &[(0.0, drive)])];
+            render(&p, sr)
+        };
+        let plain = render(&dry_note(), sr);
+        let diff = |a: &[f32]| {
+            a.iter()
+                .zip(&plain)
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0, f32::max)
+        };
+        // Just above zero sounds just like zero; the change grows smoothly.
+        let (tiny, small, full) = (diff(&level(0.01)), diff(&level(0.09)), diff(&level(0.11)));
+        assert!(tiny < small && small < full, "{tiny} {small} {full}");
+        assert!(full < small * 2.0, "a jump at 0.1: {small} -> {full}");
+    }
+
+    #[test]
+    fn empty_or_constant_lanes_change_nothing() {
+        let sr = 22_050;
+        let plain = render(&dry_note(), sr);
+        let mut p = dry_note();
+        p.tracks[0].automation = vec![
+            lane(Param::Volume, &[]),
+            lane(Param::Pan, &[(0.0, 0.0)]),
+            lane(Param::Reverb, &[(1.0, 0.0), (3.0, 0.0)]),
+        ];
+        p.automation = vec![lane(Param::MasterVolume, &[(0.0, 1.0)])];
+        assert!(render(&p, sr) == plain);
+        // With two lanes for one setting, the first one with points counts.
+        p.tracks[0].automation = vec![
+            lane(Param::Volume, &[(0.0, 1.0)]),
+            lane(Param::Volume, &[(0.0, 0.0)]),
+        ];
+        assert!(render(&p, sr) == plain);
+    }
+
+    #[test]
+    fn master_lanes_turn_the_song_down_and_resize_the_room() {
+        let sr = 22_050;
+        let mut p = dry_note();
+        p.automation = vec![lane(
+            Param::MasterVolume,
+            &[(0.0, 1.0), (2.0, 1.0), (2.0, 0.0)],
+        )];
+        let audio = render(&p, sr);
+        assert!(peak(secs(&audio, sr, 0.2, 0.9)) > 0.05);
+        assert_eq!(peak(secs(&audio, sr, 1.1, 6.0)), 0.0);
+
+        // The room grows from small to a hall: the tail after the note rings on.
+        let mut small = blip(0.5);
+        small.reverb.size = 0.0;
+        let mut grown = small.clone();
+        grown.automation = vec![lane(Param::ReverbSize, &[(0.0, 1.0)])];
+        assert!(tail_seconds(&grown) > tail_seconds(&small) + 2.0);
+        let (s, g) = (render(&small, sr), render(&grown, sr));
+        let tail = |a: &[f32]| rms(secs(a, sr, 2.0, 3.0));
+        assert!(tail(&g) > tail(&s) * 5.0, "{} {}", tail(&s), tail(&g));
+        // Automating the send works too: no send, no tail.
+        let mut dry = blip(0.5);
+        dry.tracks[0].automation = vec![lane(Param::Reverb, &[(0.0, 0.0)])];
+        assert_eq!(tail_seconds(&dry), RENDER_TAIL_SECONDS);
+        let d = render(&dry, sr);
+        assert_eq!(peak(secs(&d, sr, 1.0, 2.0)), 0.0);
+    }
+
+    #[test]
+    fn previews_sound_the_way_the_song_does_at_the_playhead() {
+        let sr = 22_050;
+        let mut p = dry_note();
+        p.tracks[0].automation = vec![lane(Param::Volume, &[(0.0, 0.0), (4.0, 0.0), (4.0, 1.0)])];
+        let mut seq = Sequencer::new(sr);
+        seq.preview(&p, 0, 60);
+        let mut buf = vec![0.0f32; 2 * 4096];
+        seq.process_voices(&p, &mut buf);
+        assert_eq!(peak(&buf), 0.0, "volume is 0 at beat 0");
+        seq.seek(5.0);
+        seq.preview(&p, 0, 60);
+        seq.process_voices(&p, &mut buf);
+        assert!(peak(&buf) > 0.05);
+        assert_eq!(seq.position(), 5.0, "previews do not move the playhead");
     }
 }

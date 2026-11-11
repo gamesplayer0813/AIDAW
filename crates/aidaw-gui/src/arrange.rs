@@ -1,4 +1,5 @@
-//! Arrangement view: one row per track, clips on a beat timeline.
+//! Arrangement view: one row per track, clips on a beat timeline, and under
+//! a track (or under Master) its automation lanes.
 //!
 //! Click a clip to edit it in the piano roll, drag to move (Alt+drag
 //! copies), drag its right edge to resize, double-click an empty spot to
@@ -6,6 +7,7 @@
 //! Ctrl+C/X/V/D, arrows) at the selected clip. Click the ruler to move the
 //! playhead; the thin strip on top of it holds the loop region. Drag a
 //! track's name to reorder the tracks; right-click anything for more.
+//! Lanes: see [`crate::lanes`].
 
 use aidaw_core::{presets, LoopRegion, Project};
 use eframe::egui::{
@@ -16,6 +18,7 @@ use eframe::egui::{
 use crate::app::{track_color, App, Drag, EditFocus};
 use crate::i18n::{tr, trf};
 use crate::icons::{self, Icon};
+use crate::lanes::{self, Band, LaneKey, LaneMenu, Marks, Row};
 use crate::theme;
 
 const HEADER_W: f32 = 150.0;
@@ -59,6 +62,21 @@ enum Hit {
     Header {
         track_id: String,
     },
+    /// The header of a lane: of the track `track_id`, or of the song.
+    LaneHeader {
+        track_id: Option<String>,
+    },
+    /// An automation point.
+    Point {
+        key: LaneKey,
+        index: usize,
+    },
+    /// An empty spot of a lane: where a click would put a point.
+    Lane {
+        key: LaneKey,
+        beat: f64,
+        value: f32,
+    },
     Nothing,
 }
 
@@ -77,7 +95,16 @@ enum Menu {
     Ruler {
         beat: f64,
     },
+    /// The line of an automation lane.
+    Lane(LaneMenu),
     Nothing,
+}
+
+/// The colour of a band: its track's, or the accent for Master.
+fn band_color(project: &Project, track: Option<usize>) -> Color32 {
+    track
+        .and_then(|i| project.tracks.get(i))
+        .map_or(theme::ACCENT, track_color)
 }
 
 pub fn show(ui: &mut egui::Ui, app: &mut App) {
@@ -105,10 +132,12 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
     let loop_end = app.project.transport.loop_region.map_or(0.0, |r| r.end);
     let total_beats = ((app.project.length_beats().max(loop_end) / bpb).ceil() + 8.0) * bpb;
     let bw = app.arrange_zoom;
-    let rows = app.project.tracks.len();
+    let n_tracks = app.project.tracks.len();
+    let rows = lanes::layout(app, ROW_H);
+    let content_h = rows.last().map_or(0.0, |r| r.top + r.h);
     let size = vec2(
         HEADER_W + total_beats as f32 * bw,
-        RULER_H + rows as f32 * ROW_H + ROW_H,
+        RULER_H + content_h + ROW_H,
     );
 
     egui::ScrollArea::both()
@@ -122,7 +151,19 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             let origin = resp.rect.min;
             let x_of = |beat: f64| origin.x + HEADER_W + beat as f32 * bw;
             let beat_of = |x: f32| ((x - origin.x - HEADER_W) / bw) as f64;
-            let row_top = |i: usize| origin.y + RULER_H + i as f32 * ROW_H;
+            let area = resp.rect;
+            let top_of = |r: &Row| origin.y + RULER_H + r.top;
+            let band_rect = |r: &Row| {
+                Rect::from_min_size(pos2(origin.x, top_of(r)), vec2(area.width(), r.h))
+            };
+            // A lane's timeline part, where its line is drawn.
+            let lane_rect = |r: &Row| {
+                Rect::from_min_max(
+                    pos2(origin.x + HEADER_W, top_of(r)),
+                    pos2(area.right(), top_of(r) + r.h),
+                )
+            };
+            let content_bottom = origin.y + RULER_H + content_h;
 
             // The AI moved the playhead: bring it into view.
             if std::mem::take(&mut app.reveal_playhead) {
@@ -138,11 +179,23 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
 
             // Background, rows and grid.
             painter.rect_filled(resp.rect, 0.0, theme::CANVAS);
-            for i in 0..rows {
-                let r =
-                    Rect::from_min_size(pos2(origin.x, row_top(i)), vec2(resp.rect.width(), ROW_H));
-                if i % 2 == 1 {
-                    painter.rect_filled(r, 0.0, Color32::from_white_alpha(3));
+            for row in &rows {
+                let r = band_rect(row);
+                match &row.band {
+                    Band::Track(i) if i % 2 == 1 => {
+                        painter.rect_filled(r, 0.0, Color32::from_white_alpha(3));
+                    }
+                    Band::Lane { track, .. } | Band::AddLane { track } => {
+                        painter.rect_filled(
+                            r,
+                            0.0,
+                            theme::mix(theme::CANVAS, band_color(&app.project, *track), 0.05),
+                        );
+                    }
+                    Band::Master => {
+                        painter.rect_filled(r, 0.0, theme::mix(theme::CANVAS, theme::PANEL, 0.7));
+                    }
+                    Band::Track(_) => {}
                 }
                 painter.line_segment(
                     [r.left_bottom(), r.right_bottom()],
@@ -256,9 +309,13 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
 
             // Clips: a coloured name band on top, a tinted body with a mini
             // view of the notes.
-            for (i, track) in app.project.tracks.iter().enumerate() {
+            for row in &rows {
+                let Band::Track(i) = row.band else {
+                    continue;
+                };
+                let track = &app.project.tracks[i];
                 let color = track_color(track);
-                let top = row_top(i);
+                let top = top_of(row);
                 for clip in &track.clips {
                     let r = Rect::from_min_max(
                         pos2(x_of(clip.start) + 1.0, top + 5.0),
@@ -344,13 +401,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                             theme::CANVAS,
                         );
                 }
-            }
-
-            // Friendly hint in rows that have nothing in them yet.
-            for (i, track) in app.project.tracks.iter().enumerate() {
+                // Friendly hint in rows that have nothing in them yet.
                 if track.clips.is_empty() {
                     painter.text(
-                        pos2(x_of(0.0) + 12.0, row_top(i) + ROW_H / 2.0),
+                        pos2(x_of(0.0) + 12.0, top + ROW_H / 2.0),
                         Align2::LEFT_CENTER,
                         tr("Double-click here to add a clip"),
                         FontId::proportional(13.0),
@@ -358,7 +412,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     );
                 }
             }
-            if rows == 0 {
+            if n_tracks == 0 {
                 painter.text(
                     pos2(origin.x + 20.0, origin.y + RULER_H + 24.0),
                     Align2::LEFT_CENTER,
@@ -368,11 +422,49 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 );
             }
 
-            // Track headers (drawn last so they cover clips scrolled under them).
+            // Automation lanes: the line, its points, where the playhead is.
+            let pointer = resp.hover_pos();
+            for row in &rows {
+                let Band::Lane { track, key } = &row.band else {
+                    continue;
+                };
+                let rect = lane_rect(row);
+                let mut marks = Marks {
+                    selected: app
+                        .selected_point
+                        .as_ref()
+                        .filter(|(k, _)| k == key)
+                        .map(|(_, i)| *i),
+                    ..Marks::default()
+                };
+                match &app.drag {
+                    Some(Drag::MovePoint { key: k, index }) if k == key => {
+                        marks.dragging = Some(*index);
+                    }
+                    Some(_) => {}
+                    None => {
+                        marks.hovered = pointer.filter(|p| rect.contains(*p)).and_then(|p| {
+                            lanes::point_near(key.lane(&app.project)?, rect, &x_of, p)
+                        });
+                    }
+                }
+                lanes::paint_lane(
+                    &painter,
+                    &app.project,
+                    key,
+                    rect,
+                    &x_of,
+                    band_color(&app.project, *track),
+                    app.playhead,
+                    marks,
+                );
+            }
+
+            // Headers (drawn last so they cover what is scrolled under them).
             painter.rect_filled(
                 Rect::from_min_max(
                     pos2(origin.x, origin.y + RULER_H),
-                    pos2(origin.x + HEADER_W, row_top(rows)),
+                    pos2(origin.x + HEADER_W, content_bottom),
                 ),
                 0.0,
                 theme::PANEL,
@@ -381,9 +473,51 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 Some(Drag::MoveTrack { track_id }) => Some(track_id.as_str()),
                 _ => None,
             };
-            for (i, track) in app.project.tracks.iter().enumerate() {
+            for row in &rows {
+                let r = Rect::from_min_size(pos2(origin.x, top_of(row)), vec2(HEADER_W, row.h));
+                let i = match &row.band {
+                    Band::Track(i) => *i,
+                    Band::Lane { track, key } => {
+                        lanes::paint_header(
+                            &painter,
+                            &app.project,
+                            key,
+                            r,
+                            band_color(&app.project, *track),
+                            app.playhead,
+                        );
+                        continue;
+                    }
+                    Band::Master => {
+                        let card = r.shrink2(vec2(6.0, 3.0));
+                        painter.rect_filled(card, 7.0, theme::SURFACE);
+                        painter.text(
+                            card.left_center() + vec2(10.0, 0.0),
+                            Align2::LEFT_CENTER,
+                            tr("Master"),
+                            theme::bold_font(12.0),
+                            theme::TEXT,
+                        );
+                        if !app.master_lanes_open {
+                            let summary = if lanes::song_has_lanes(&app.project) {
+                                tr("The whole song's automation is hidden: click the line icon")
+                            } else {
+                                tr("Automate the whole song: master volume, reverb room")
+                            };
+                            painter.text(
+                                pos2(x_of(0.0) + 12.0, card.center().y),
+                                Align2::LEFT_CENTER,
+                                summary,
+                                FontId::proportional(11.5),
+                                theme::TEXT_FAINT,
+                            );
+                        }
+                        continue;
+                    }
+                    Band::AddLane { .. } => continue,
+                };
+                let track = &app.project.tracks[i];
                 let color = track_color(track);
-                let r = Rect::from_min_size(pos2(origin.x, row_top(i)), vec2(HEADER_W, ROW_H));
                 let card = r.shrink2(vec2(6.0, 4.0));
                 let selected = app.selected_track.as_deref() == Some(track.id.as_str());
                 let lifted = moving == Some(track.id.as_str());
@@ -481,6 +615,12 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 Stroke::NONE,
             ));
 
+            // Buttons on top of the headers: show a track's lanes, add or
+            // remove a lane.
+            header_buttons(ui, app, &rows, |r| {
+                Rect::from_min_size(pos2(origin.x, top_of(r)), vec2(HEADER_W, r.h))
+            });
+
             // ---- interaction ----
             let hit = |project: &Project, p: Pos2| -> Hit {
                 if p.y < origin.y + LOOP_H {
@@ -506,51 +646,109 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 if p.y < origin.y + RULER_H {
                     return Hit::Ruler(beat_of(p.x).max(0.0));
                 }
-                let row = ((p.y - origin.y - RULER_H) / ROW_H) as usize;
-                let Some(track) = project.tracks.get(row) else {
+                let Some(row) = rows
+                    .iter()
+                    .find(|r| p.y >= top_of(r) && p.y < top_of(r) + r.h)
+                else {
                     return Hit::Nothing;
                 };
-                if p.x < origin.x + HEADER_W {
-                    return Hit::Header {
-                        track_id: track.id.clone(),
-                    };
-                }
-                let beat = beat_of(p.x);
-                for clip in track.clips.iter().rev() {
-                    let (x0, x1) = (x_of(clip.start), x_of(clip.end()));
-                    if p.x >= x0 && p.x <= x1 {
-                        let ids = (clip.id.clone(), track.id.clone());
-                        return if x1 - p.x <= EDGE {
-                            Hit::ClipEdge {
-                                clip_id: ids.0,
-                                track_id: ids.1,
+                let in_header = p.x < origin.x + HEADER_W;
+                match &row.band {
+                    Band::Track(i) => {
+                        let track = &project.tracks[*i];
+                        if in_header {
+                            return Hit::Header {
+                                track_id: track.id.clone(),
+                            };
+                        }
+                        let beat = beat_of(p.x);
+                        for clip in track.clips.iter().rev() {
+                            let (x0, x1) = (x_of(clip.start), x_of(clip.end()));
+                            if p.x >= x0 && p.x <= x1 {
+                                let ids = (clip.id.clone(), track.id.clone());
+                                return if x1 - p.x <= EDGE {
+                                    Hit::ClipEdge {
+                                        clip_id: ids.0,
+                                        track_id: ids.1,
+                                    }
+                                } else {
+                                    Hit::ClipBody {
+                                        clip_id: ids.0,
+                                        track_id: ids.1,
+                                        offset: beat - clip.start,
+                                    }
+                                };
                             }
-                        } else {
-                            Hit::ClipBody {
-                                clip_id: ids.0,
-                                track_id: ids.1,
-                                offset: beat - clip.start,
-                            }
-                        };
+                        }
+                        Hit::Row {
+                            track_id: track.id.clone(),
+                            beat,
+                        }
                     }
+                    Band::Lane { key, .. } => {
+                        if in_header {
+                            return Hit::LaneHeader {
+                                track_id: key.track_id.clone(),
+                            };
+                        }
+                        let rect = lane_rect(row);
+                        let near = key
+                            .lane(project)
+                            .and_then(|l| lanes::point_near(l, rect, &x_of, p));
+                        match near {
+                            Some(index) => Hit::Point {
+                                key: key.clone(),
+                                index,
+                            },
+                            None => Hit::Lane {
+                                key: key.clone(),
+                                beat: beat_of(p.x).max(0.0),
+                                value: lanes::value_at_y(key.param, rect, p.y),
+                            },
+                        }
+                    }
+                    Band::AddLane { .. } | Band::Master => Hit::Nothing,
                 }
-                Hit::Row {
-                    track_id: track.id.clone(),
-                    beat,
+            };
+            // Where a dragged point goes: snapped to the grid unless Alt is held.
+            let alt = ui.input(|i| i.modifiers.alt);
+            let shift = ui.input(|i| i.modifiers.shift);
+            let lane_beat = |app: &App, beat: f64| {
+                if alt {
+                    beat.max(0.0)
+                } else {
+                    app.snap_beat(beat).max(0.0)
                 }
+            };
+            // The track a dragged header lands on: the one whose row or
+            // lanes are under the pointer (Master counts as the last track).
+            let track_at = |y: f32| -> usize {
+                let last = n_tracks.saturating_sub(1);
+                let row = rows.iter().find(|r| y < top_of(r) + r.h);
+                match row.map(|r| &r.band) {
+                    Some(Band::Track(i)) => *i,
+                    Some(Band::Lane { track, .. } | Band::AddLane { track }) => {
+                        track.unwrap_or(last)
+                    }
+                    Some(Band::Master) | None => last,
+                }
+                .min(last)
             };
 
             // Cursor and a tip for the loop strip.
             let mut tip = None;
             let cursor = match &app.drag {
-                Some(Drag::LoopMove { .. } | Drag::MoveTrack { .. }) => Some(CursorIcon::Grabbing),
+                Some(Drag::LoopMove { .. } | Drag::MoveTrack { .. } | Drag::MovePoint { .. }) => {
+                    Some(CursorIcon::Grabbing)
+                }
                 Some(Drag::LoopEdge { .. } | Drag::LoopNew { .. }) => {
                     Some(CursorIcon::ResizeHorizontal)
                 }
                 Some(_) => None,
                 None => resp.hover_pos().and_then(|p| match hit(&app.project, p) {
                     Hit::ClipEdge { .. } => Some(CursorIcon::ResizeHorizontal),
-                    Hit::Header { .. } => Some(CursorIcon::Grab),
+                    Hit::Header { .. } | Hit::Point { .. } => Some(CursorIcon::Grab),
+                    Hit::Lane { .. } => Some(CursorIcon::Crosshair),
                     Hit::Loop { part, .. } => {
                         tip = Some(if part == LoopPart::Outside {
                             tr("Drag here to loop a part of the song (L turns the loop on and off)")
@@ -578,9 +776,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             if resp.drag_started_by(egui::PointerButton::Primary) {
                 if let Some(p) = ui.input(|i| i.pointer.press_origin()) {
                     let target = hit(&app.project, p);
-                    if !matches!(target, Hit::Ruler(_) | Hit::Loop { .. } | Hit::Nothing) {
-                        app.edit_focus = EditFocus::Clips;
-                    }
+                    set_focus(app, &target);
                     match target {
                         Hit::ClipBody {
                             clip_id,
@@ -610,6 +806,18 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                         Hit::Header { track_id } => {
                             select_track(app, &track_id);
                             app.drag = Some(Drag::MoveTrack { track_id });
+                        }
+                        Hit::Point { key, index } => {
+                            app.selected_point = Some((key.clone(), index));
+                            app.drag = Some(Drag::MovePoint { key, index });
+                        }
+                        Hit::Lane { key, beat, value } => {
+                            // Press and drag: a new point that follows the mouse.
+                            let beat = lane_beat(app, beat);
+                            if let Some(index) = lanes::add_point(app, &key, beat, value) {
+                                app.selected_point = Some((key.clone(), index));
+                                app.drag = Some(Drag::MovePoint { key, index });
+                            }
                         }
                         Hit::Loop { beat, part } => {
                             let start = app.project.transport.loop_region.map_or(0.0, |r| r.start);
@@ -660,11 +868,29 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                             }
                         }
                         Some(Drag::MoveTrack { track_id }) => {
-                            let row = ((p.y - origin.y - RULER_H) / ROW_H).floor().max(0.0) as usize;
-                            let row = row.min(rows.saturating_sub(1));
+                            let row = track_at(p.y);
                             let now = app.project.tracks.iter().position(|t| t.id == track_id);
                             if now.is_some_and(|i| i != row) {
                                 app.move_track(&track_id, row);
+                            }
+                        }
+                        Some(Drag::MovePoint { key, index }) => {
+                            let row = rows.iter().find(
+                                |r| matches!(&r.band, Band::Lane { key: k, .. } if *k == key),
+                            );
+                            if let Some(row) = row {
+                                let rect = lane_rect(row);
+                                let value = lanes::value_at_y(key.param, rect, p.y);
+                                let old = key
+                                    .lane(&app.project)
+                                    .and_then(|l| l.points.get(index))
+                                    .map(|pt| pt.beat);
+                                // Shift: only up and down.
+                                let beat = match old {
+                                    Some(b) if shift => b,
+                                    _ => lane_beat(app, beat),
+                                };
+                                lanes::move_point(app, &key, index, beat, value);
                             }
                         }
                         Some(Drag::LoopNew { anchor }) => {
@@ -719,9 +945,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             if resp.clicked() {
                 if let Some(p) = resp.interact_pointer_pos() {
                     let target = hit(&app.project, p);
-                    if !matches!(target, Hit::Ruler(_) | Hit::Loop { .. } | Hit::Nothing) {
-                        app.edit_focus = EditFocus::Clips;
-                    }
+                    set_focus(app, &target);
                     match target {
                         Hit::Loop {
                             part: LoopPart::Outside,
@@ -748,11 +972,23 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                         | Hit::ClipEdge { clip_id, track_id } => {
                             select_clip(app, &clip_id, &track_id)
                         }
-                        Hit::Header { track_id } => select_track(app, &track_id),
+                        Hit::Header { track_id }
+                        | Hit::LaneHeader {
+                            track_id: Some(track_id),
+                        } => select_track(app, &track_id),
                         Hit::Row { track_id, .. } => {
                             app.selected_track = Some(track_id);
                         }
-                        Hit::Nothing => {}
+                        Hit::Point { key, index } => {
+                            app.selected_point = Some((key, index));
+                        }
+                        Hit::Lane { key, beat, value } => {
+                            let beat = lane_beat(app, beat);
+                            if let Some(index) = lanes::add_point(app, &key, beat, value) {
+                                app.selected_point = Some((key, index));
+                            }
+                        }
+                        Hit::LaneHeader { track_id: None } | Hit::Nothing => {}
                     }
                 }
             }
@@ -781,12 +1017,27 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                                 beat: beat_of(p.x),
                             }
                         }
-                        Hit::Header { track_id } => {
+                        Hit::Header { track_id }
+                        | Hit::LaneHeader {
+                            track_id: Some(track_id),
+                        } => {
                             app.selected_track = Some(track_id.clone());
                             Menu::Track {
                                 track_id,
                                 beat: None,
                             }
+                        }
+                        // A point goes at once; on the line, its menu.
+                        Hit::Point { key, index } => {
+                            lanes::delete_point(app, &key, index);
+                            Menu::Nothing
+                        }
+                        Hit::Lane { key, beat, .. } => {
+                            let segment = key
+                                .lane(&app.project)
+                                .and_then(|l| l.points.iter().rposition(|pt| pt.beat <= beat));
+                            app.edit_focus = EditFocus::Automation;
+                            Menu::Lane(LaneMenu { key, segment })
                         }
                         Hit::Row { track_id, beat } => {
                             app.selected_track = Some(track_id.clone());
@@ -796,7 +1047,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                             }
                         }
                         Hit::Loop { beat, .. } | Hit::Ruler(beat) => Menu::Ruler { beat },
-                        Hit::Nothing => Menu::Nothing,
+                        Hit::LaneHeader { track_id: None } | Hit::Nothing => Menu::Nothing,
                     };
                     ui.data_mut(|d| d.insert_temp(menu_id, menu));
                 }
@@ -808,6 +1059,112 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 context_menu(ui, app, menu);
             });
         });
+}
+
+/// The small buttons on the headers: a track's (and Master's) line icon
+/// that shows or hides its lanes, a lane's remove button, and the
+/// "Automate…" menu that adds a lane.
+fn header_buttons(ui: &mut egui::Ui, app: &mut App, rows: &[Row], rect_of: impl Fn(&Row) -> Rect) {
+    let pro = app.pro();
+    for row in rows {
+        let r = rect_of(row);
+        if !ui.clip_rect().intersects(r) {
+            continue;
+        }
+        match &row.band {
+            Band::Track(i) => {
+                let track = &app.project.tracks[*i];
+                let has = !lanes::shown_params(&track.automation).is_empty();
+                if !pro && !has {
+                    continue;
+                }
+                let id = track.id.clone();
+                let open = app.lanes_open.contains(&id);
+                let at = Rect::from_min_size(r.right_bottom() - vec2(30.0, 26.0), vec2(22.0, 20.0));
+                if lane_toggle(ui, at, open, has).clicked() {
+                    if open {
+                        app.lanes_open.remove(&id);
+                    } else {
+                        app.lanes_open.insert(id);
+                    }
+                }
+            }
+            Band::Master => {
+                let has = lanes::song_has_lanes(&app.project);
+                let open = app.master_lanes_open;
+                let at = Rect::from_min_size(
+                    pos2(r.right() - 30.0, r.center().y - 10.0),
+                    vec2(22.0, 20.0),
+                );
+                if lane_toggle(ui, at, open, has).clicked() {
+                    app.master_lanes_open = !open;
+                }
+            }
+            Band::Lane { key, .. } => {
+                let at =
+                    Rect::from_min_size(pos2(r.right() - 30.0, r.top() + 6.0), vec2(20.0, 18.0));
+                let remove = ui
+                    .put(at, icons::icon_button(Icon::Trash, 12.0).small())
+                    .on_hover_text(tr("Remove this lane (Ctrl+Z brings it back)"));
+                if remove.clicked() {
+                    lanes::remove_lane(app, key);
+                }
+            }
+            Band::AddLane { track } => {
+                let track_id = track.map(|i| app.project.tracks[i].id.clone());
+                let at = Rect::from_min_size(
+                    r.min + vec2(18.0, 3.0),
+                    vec2(HEADER_W - 24.0, r.height() - 6.0),
+                );
+                let choices = lanes::addable(&app.project, track_id.as_deref());
+                let mut picked = None;
+                ui.put(at, |ui: &mut egui::Ui| {
+                    let plus = icons::image(Icon::Plus, 13.0, theme::TEXT_DIM);
+                    ui.menu_image_text_button(
+                        plus,
+                        egui::RichText::new(tr("Automate…")).small(),
+                        |ui| {
+                            ui.label(
+                                egui::RichText::new(tr("Make a setting move over time:")).weak(),
+                            );
+                            for param in &choices {
+                                if ui
+                                    .button(tr(param.info().label))
+                                    .on_hover_text(lanes::hint(*param))
+                                    .clicked()
+                                {
+                                    picked = Some(*param);
+                                    ui.close_menu();
+                                }
+                            }
+                        },
+                    )
+                    .response
+                    .on_hover_text(tr(
+                        "Add a lane: a line that moves volume, pan or the sound over time",
+                    ))
+                });
+                if let Some(param) = picked {
+                    lanes::add_lane(app, &LaneKey::new(track_id.as_deref(), param));
+                }
+            }
+        }
+    }
+}
+
+/// The line icon that shows or hides lanes; lit when there are some.
+fn lane_toggle(ui: &mut egui::Ui, at: Rect, open: bool, has: bool) -> egui::Response {
+    let tint = if has { theme::ACCENT } else { theme::TEXT_DIM };
+    let button = egui::Button::image(icons::image(Icon::Automation, 14.0, tint))
+        .small()
+        .selected(open);
+    ui.put(at, button).on_hover_text(if open {
+        tr("Hide the automation lanes")
+    } else if has {
+        tr("Show the automation lanes (this has some)")
+    } else {
+        tr("Show automation: lines that move volume, pan or the sound over time")
+    })
 }
 
 /// Open a clip in the piano roll. Its notes start unselected, since the
@@ -995,6 +1352,38 @@ fn context_menu(ui: &mut egui::Ui, app: &mut App, menu: Menu) {
                 ui.close_menu();
             }
         }
+        Menu::Lane(menu) => lanes::menu(ui, app, &menu),
         Menu::Nothing => ui.close_menu(),
     }
+}
+
+/// Which keys a click or drag points the editing keys at: lanes take
+/// Delete and Escape, everything else in the song view the clips.
+fn set_focus(app: &mut App, target: &Hit) {
+    match target {
+        Hit::Ruler(_) | Hit::Loop { .. } | Hit::LaneHeader { .. } | Hit::Nothing => {}
+        Hit::Point { .. } | Hit::Lane { .. } => app.edit_focus = EditFocus::Automation,
+        _ => app.edit_focus = EditFocus::Clips,
+    }
+}
+
+/// Track ids whose lanes changed between two versions of a song, plus
+/// whether the song's own lanes did: what a reload should reveal.
+pub fn changed_lanes(
+    before: &aidaw_core::Project,
+    after: &aidaw_core::Project,
+) -> (Vec<String>, bool) {
+    let tracks = after
+        .tracks
+        .iter()
+        .filter(|t| !lanes::shown_params(&t.automation).is_empty())
+        .filter(|t| {
+            before
+                .track(&t.id)
+                .is_none_or(|b| b.automation != t.automation)
+        })
+        .map(|t| t.id.clone())
+        .collect();
+    let song = lanes::song_has_lanes(after) && before.automation != after.automation;
+    (tracks, song)
 }

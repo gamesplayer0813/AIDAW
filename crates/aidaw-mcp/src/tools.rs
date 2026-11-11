@@ -12,9 +12,9 @@ Basics: time is in beats (1 = quarter note); in 4/4 a bar is 4 beats and `bar: 1
 Pitches are names like \"C4\" (middle C = 60), \"F#3\", \"Bb2\" or MIDI numbers. Tracks and clips can be \
 referred to by name (\"Bass\") or id (\"t1\", \"c1\").
 Easiest workflow: new_project -> add_track with a preset (list_presets) -> add_chords / add_melody / \
-add_drum_pattern (they create clips for you) -> copy_bars to repeat parts -> get_project to check -> \
-analyze to check the mix -> render_wav to listen. To show the human what you changed, set_loop or \
-set_playhead points the app at it; undo takes back your last edit.
+add_drum_pattern (they create clips for you) -> copy_bars to repeat parts -> automate for fades and \
+filter sweeps -> get_project to check -> analyze to check the mix -> render_wav to listen. To show the \
+human what you changed, set_loop or set_playhead points the app at it; undo takes back your last edit.
 VST3 plugins installed on the computer work too: list_plugins, then add_track with \"plugin\" for an \
 instrument, add_effect for an effect, plugin_params / set_plugin_params for their knobs.
 Every error message says what was wrong and shows a valid example; read it and retry. Call help for the \
@@ -112,6 +112,28 @@ UNDO
            tools, newest first; if the human changed the song in the app since, undo refuses
            rather than lose their work.
 
+AUTOMATION (settings that move over time)
+  automate {"track": "Pad", "param": "cutoff", "points": [{"bar": 1, "value": 300}, {"bar": 9, "value": 8000}]}
+           A filter sweep over 8 bars. Between points the value glides; before the first point
+           and after the last it stays. Points may also be written "1:300 9:8000" or [[1, 300], [9, 8000]];
+           bars may be fractional (1.5 = half way through bar 1 in 4/4), or give "beat" instead.
+  track    volume (0-2 like gain; "-6dB" works too), pan (-1 left .. 1 right), reverb (0-1 send);
+           synth tracks also cutoff (Hz), resonance, drive, sub, noise (0-1), fm (0-10, sine and
+           triangle waves only), vibrato (cents).
+  song     leave out "track": master_volume (0-2), reverb_size, reverb_tone (0-1).
+  shape    "linear" (default), "smooth" (eased) or "hold" (stays, then jumps at the next point).
+           Two points on the same bar jump: [{"bar": 5, "value": 0}, {"bar": 5, "value": 1}].
+  repeat   {"every_bars": 1} repeats the points each bar to the end of the song (pumping, wobbles,
+           tremolo); "times" limits the copies.
+  fix      {"param": "volume", "scale": 0.5} multiplies a lane's values (about -6 dB for volume).
+  clear    {"track": "Pad", "param": "cutoff", "clear": true} removes the lane; "from_bar"/"to_bar"
+           clear part of it, param "all" every lane of the track (or, without a track, of the song).
+  New points replace what the lane had between the first and the last of them. While a setting is
+  automated its fixed value (update_track gain, cutoff ...) is not heard. copy_bars copies notes
+  only: repeat automation with every_bars.
+  Fade the song out:  automate {"param": "master_volume", "points": "29:1 33:0"}
+  Build-up riser:     automate {"track": "Lead", "param": "cutoff", "points": "13:400 17:12000", "shape": "smooth"}
+  Side-chain pump:    automate {"track": "Pad", "param": "volume", "points": "1:0.2 1.1:0.8 1.25:0.8 1.25:0.2", "every_bars": 0.25}
 PLUGINS (VST3 instruments and effects installed on this computer)
   list_plugins {}                                        what is installed ({"kind": "effect"} for effects only)
   add_track    {"name": "Keys", "plugin": "Surge XT"}    a track played by an instrument plugin
@@ -127,10 +149,11 @@ PLUGINS (VST3 instruments and effects installed on this computer)
   Effects run in order before the track's volume, pan and reverb send. Plugins load in a separate
   process, so a broken one cannot crash anything; render_wav and analyze name plugins that are missing
   on this computer (their tracks stay silent). A human can open a plugin's own window in the app.
+  automate moves a plugin track's volume, pan and reverb; the plugin's own knobs can't be automated yet.
 
 CHECK YOUR WORK
-  get_project {}                    compact overview (tracks, clips, bars)
-  get_project {"detail": "notes"}   every note as start:PITCH/BEATS
+  get_project {}                    compact overview (tracks, clips, bars, automation)
+  get_project {"detail": "notes"}   every note as start:PITCH/BEATS and every automation point as BAR:VALUE
   get_project {"detail": "json"}    raw project JSON
   analyze {}                        hear the mix as numbers: loudness (LUFS), limiter, low/mid/high
                                     balance, each track alone, loudness along the song, and tips
@@ -150,6 +173,8 @@ pub enum Ty {
     Ops,
     /// Array of {param, value} for `set_plugin_params`.
     ParamList,
+    /// Automation points: array of {bar, value, shape} (text is also accepted).
+    Points,
 }
 
 pub struct Param {
@@ -202,6 +227,10 @@ const EFFECT: &str = "effect id like \"fx1\" (get_project shows them) or the eff
 const PLUGIN_TRACK: &str = "the track whose plugin you mean (name or id): its instrument plugin, or with \"effect\" one of its effects";
 const COLOR: &str = "colour of the track in the app: blue, orange, green, purple, yellow, cyan, pink, violet, \
                      red, teal, white, gray, a hex code like \"#ff8a3d\", or \"auto\" for its own colour";
+const POINTS: &str = "where the setting is what, e.g. [{\"bar\": 1, \"value\": 0}, {\"bar\": 5, \"value\": 0.8}]: \
+                      bar 1 = the start of the song, fractions allowed (1.5 = half way through bar 1), or \
+                      \"beat\" instead; value in the setting's units (Hz for cutoff, -1..1 pan, 0-2 volume); \
+                      optional \"shape\" per point. Text works too: \"1:0 5:0.8\" (BAR:VALUE, optionally :SHAPE)";
 const NOTES: &str = "notes as a melody string like \"C4/1 E4/0.5 G4/0.5\" (PITCH/BEATS, r = rest), or an \
                      array of {pitch, start, duration, velocity} with start in beats from the clip start";
 
@@ -419,6 +448,23 @@ pub const TOOLS: &[Tool] = &[
             p("timing", Num, "largest shift in beats, 0-0.25 (default 0.02, about 10 ms at 120 BPM)"),
             p("velocity", Int, "largest velocity change, 0-40 (default 8)"),
             p("seed", Int, "another number gives another random result"),
+        ],
+    },
+    Tool {
+        name: "automate",
+        description: "Make a setting move over time (automation): fade a track in or out, sweep a synth's filter, pan from side to side, open up the reverb, fade the whole song out. Give points (bar and value); between points the value glides, before the first and after the last it stays. Tracks: volume, pan, reverb, and on synths cutoff, resonance, drive, fm, vibrato, sub, noise. Without a track, the whole song: master_volume, reverb_size, reverb_tone. New points replace what the lane had between the first and the last of them; while a setting has points, its fixed value (update_track gain, cutoff...) is not used. Also repeats points (every_bars), scales them, or clears them.",
+        example: r#"{"track": "Pad", "param": "cutoff", "points": [{"bar": 1, "value": 300}, {"bar": 9, "value": 8000}]}"#,
+        params: &[
+            p("track", Str, "track name or id; leave out for the whole song's master_volume, reverb_size, reverb_tone"),
+            req("param", Str, "volume | pan | reverb | cutoff | resonance | drive | fm | vibrato | sub | noise | master_volume | reverb_size | reverb_tone (\"all\" with clear)"),
+            p("points", Points, POINTS),
+            p("shape", Str, "how values move on from each point: linear (default) | smooth (eased) | hold (stays, then jumps at the next point); a point's own shape wins"),
+            p("every_bars", Num, "repeat the points every this many bars, to the end of the song unless times is given (1 = each bar, 0.25 = each beat in 4/4)"),
+            p("times", Int, "how many copies in a row with every_bars, 1-256"),
+            p("scale", Num, "instead of points: multiply the lane's values, e.g. 0.5 (for volume about -6 dB, 2 about +6 dB)"),
+            p("clear", Bool, "remove points: the whole lane, or from_bar..to_bar; param \"all\" clears every lane of the track (or of the song). With points, clears first and then writes them"),
+            p("from_bar", Num, "with clear or scale: first bar (default: the start)"),
+            p("to_bar", Num, "with clear or scale: stop where this bar starts (default: the end)"),
         ],
     },
     Tool {
@@ -654,13 +700,31 @@ pub const ALIASES: &[(&str, &str)] = &[
     ("reorder_track", "update_track"),
     ("set_track_color", "update_track"),
     ("color_track", "update_track"),
+    ("automation", "automate"),
+    ("set_automation", "automate"),
+    ("add_automation", "automate"),
+    ("write_automation", "automate"),
+    ("automate_param", "automate"),
+    ("add_envelope", "automate"),
+    ("envelope", "automate"),
+    ("clear_automation", "automate"),
+    ("remove_automation", "automate"),
+    ("delete_automation", "automate"),
 ];
 
-pub fn find(name: &str) -> Option<&'static Tool> {
-    let name = name
-        .trim()
+/// Alias names that mean `automate` with `clear: true`.
+pub const CLEARING_ALIASES: &[&str] =
+    &["clear_automation", "remove_automation", "delete_automation"];
+
+/// The tool name as the model wrote it, without an "aidaw." prefix.
+pub fn bare_name(name: &str) -> &str {
+    name.trim()
         .trim_start_matches("aidaw.")
-        .trim_start_matches("aidaw_");
+        .trim_start_matches("aidaw_")
+}
+
+pub fn find(name: &str) -> Option<&'static Tool> {
+    let name = bare_name(name);
     let name = ALIASES
         .iter()
         .find(|(a, _)| *a == name)
@@ -713,6 +777,16 @@ fn param_schema(p: &Param) -> Value {
                 }
             })
         }
+        Points => json!({
+            "type": "array",
+            "description": p.desc,
+            "items": {"type": "object", "properties": {
+                "bar": {"type": "number", "description": "1-based bar, fractions allowed (1.5 = half way through bar 1 in 4/4)"},
+                "beat": {"type": "number", "description": "instead of bar: beats from the start of the song"},
+                "value": {"type": "number", "description": "the setting's value here, in its own units"},
+                "shape": {"type": "string", "description": "linear | smooth | hold: how it moves on to the next point"}
+            }, "required": ["value"]}
+        }),
         Ops => json!({
             "type": "array",
             "description": p.desc,
@@ -837,6 +911,7 @@ fn type_name(ty: Ty) -> &'static str {
         Drums => "object",
         Ops => "array",
         ParamList => "array",
+        Points => "string or array",
     }
 }
 

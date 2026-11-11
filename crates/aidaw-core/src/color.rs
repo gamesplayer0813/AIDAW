@@ -115,6 +115,7 @@ mod tests {
             effects: Vec::new(),
             color: None,
             clips: Vec::new(),
+            automation: Vec::new(),
         }
     }
 

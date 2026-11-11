@@ -2,7 +2,7 @@
 
 <!-- Generated from crates/aidaw-mcp/src/tools.rs. Don't edit it here: change that file, then run `cargo run -p aidaw-mcp -- docs docs/TOOLS.md`. -->
 
-All 34 tools of `aidaw-mcp`, with every parameter. They are the same over MCP and on the command line (`aidaw-mcp tools --format ...`, `aidaw-mcp call`). How to connect a model and compose with them: [LLM_GUIDE.md](LLM_GUIDE.md).
+All 35 tools of `aidaw-mcp`, with every parameter. They are the same over MCP and on the command line (`aidaw-mcp tools --format ...`, `aidaw-mcp call`). How to connect a model and compose with them: [LLM_GUIDE.md](LLM_GUIDE.md).
 
 | Tool | What it does |
 |---|---|
@@ -24,6 +24,7 @@ All 34 tools of `aidaw-mcp`, with every parameter. They are the same over MCP an
 | [`copy_bars`](#copy_bars) | Copy bars to another place, like copy and paste: the notes that start in those bars go to to_bar, repeated `times` times in a row. |
 | [`quantize`](#quantize) | Snap note starts to a grid so the timing is tight, optionally with swing (a shuffle feel). |
 | [`humanize`](#humanize) | Make programmed parts sound played: nudge note timing and velocity by small random amounts (the same seed gives the same result). |
+| [`automate`](#automate) | Make a setting move over time (automation): fade a track in or out, sweep a synth's filter, pan from side to side, open up the reverb, fade the whole song out. |
 | [`split_clip`](#split_clip) | Cut clips in two at a bar, like scissors, so the parts can be moved, copied or removed on their own. |
 | [`set_loop`](#set_loop) | Make the AIDAW app repeat part of the song while the human listens (an A/B loop), e.g. the bars you just changed. |
 | [`set_playhead`](#set_playhead) | Put the AIDAW app's playhead at a bar, so the human hears that spot when they press Play. |
@@ -390,6 +391,31 @@ Example:
 ```
 
 Also answers to `humanize_clip`.
+
+## `automate`
+
+Make a setting move over time (automation): fade a track in or out, sweep a synth's filter, pan from side to side, open up the reverb, fade the whole song out. Give points (bar and value); between points the value glides, before the first and after the last it stays. Tracks: volume, pan, reverb, and on synths cutoff, resonance, drive, fm, vibrato, sub, noise. Without a track, the whole song: master_volume, reverb_size, reverb_tone. New points replace what the lane had between the first and the last of them; while a setting has points, its fixed value (update_track gain, cutoff...) is not used. Also repeats points (every_bars), scales them, or clears them.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `track` | string | no | track name or id; leave out for the whole song's master_volume, reverb_size, reverb_tone |
+| `param` | string | yes | volume \| pan \| reverb \| cutoff \| resonance \| drive \| fm \| vibrato \| sub \| noise \| master_volume \| reverb_size \| reverb_tone ("all" with clear) |
+| `points` | string or array | no | where the setting is what, e.g. [{"bar": 1, "value": 0}, {"bar": 5, "value": 0.8}]: bar 1 = the start of the song, fractions allowed (1.5 = half way through bar 1), or "beat" instead; value in the setting's units (Hz for cutoff, -1..1 pan, 0-2 volume); optional "shape" per point. Text works too: "1:0 5:0.8" (BAR:VALUE, optionally :SHAPE) |
+| `shape` | string | no | how values move on from each point: linear (default) \| smooth (eased) \| hold (stays, then jumps at the next point); a point's own shape wins |
+| `every_bars` | number | no | repeat the points every this many bars, to the end of the song unless times is given (1 = each bar, 0.25 = each beat in 4/4) |
+| `times` | integer | no | how many copies in a row with every_bars, 1-256 |
+| `scale` | number | no | instead of points: multiply the lane's values, e.g. 0.5 (for volume about -6 dB, 2 about +6 dB) |
+| `clear` | boolean | no | remove points: the whole lane, or from_bar..to_bar; param "all" clears every lane of the track (or of the song). With points, clears first and then writes them |
+| `from_bar` | number | no | with clear or scale: first bar (default: the start) |
+| `to_bar` | number | no | with clear or scale: stop where this bar starts (default: the end) |
+
+Example:
+
+```json
+{"track": "Pad", "param": "cutoff", "points": [{"bar": 1, "value": 300}, {"bar": 9, "value": 8000}]}
+```
+
+Also answers to `automation`, `set_automation`, `add_automation`, `write_automation`, `automate_param`, `add_envelope`, `envelope`, `clear_automation`, `remove_automation`, `delete_automation`.
 
 ## `split_clip`
 

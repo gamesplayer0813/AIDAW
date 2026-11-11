@@ -8,6 +8,7 @@ use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::automation::{self, Lane, Param, Point};
 use crate::model::{
     Clip, Effect, EffectKind, Instrument, Note, PluginRef, Project, TimeSignature, Track,
 };
@@ -174,6 +175,24 @@ pub enum Op {
         beat: f64,
         play: Option<bool>,
     },
+    /// Put points on the automation lane of `param`, on a track or, without
+    /// `track_id`, on the song (master volume, reverb room). They replace
+    /// what the lane had from the first to the last of them; values are
+    /// clamped to the setting's range.
+    SetAutomation {
+        track_id: Option<String>,
+        param: Param,
+        points: Vec<Point>,
+    },
+    /// Remove automation from a track (or the song, without `track_id`): the
+    /// lane of `param`, or every lane; with `from`/`to` only the points in
+    /// [from, to) beats. Lanes left without points go too.
+    ClearAutomation {
+        track_id: Option<String>,
+        param: Option<Param>,
+        from: Option<f64>,
+        to: Option<f64>,
+    },
 }
 
 fn one() -> u32 {
@@ -242,6 +261,50 @@ fn clips_mut<'a>(project: &'a mut Project, ids: &[String]) -> Result<Vec<&'a mut
 
 fn sort_notes(clip: &mut Clip) {
     clip.sort_notes();
+}
+
+/// The automation lanes `param` belongs on: a track's, or the song's when
+/// `track_id` is None. Refuses settings that would do nothing there.
+fn lanes_mut<'a>(
+    project: &'a mut Project,
+    track_id: Option<&str>,
+    param: Param,
+) -> Result<&'a mut Vec<Lane>> {
+    if param == Param::Unknown {
+        bail!("unknown setting to automate");
+    }
+    let Some(id) = track_id else {
+        if !param.is_master() {
+            bail!(
+                "{} is a track setting; say which track (the song itself has master_volume, reverb_size and reverb_tone)",
+                param.id()
+            );
+        }
+        return Ok(&mut project.automation);
+    };
+    let t = project
+        .track_mut(id)
+        .ok_or_else(|| anyhow!("no track {id}"))?;
+    if param.is_master() {
+        bail!(
+            "{} is a setting of the whole song, not of a track; leave the track out",
+            param.id()
+        );
+    }
+    if !param.suits_track(&t.instrument) {
+        if let Some(plugin) = t.instrument.plugin() {
+            bail!(
+                "track {id} plays the plugin {}, which has no {} (only the built-in synth does); plugin tracks can automate volume, pan and reverb",
+                plugin.name,
+                param.id()
+            );
+        }
+        bail!(
+            "track {id} plays drums, which have no {} (only synths do); drums can automate volume, pan and reverb",
+            param.id()
+        );
+    }
+    Ok(&mut t.automation)
 }
 
 /// Apply one operation. Returns a small JSON result (e.g. the id of a created object).
@@ -322,6 +385,7 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
                 effects: Vec::new(),
                 color: None,
                 clips: Vec::new(),
+                automation: Vec::new(),
             });
             Ok(json!({"track_id": id}))
         }
@@ -660,6 +724,88 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
             let id = if now == last { now + 1 } else { now };
             project.transport.cue = Some(Cue { beat, play, id });
             Ok(json!({"beat": beat}))
+        }
+        Op::SetAutomation {
+            track_id,
+            param,
+            points,
+        } => {
+            let info = param.info();
+            if points.is_empty() {
+                bail!("no points given");
+            }
+            let mut clean = Vec::with_capacity(points.len());
+            for p in points {
+                if !(p.beat.is_finite() && p.beat >= 0.0) {
+                    bail!("automation points need a beat >= 0 (got {})", p.beat);
+                }
+                if !p.value.is_finite() {
+                    bail!(
+                        "{} values must be numbers from {} to {}",
+                        info.id,
+                        info.min,
+                        info.max
+                    );
+                }
+                clean.push(Point {
+                    value: info.clamp(p.value),
+                    ..p
+                });
+            }
+            let lanes = lanes_mut(project, track_id.as_deref(), param)?;
+            automation::sort(&mut clean);
+            let (from, to) = (clean[0].beat, clean[clean.len() - 1].beat);
+            let kept = lanes.iter().find(|l| l.param == param).map_or(0, |l| {
+                l.points
+                    .iter()
+                    .filter(|p| p.beat < from || p.beat > to)
+                    .count()
+            });
+            if kept + clean.len() > automation::MAX_POINTS {
+                bail!(
+                    "a lane can hold at most {} points; that would make {}",
+                    automation::MAX_POINTS,
+                    kept + clean.len()
+                );
+            }
+            let n = clean.len();
+            let lane = match lanes.iter().position(|l| l.param == param) {
+                Some(i) => &mut lanes[i],
+                None => {
+                    lanes.push(Lane::new(param));
+                    lanes.last_mut().expect("just pushed")
+                }
+            };
+            lane.write(clean);
+            Ok(json!({"points": n, "total": lane.points.len()}))
+        }
+        Op::ClearAutomation {
+            track_id,
+            param,
+            from,
+            to,
+        } => {
+            let lanes = match &track_id {
+                None => &mut project.automation,
+                Some(id) => {
+                    &mut project
+                        .track_mut(id)
+                        .ok_or_else(|| anyhow!("no track {id}"))?
+                        .automation
+                }
+            };
+            let from = from.unwrap_or(f64::NEG_INFINITY);
+            let to = to.unwrap_or(f64::INFINITY);
+            let mut removed = 0;
+            for lane in lanes
+                .iter_mut()
+                .filter(|l| param.is_none_or(|p| l.param == p))
+            {
+                removed += lane.clear_range(from, to);
+            }
+            let before = lanes.len();
+            lanes.retain(|l| !(param.is_none_or(|p| l.param == p) && l.points.is_empty()));
+            Ok(json!({"removed": removed, "lanes_removed": before - lanes.len()}))
         }
     }
 }

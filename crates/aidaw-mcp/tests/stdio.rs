@@ -202,7 +202,7 @@ fn tool_list_is_simple_and_documented() {
     let tools = c.rpc("tools/list", json!({}));
     let tools = tools["tools"].as_array().unwrap();
     // Some clients take at most 40 tools from all their servers together.
-    assert!(tools.len() <= 34, "keep the tool list small");
+    assert!(tools.len() <= 35, "keep the tool list small");
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     for expected in [
         "help",
@@ -1059,5 +1059,218 @@ fn undo_loop_playhead_split_and_track_order() {
     // A new song starts with a clean slate.
     c.call("new_project", json!({"path": path, "overwrite": true}));
     assert!(c.call_err("undo", json!({})).contains("nothing to undo"));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn automation_lanes_fades_and_sweeps() {
+    use aidaw_core::Param;
+    let dir = temp_dir("automation");
+    let path = dir.join("song.aidaw.json");
+    let mut c = Client::start();
+    c.call("new_project", json!({"path": path, "overwrite": true}));
+    c.call(
+        "add_track",
+        json!({"name": "Pad", "instrument": "warm_pad"}),
+    );
+    c.call(
+        "add_chords",
+        json!({"track": "Pad", "chords": "Am F C G Am F C G"}),
+    );
+    c.call("add_track", json!({"name": "Drums"}));
+    let lane = |param: Param| {
+        let p = load(&path);
+        let lanes = if param.is_master() {
+            p.automation.clone()
+        } else {
+            p.tracks[0].automation.clone()
+        };
+        lanes
+            .into_iter()
+            .find(|l| l.param == param)
+            .map(|l| {
+                l.points
+                    .iter()
+                    .map(|p| (p.beat, p.value))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+
+    // A filter sweep over the 8 bars, as point objects.
+    let out = c.call(
+        "automate",
+        json!({"track": "Pad", "param": "cutoff",
+               "points": [{"bar": 1, "value": 300}, {"bar": 9, "value": 8000}]}),
+    );
+    assert!(out.contains("wrote 2 cutoff points"), "{out}");
+    assert!(out.contains("its fixed cutoff"), "{out}");
+    assert_eq!(lane(Param::Cutoff), [(0.0, 300.0), (32.0, 8000.0)]);
+    // The overview shows it, the notes view lists the points.
+    let summary = c.call("get_project", json!({}));
+    assert!(
+        summary.contains("automation: cutoff 2 points from bar 1 to bar 9: 300 Hz -> 8000 Hz"),
+        "{summary}"
+    );
+    let notes = c.call("get_project", json!({"detail": "notes"}));
+    assert!(
+        notes.contains("cutoff (BAR:VALUE): 1:300 9:8000"),
+        "{notes}"
+    );
+
+    // The song fades out: text points, no track.
+    c.call(
+        "automate",
+        json!({"param": "master_volume", "points": "7:1 9:0"}),
+    );
+    assert_eq!(lane(Param::MasterVolume), [(24.0, 1.0), (32.0, 0.0)]);
+    // "master" as the track, "volume" as the param, [bar, value] pairs.
+    c.call(
+        "automate",
+        json!({"track": "master", "param": "volume", "points": [[1, 0.5]]}),
+    );
+    assert_eq!(
+        lane(Param::MasterVolume),
+        [(0.0, 0.5), (24.0, 1.0), (32.0, 0.0)]
+    );
+    assert!(c
+        .call("get_project", json!({}))
+        .contains("song automation: master_volume 3 points"));
+
+    // Volumes in dB; a point's own shape.
+    c.call(
+        "automate",
+        json!({"track": "Pad", "param": "volume",
+               "points": [{"bar": 1, "value": "-inf dB", "shape": "smooth"}, {"bar": 3, "value": "-6dB"}]}),
+    );
+    let vol = lane(Param::Volume);
+    assert_eq!(vol[0], (0.0, 0.0));
+    assert!((vol[1].1 - 0.501).abs() < 1e-3, "{vol:?}");
+    assert_eq!(
+        load(&path).tracks[0].automation[1].points[0].shape,
+        aidaw_core::Shape::Smooth
+    );
+    // Turning the fixed gain is pointless now, and the reply says so.
+    let out = c.call("update_track", json!({"track": "Pad", "gain": 0.5}));
+    assert!(out.contains("gain is automated"), "{out}");
+    // Scaling the points does what the gain would have.
+    let out = c.call(
+        "automate",
+        json!({"track": "Pad", "param": "volume", "scale": 0.5}),
+    );
+    assert!(out.contains("-6.0 dB"), "{out}");
+    assert!((lane(Param::Volume)[1].1 - 0.25).abs() < 1e-3);
+
+    // A pan wobble each bar, to the end of the song: 8 copies whose ends
+    // and starts meet.
+    let out = c.call(
+        "automate",
+        json!({"track": "Pad", "param": "pan", "points": "1:-1 1.5:1 2:-1", "every_bars": 1}),
+    );
+    assert!(out.contains("8 copies"), "{out}");
+    let pan = lane(Param::Pan);
+    assert_eq!(pan.len(), 17);
+    assert_eq!(pan[16], (32.0, -1.0));
+    // Clear part of it, then replace it all with one point.
+    c.call(
+        "automate",
+        json!({"track": "Pad", "param": "pan", "clear": true, "from_bar": 5}),
+    );
+    assert!(lane(Param::Pan).iter().all(|(b, _)| *b < 16.0));
+    c.call(
+        "automate",
+        json!({"track": "Pad", "param": "pan", "clear": "true", "points": "1:0.3"}),
+    );
+    assert_eq!(lane(Param::Pan), [(0.0, 0.3)]);
+
+    // Out of range values are clamped, with a warning.
+    let out = c.call(
+        "automate",
+        json!({"track": "Pad", "param": "resonance", "points": "1:5"}),
+    );
+    assert!(out.contains("clamped"), "{out}");
+    assert_eq!(lane(Param::Resonance), [(0.0, 1.0)]);
+    // FM on a saw pad is silent until the waveform changes.
+    let out = c.call(
+        "automate",
+        json!({"track": "Pad", "param": "fm", "points": "1:0 5:4"}),
+    );
+    assert!(out.contains("fm only bends sine and triangle"), "{out}");
+
+    // Mistakes are explained and change nothing.
+    let before = load(&path);
+    for (args, says) in [
+        (
+            json!({"track": "Drums", "param": "cutoff", "points": "1:300"}),
+            "plays drums",
+        ),
+        (json!({"param": "pan", "points": "1:0"}), "track setting"),
+        (
+            json!({"track": "Pad", "param": "reverb_size", "points": "1:0.5"}),
+            "whole song",
+        ),
+        (
+            json!({"track": "Pad", "param": "pan", "points": "soon"}),
+            "BAR:VALUE",
+        ),
+        (
+            json!({"track": "Pad", "param": "pan", "points": [{"bar": 0, "value": 0}]}),
+            "numbered from 1",
+        ),
+        (
+            json!({"track": "Pad", "param": "wobbliness", "points": "1:0"}),
+            "unknown param",
+        ),
+        (
+            json!({"track": "Pad", "param": "sub", "points": "1:0 3:1", "every_bars": 1}),
+            "overlap",
+        ),
+        (json!({"track": "Pad", "param": "sub"}), "nothing to do"),
+        (
+            json!({"track": "Pad", "param": "noise", "scale": 2}),
+            "no noise automation",
+        ),
+        (
+            json!({"track": "Pad", "param": "pan", "points": [{"value": 1}]}),
+            "needs a \"bar\"",
+        ),
+    ] {
+        let err = c.call_err("automate", args.clone());
+        assert!(err.contains(says), "{args}: {err}");
+    }
+    assert_eq!(load(&path), before);
+
+    // Inside apply_ops, and by the clear_automation alias.
+    c.call(
+        "apply_ops",
+        json!({"ops": [
+            {"op": "automate", "track": "Drums", "param": "reverb", "points": "1:0 9:0.6"},
+            {"op": "clear_automation", "track": "Pad", "param": "all"}
+        ]}),
+    );
+    let p = load(&path);
+    assert!(p.tracks[0].automation.is_empty());
+    assert_eq!(p.tracks[1].automation.len(), 1);
+    let (err, out) = c.try_call("clear_automation", json!({}));
+    assert!(
+        !err && out.contains("cleared all automation of the whole song (3 points)"),
+        "{out}"
+    );
+    assert!(load(&path).automation.is_empty());
+
+    // The command line takes the same text points.
+    let (ok, out, err) = cli(
+        &[
+            "call",
+            "automate",
+            "track=Pad",
+            "param=cutoff",
+            "points=1:200 9:6000",
+            "shape=smooth",
+        ],
+        &path,
+    );
+    assert!(ok, "{out}{err}");
+    assert_eq!(lane(Param::Cutoff), [(0.0, 200.0), (32.0, 6000.0)]);
     std::fs::remove_dir_all(&dir).ok();
 }

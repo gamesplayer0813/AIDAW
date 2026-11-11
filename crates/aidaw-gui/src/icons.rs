@@ -11,6 +11,7 @@ use crate::theme;
 pub enum Icon {
     ArrowDown,
     ArrowUp,
+    Automation,
     Cap,
     ChevronDown,
     ChevronLeft,
@@ -50,6 +51,7 @@ impl Icon {
         match self {
             Icon::ArrowDown => include_image!("../assets/icons/arrow-down.svg"),
             Icon::ArrowUp => include_image!("../assets/icons/arrow-up.svg"),
+            Icon::Automation => include_image!("../assets/icons/automation.svg"),
             Icon::Cap => include_image!("../assets/icons/cap.svg"),
             Icon::ChevronDown => include_image!("../assets/icons/chevron-down.svg"),
             Icon::ChevronLeft => include_image!("../assets/icons/chevron-left.svg"),

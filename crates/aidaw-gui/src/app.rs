@@ -19,6 +19,7 @@ use crate::editing::{self, Copied};
 use crate::history::{History, Selection, Version};
 use crate::i18n::{self, tr, trf};
 use crate::icons::{self, Icon};
+use crate::lanes::LaneKey;
 use crate::onboarding::{self, Tutorial, WelcomeChoice};
 use crate::plugins::Plugins;
 use crate::scale::Scale;
@@ -86,14 +87,21 @@ pub enum Drag {
     LoopEdge {
         start: bool,
     },
+    /// Moving point `index` of an automation lane.
+    MovePoint {
+        key: LaneKey,
+        index: usize,
+    },
 }
 
 /// Where the editing keys (Delete, Ctrl+C, Ctrl+D, arrows…) act: the notes
-/// in the piano roll or the clip in the song, whichever was clicked last.
+/// in the piano roll, the clip in the song or an automation point,
+/// whichever was clicked last.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditFocus {
     Notes,
     Clips,
+    Automation,
 }
 
 pub struct App {
@@ -120,6 +128,11 @@ pub struct App {
     pub selected_notes: BTreeSet<usize>,
     pub edit_focus: EditFocus,
     pub drag: Option<Drag>,
+    /// Tracks whose automation lanes show under them, and Master's.
+    pub lanes_open: BTreeSet<String>,
+    pub master_lanes_open: bool,
+    /// The automation point Delete acts on.
+    pub selected_point: Option<(LaneKey, usize)>,
 
     /// Grid size in beats.
     pub snap: f64,
@@ -365,6 +378,9 @@ impl App {
             selected_notes: BTreeSet::new(),
             edit_focus: EditFocus::Notes,
             drag: None,
+            lanes_open: BTreeSet::new(),
+            master_lanes_open: false,
+            selected_point: None,
             snap: 0.25,
             arrange_zoom: 28.0,
             roll_zoom: 90.0,
@@ -403,8 +419,18 @@ impl App {
         // A request already in the file is old news: don't act on it.
         app.seen_cue = app.project.transport.cue.map(|c| c.id);
         app.select_first_clip();
+        app.reveal_automation(&Project::new("", 120.0));
         app.send_project();
         app
+    }
+
+    /// Open the lanes of tracks whose automation is new or changed since
+    /// `before` (the AI just wrote some, or a song was opened), so nobody
+    /// misses them.
+    fn reveal_automation(&mut self, before: &Project) {
+        let (tracks, song) = crate::arrange::changed_lanes(before, &self.project);
+        self.lanes_open.extend(tracks);
+        self.master_lanes_open |= song;
     }
 
     fn select_first_clip(&mut self) {
@@ -447,6 +473,9 @@ impl App {
         self.stop();
         self.save_at = None;
         self.select_first_clip();
+        self.lanes_open.clear();
+        self.master_lanes_open = false;
+        self.reveal_automation(&Project::new("", 120.0));
         self.status = status.into();
     }
 
@@ -726,6 +755,13 @@ impl App {
                 self.selected_notes.retain(|&i| i < len);
             }
         }
+        if let Some((key, i)) = &self.selected_point {
+            if key.lane(&self.project).is_none_or(|l| *i >= l.points.len()) {
+                self.selected_point = None;
+            }
+        }
+        self.lanes_open
+            .retain(|id| self.project.tracks.iter().any(|t| &t.id == id));
     }
 
     // ---- undo history --------------------------------------------------
@@ -821,6 +857,18 @@ impl App {
             };
         }
         self.drag = None; // it held indexes into the old song
+
+        // A selected automation point stays selected only while its lane
+        // has as many points as before; otherwise its index names another.
+        let points = |p: &Project| {
+            self.selected_point
+                .as_ref()
+                .and_then(|(key, _)| key.lane(p))
+                .map(|l| l.points.len())
+        };
+        if points(&old.project) != points(&self.project) {
+            self.selected_point = None;
+        }
         self.sort_notes_keeping_selection();
         self.on_project_changed();
         self.history.replaced(&self.project, self.selection());
@@ -931,6 +979,7 @@ impl App {
                 // Keep the local version on the undo stack so AI edits can be reverted.
                 self.settle();
                 let local = self.swap_in(Version::of(p));
+                self.reveal_automation(&local.project);
                 self.history.push(local);
                 // The file already holds this version; don't write it back.
                 self.save_at = None;
@@ -1956,6 +2005,17 @@ impl App {
                     self.nudge_clip(across);
                 }
             }
+            EditFocus::Automation => {
+                if escape {
+                    self.selected_point = None;
+                }
+                if delete {
+                    if let Some((key, i)) = self.selected_point.take() {
+                        crate::lanes::delete_point(self, &key, i);
+                        self.status = tr("Deleted the point (Ctrl+Z brings it back)").into();
+                    }
+                }
+            }
         }
     }
 
@@ -2916,5 +2976,54 @@ mod tests {
             "loaded in order"
         );
         assert_eq!(fs::read_to_string(&broken).unwrap(), "{ this is not a song");
+    }
+
+    #[test]
+    fn lanes_the_ai_writes_open_and_undo_never_selects_another_point() {
+        use aidaw_core::automation::{Lane, Param, Point};
+        let dir = TempDir::new("lanes");
+        let path = dir.0.join("song.aidaw.json");
+        let mine = song(&[(60, 0.0)]);
+        pio::save(&mine, &path).unwrap();
+        let mut a = app(mine.clone(), Some(path.clone()));
+        let ctx = egui::Context::default();
+
+        // The AI fades the keys in over the first bar.
+        let mut theirs = mine.clone();
+        let mut fade = Lane::new(Param::Volume);
+        fade.points = vec![Point::new(0.0, 0.0), Point::new(4.0, 0.8)];
+        theirs.tracks[0].automation.push(fade);
+        write_later(&path, &serde_json::to_string(&theirs).unwrap());
+        poll_now(&mut a);
+        assert!(a.lanes_open.contains("t1"), "the AI's lane opens by itself");
+        assert!(!a.lanes_open.contains("t2") && !a.master_lanes_open);
+
+        // A click on the line adds a point between the two and selects it.
+        let lane = LaneKey::new(Some("t1"), Param::Volume);
+        let points = |a: &App| lane.lane(&a.project).map_or(0, |l| l.points.len());
+        frame(&mut a, &ctx, vec![button(false)], |a, _| {
+            let i = crate::lanes::add_point(a, &lane, 2.0, 0.4).unwrap();
+            a.selected_point = Some((lane.clone(), i));
+            a.edit_focus = EditFocus::Automation;
+        });
+        assert_eq!(a.selected_point, Some((lane.clone(), 1)));
+        // Index 1 is the AI's last point again after undo: not the one picked.
+        a.undo();
+        assert_eq!((points(&a), a.selected_point.clone()), (2, None));
+        a.redo();
+        assert_eq!(points(&a), 3);
+
+        // Delete takes the selected point, and Ctrl+Z brings it back.
+        frame(&mut a, &ctx, vec![button(false)], |a, _| {
+            a.selected_point = Some((lane.clone(), 0));
+        });
+        frame(&mut a, &ctx, vec![key(Key::Delete)], |a, ctx| {
+            a.edit_shortcuts(ctx)
+        });
+        assert_eq!((points(&a), a.selected_point.clone()), (2, None));
+        assert_eq!(lane.lane(&a.project).unwrap().points[0].beat, 2.0);
+        a.undo();
+        assert_eq!(points(&a), 3);
+        assert_eq!(lane.value_at(&a.project, 0.0), Some(0.0));
     }
 }
