@@ -441,6 +441,7 @@ pub fn show_ai_help(ctx: &egui::Context, app: &mut App, open: &mut bool) {
                 tr("“Make a chill lo-fi beat at 85 BPM with piano chords, bass and drums.”"),
                 tr("“Add a happy melody on a new track over bars 5 to 8.”"),
                 tr("“The drums are too busy. Make them simpler.”"),
+                tr("“Slowly open the pad's filter over the intro, and fade the song out at the end.”"),
             ] {
                 ui.label(RichText::new(example).italics());
             }

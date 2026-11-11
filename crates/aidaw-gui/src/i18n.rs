@@ -911,6 +911,9 @@ fn zh(en: &str) -> Option<&'static str> {
             "“在新音轨的第 5 到 8 小节加一段欢快的旋律。”"
         }
         "“The drums are too busy. Make them simpler.”" => "“鼓太密了，弄简单一点。”",
+        "“Slowly open the pad's filter over the intro, and fade the song out at the end.”" => {
+            "“前奏里让 Pad 的滤波慢慢打开，结尾把整首歌淡出。”"
+        }
         "Don't like what it did? Press Ctrl+Z here to undo it." => {
             "不喜欢它改的？在这里按 Ctrl+Z 撤销就行。"
         }

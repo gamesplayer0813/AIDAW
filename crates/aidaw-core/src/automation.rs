@@ -37,8 +37,11 @@ pub enum Param {
     /// The shared reverb room's size and tone.
     ReverbSize,
     ReverbTone,
-    /// A setting this version does not know (written by a newer AIDAW).
-    /// Kept in the file, ignored by playback.
+    /// A setting this version does not know, such as a typo in a file
+    /// edited by hand. Playback ignores it, edits refuse it, and it is
+    /// saved back as "unknown". Adding a setting therefore bumps
+    /// [`crate::model::FORMAT_VERSION`], so older builds refuse the new
+    /// files instead of losing the setting.
     Unknown,
 }
 

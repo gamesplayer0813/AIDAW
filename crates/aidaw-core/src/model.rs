@@ -506,15 +506,6 @@ impl Project {
         }
     }
 
-    /// Put every automation lane's points in time order (a file edited by
-    /// hand may not have them so); points on the same beat keep their order.
-    pub fn sort_automation(&mut self) {
-        let tracks = self.tracks.iter_mut().flat_map(|t| t.automation.iter_mut());
-        for lane in self.automation.iter_mut().chain(tracks) {
-            automation::sort(&mut lane.points);
-        }
-    }
-
     /// Whether every clip's notes are in playing order.
     pub fn notes_sorted(&self) -> bool {
         self.tracks

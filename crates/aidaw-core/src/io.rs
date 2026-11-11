@@ -45,7 +45,8 @@ pub fn load(path: &Path) -> Result<Project> {
 
 /// Parse a project from JSON in any format version this build knows,
 /// upgrading older ones to [`FORMAT_VERSION`]. Notes and automation points
-/// come out in playing order (see [`crate::Clip::sort_notes`]).
+/// come out in playing order (see [`crate::Clip::sort_notes`]; lanes sort
+/// their points as they are read).
 pub fn from_json(text: &str) -> Result<Project> {
     /// Just the version; every other field is skipped unparsed.
     #[derive(Deserialize)]
@@ -76,7 +77,6 @@ pub fn from_json(text: &str) -> Result<Project> {
 fn normalized(mut project: Project) -> Project {
     project.version = FORMAT_VERSION;
     project.sort_notes();
-    project.sort_automation();
     project
 }
 
