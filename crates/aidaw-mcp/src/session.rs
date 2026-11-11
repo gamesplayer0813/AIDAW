@@ -6,11 +6,12 @@
 use std::path::{Path, PathBuf};
 
 use aidaw_core::analysis::{self, Analysis, Levels};
+use aidaw_core::automation;
 use aidaw_core::edit::{self, Op};
 use aidaw_core::music::{self, ChordStyle};
 use aidaw_core::{
-    color, io as pio, pitch, presets, render, DrumKit, Instrument, Note, Project, Synth,
-    TimeSignature, Waveform,
+    color, io as pio, pitch, presets, render, DrumKit, Instrument, Lane, Note, Param, Point,
+    Project, Shape, Synth, TimeSignature, Waveform,
 };
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Map, Value};
@@ -73,8 +74,13 @@ const NUMERIC_KEYS: &[&str] = &[
     "seed",
     "position",
     "steps",
+    "value",
+    "beat",
+    "every_bars",
+    "every_beats",
+    "scale",
 ];
-const BOOL_KEYS: &[&str] = &["mute", "solo", "overwrite", "on", "play"];
+const BOOL_KEYS: &[&str] = &["mute", "solo", "overwrite", "on", "play", "clear"];
 /// Accepted everywhere although not advertised in the schemas.
 const HIDDEN_KEYS: &[&str] = &[
     "track_id",
@@ -146,6 +152,7 @@ impl Session {
             _ => bail!("arguments must be a JSON object, e.g. {}", tool.example),
         };
         coerce(&mut args);
+        implied_args(name, &mut args);
         let warnings = unknown_keys(tool, &args);
         let mut out = self
             .run(tool, args)
@@ -318,6 +325,7 @@ impl Session {
                                 )
                             })?;
                         coerce(&mut item);
+                        implied_args(&name, &mut item);
                         results.push(
                             apply_tool(work, tool, item)
                                 .map_err(|e| anyhow!("op #{i} ({}): {e:#}", tool.name))?,
@@ -484,6 +492,7 @@ const EDIT_TOOLS: &[&str] = &[
     "split_clip",
     "set_loop",
     "set_playhead",
+    "automate",
 ];
 
 fn is_edit_tool(name: &str) -> bool {
@@ -492,6 +501,61 @@ fn is_edit_tool(name: &str) -> bool {
 
 fn edit_tool_names() -> String {
     EDIT_TOOLS.join(", ")
+}
+
+/// Arguments a tool alias stands for: "clear_automation" is automate with
+/// clear.
+fn implied_args(name: &str, args: &mut Args) {
+    if tools::CLEARING_ALIASES.contains(&tools::bare_name(name)) {
+        args.entry("clear").or_insert(json!(true));
+    }
+}
+
+/// A warning when update_track / update_project sets something that
+/// automation overrides, so the model is not puzzled that nothing changes.
+fn not_heard(work: &Project, tool: &str, args: &Args) -> Option<String> {
+    let (lanes, track_id, keys): (&[Lane], Option<&str>, &[&str]) = match tool {
+        "update_track" => {
+            let id = args.get("track_id")?.as_str()?;
+            let keys = &[
+                "gain",
+                "pan",
+                "reverb",
+                "cutoff",
+                "resonance",
+                "drive",
+                "fm",
+                "vibrato",
+                "sub",
+                "noise",
+            ];
+            (&work.track(id)?.automation, Some(id), keys)
+        }
+        "update_project" => (
+            &work.automation,
+            None,
+            &["master_gain", "reverb_size", "reverb_tone"],
+        ),
+        _ => return None,
+    };
+    let hit: Vec<(&str, Param)> = keys
+        .iter()
+        .filter(|k| args.contains_key(**k))
+        .filter_map(|k| {
+            let param = Param::parse(k)?;
+            automation::find(lanes, param).map(|_| (*k, param))
+        })
+        .collect();
+    let (_, first) = *hit.first()?;
+    let names: Vec<&str> = hit.iter().map(|(k, _)| *k).collect();
+    let track = track_id.map_or(String::new(), |id| format!("\"track\": \"{id}\", "));
+    Some(format!(
+        "{} {} automated, so the new value is not heard while its lane has points; move the points \
+         with automate, or remove them: automate {{{track}\"param\": \"{}\", \"clear\": true}}",
+        names.join(", "),
+        if names.len() == 1 { "is" } else { "are" },
+        first.id()
+    ))
 }
 
 /// Apply one editing tool to `work`.
@@ -529,6 +593,7 @@ fn apply_tool(work: &mut Project, tool: &Tool, mut args: Args) -> Result<Value> 
         "split_clip" => return split_clips(work, args),
         "set_loop" => return set_loop(work, args),
         "set_playhead" => return set_playhead(work, args),
+        "automate" => return automate(work, args),
         "add_track" | "update_track" => {
             let existing = match tool.name {
                 "update_track" => {
@@ -626,6 +691,7 @@ fn apply_tool(work: &mut Project, tool: &Tool, mut args: Args) -> Result<Value> 
         }
         _ => {}
     }
+    warnings.extend(not_heard(work, tool.name, &args));
     let created_instrument = (tool.name == "add_track").then(|| args.get("instrument").cloned());
     // A track's row and colour are edits of their own in the core.
     let color = match tool.name {
@@ -1367,6 +1433,728 @@ fn set_playhead(work: &mut Project, mut args: Args) -> Result<Value> {
     Ok(result)
 }
 
+// ---------------------------------------------------------------------------
+// Automation
+
+/// Track names that mean the song as a whole in automate (unless a track is
+/// really called that).
+fn means_song(q: &str) -> bool {
+    matches!(
+        norm(q).as_str(),
+        "master" | "masterbus" | "mastertrack" | "song" | "mix" | "main" | "output" | "none"
+    )
+}
+
+/// What `param` can be on a track like this one (or on the song), for errors.
+fn param_choices(work: &Project, track_id: Option<&str>) -> String {
+    let fits: Vec<&str> = Param::ALL
+        .into_iter()
+        .filter(|p| match work.track(track_id.unwrap_or_default()) {
+            Some(t) => p.suits_track(&t.instrument),
+            None => p.is_master(),
+        })
+        .map(Param::id)
+        .collect();
+    match track_id {
+        Some(_) => fits.join(", "),
+        None => format!(
+            "{} (for the whole song; give \"track\" for volume, pan, reverb, cutoff ...)",
+            fits.join(", ")
+        ),
+    }
+}
+
+/// The parameter the model means, checked against where it goes.
+fn resolve_param(
+    work: &Project,
+    given: &str,
+    track_id: Option<&str>,
+    song_named: bool,
+) -> Result<Param> {
+    let param = Param::parse(given).ok_or_else(|| {
+        anyhow!(
+            "unknown param {given:?}; use one of: {}",
+            param_choices(work, track_id)
+        )
+    })?;
+    let Some(id) = track_id else {
+        return match param {
+            p if p.is_master() => Ok(p),
+            // {"track": "master", "param": "volume"}
+            Param::Volume if song_named => Ok(Param::MasterVolume),
+            Param::Reverb if song_named => bail!(
+                "the song's reverb room is reverb_size (0 small .. 1 big hall) or reverb_tone (0 dark .. 1 bright); \
+                 a track's reverb send needs \"track\""
+            ),
+            p => bail!(
+                "{} is a track setting: add \"track\" (the song as a whole has master_volume, reverb_size, reverb_tone). {}",
+                p.id(),
+                track_list(work)
+            ),
+        };
+    };
+    let t = work.track(id).expect("resolved");
+    if param.is_master() {
+        bail!(
+            "{} belongs to the whole song, not to a track: leave out \"track\", e.g. {{\"param\": \"{}\", \"points\": \"1:1 9:0\"}}",
+            param.id(),
+            param.id()
+        );
+    }
+    if !param.suits_track(&t.instrument) {
+        bail!(
+            "track {} \"{}\" plays drums, which have no {} (only synth tracks do); drum tracks can automate {}",
+            t.id,
+            t.name,
+            param.id(),
+            param_choices(work, Some(id))
+        );
+    }
+    Ok(param)
+}
+
+/// A number, or a string holding one: "0.5", "-6 dB" (volumes), "2k" or
+/// "800 Hz" (cutoff), "15 cents".
+fn automation_value(v: &Value, param: Param) -> Option<f64> {
+    let x = match v {
+        Value::Number(n) => n.as_f64()?,
+        Value::String(s) => {
+            let t = s.trim().to_ascii_lowercase().replace([' ', '_'], "");
+            let number = |s: &str| s.parse::<f64>().ok();
+            if let Some(db) = t.strip_suffix("db") {
+                if !matches!(param, Param::Volume | Param::MasterVolume) {
+                    return None;
+                }
+                // "-inf dB" is silence.
+                10f64.powf(number(db)? / 20.0)
+            } else if let Some(k) = t.strip_suffix("khz").or_else(|| t.strip_suffix('k')) {
+                number(k)? * 1000.0
+            } else if let Some(x) = t
+                .strip_suffix("hz")
+                .or_else(|| t.strip_suffix("cents"))
+                .or_else(|| t.strip_suffix("ct"))
+            {
+                number(x)?
+            } else {
+                number(&t)?
+            }
+        }
+        _ => return None,
+    };
+    x.is_finite().then_some(x)
+}
+
+/// A bar number: a number or a numeric string.
+fn loose_number(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
+    .filter(|x: &f64| x.is_finite())
+}
+
+/// Points as the model wrote them: objects, [bar, value] pairs, an object
+/// of bar -> value, or text like "1:300 5:8000:smooth". Positions come back
+/// in beats; values unclamped (the core clamps).
+fn automation_points(v: Value, param: Param, bpb: f64, shape: Shape) -> Result<Vec<Point>> {
+    const HOW: &str =
+        "e.g. [{\"bar\": 1, \"value\": 0}, {\"bar\": 5, \"value\": 0.8}] or \"1:0 5:0.8\"";
+    let items: Vec<Value> = match v {
+        Value::Array(items) => items,
+        Value::String(text) => {
+            let t = text.trim();
+            if t.starts_with('[') || t.starts_with('{') {
+                let parsed = serde_json::from_str(t)
+                    .map_err(|e| anyhow!("points is not valid JSON ({e}); {HOW}"))?;
+                return automation_points(parsed, param, bpb, shape);
+            }
+            t.split(|c: char| c.is_whitespace() || c == ',' || c == ';')
+                .filter(|tok| !tok.is_empty())
+                .map(|tok| match tok.split(':').collect::<Vec<_>>().as_slice() {
+                    [bar, value] => Ok(json!({"bar": bar, "value": value})),
+                    [bar, value, shape] => Ok(json!({"bar": bar, "value": value, "shape": shape})),
+                    _ => Err(anyhow!(
+                        "cannot read the point {tok:?}: write BAR:VALUE, e.g. \"1:0 5:0.8\" (or BAR:VALUE:SHAPE, e.g. \"5:0.8:smooth\")"
+                    )),
+                })
+                .collect::<Result<_>>()?
+        }
+        // One point on its own.
+        Value::Object(m) if m.contains_key("value") => vec![Value::Object(m)],
+        // {"1": 0, "5": 0.8}
+        Value::Object(m) => m
+            .into_iter()
+            .map(|(bar, value)| json!({"bar": bar, "value": value}))
+            .collect(),
+        other => bail!("points must be a list of points, {HOW} (got {other})"),
+    };
+    if items.is_empty() {
+        bail!("points is empty; give at least one, {HOW}");
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for (i, item) in items.into_iter().enumerate() {
+        let n = i + 1;
+        let (bar, beat, value, own_shape) = match item {
+            Value::Array(a) => match a.as_slice() {
+                [b, v] => (Some(b.clone()), None, Some(v.clone()), None),
+                [b, v, s] => (Some(b.clone()), None, Some(v.clone()), Some(s.clone())),
+                _ => bail!("point {n}: a pair is [bar, value], e.g. [5, 0.8]"),
+            },
+            Value::Object(mut m) => {
+                let mut take = |keys: &[&str]| keys.iter().find_map(|k| m.remove(*k));
+                let bar = take(&["bar", "bars", "measure"]);
+                let beat = take(&["beat", "beats"]);
+                let value = take(&["value", "v", "val", "level", "amount", param.id()])
+                    .or_else(|| (param == Param::Volume).then(|| take(&["gain"])).flatten());
+                let shape = take(&["shape", "curve"]);
+                (bar, beat, value, shape)
+            }
+            other => bail!(
+                "point {n} must be an object like {{\"bar\": 5, \"value\": 0.8}} (got {other})"
+            ),
+        };
+        let at = match (bar, beat) {
+            (Some(b), _) => {
+                let bar = loose_number(&b).ok_or_else(|| {
+                    anyhow!("point {n}: bar must be a number like 5 or 5.5 (got {b})")
+                })?;
+                if bar < 1.0 {
+                    bail!("point {n}: bars are numbered from 1 (bar 1 = the start of the song); got bar {bar}");
+                }
+                (bar - 1.0) * bpb
+            }
+            (None, Some(b)) => {
+                let beat = loose_number(&b)
+                    .ok_or_else(|| anyhow!("point {n}: beat must be a number (got {b})"))?;
+                if beat < 0.0 {
+                    bail!(
+                        "point {n}: beat must be 0 or more (0 = the start of the song); got {beat}"
+                    );
+                }
+                beat
+            }
+            (None, None) => bail!(
+                "point {n} needs a \"bar\" (or \"beat\"), e.g. {{\"bar\": 5, \"value\": 0.8}}"
+            ),
+        };
+        check_end(at, bpb)?;
+        let value = value.ok_or_else(|| {
+            anyhow!("point {n} needs a \"value\", e.g. {{\"bar\": 5, \"value\": 0.8}}")
+        })?;
+        let x = automation_value(&value, param).ok_or_else(|| {
+            anyhow!(
+                "point {n}: value {value} is not a number; {} is {}",
+                param.id(),
+                param.info().hint
+            )
+        })?;
+        let shape = match own_shape {
+            None => shape,
+            Some(s) => {
+                let text = s.as_str().unwrap_or_default();
+                Shape::parse(text).ok_or_else(|| {
+                    anyhow!("point {n}: unknown shape {s}; use linear, smooth or hold")
+                })?
+            }
+        };
+        out.push(Point {
+            beat: at,
+            value: x as f32,
+            shape,
+        });
+    }
+    Ok(out)
+}
+
+/// `points` repeated `times` times, `every` beats apart. Where one copy
+/// ends on the beat the next one starts with the same value, the two points
+/// become one (the later, whose shape leads on).
+fn repeat_points(points: &[Point], every: f64, times: u32) -> Vec<Point> {
+    let mut out: Vec<Point> = Vec::with_capacity(points.len() * times as usize);
+    for k in 0..times {
+        for p in points {
+            let next = Point {
+                beat: p.beat + every * k as f64,
+                ..*p
+            };
+            if let Some(last) = out.last_mut() {
+                if (last.beat - next.beat).abs() < 1e-9 && last.value == next.value {
+                    *last = next;
+                    continue;
+                }
+            }
+            out.push(next);
+        }
+    }
+    out
+}
+
+/// The lanes `automate` works on.
+fn lanes_of<'a>(work: &'a Project, track_id: Option<&str>) -> &'a [Lane] {
+    match track_id {
+        Some(id) => work.track(id).map_or(&[], |t| &t.automation),
+        None => &work.automation,
+    }
+}
+
+/// A value in the setting's units, for replies: "800 Hz", "0.5", "15 cents".
+fn fmt_value(param: Param, v: f32) -> String {
+    match param {
+        Param::Cutoff => format!("{} Hz", fmt_num(v.round() as f64)),
+        Param::Vibrato => format!("{} cents", fmt_num((v as f64 * 10.0).round() / 10.0)),
+        _ => fmt_num(v as f64),
+    }
+}
+
+/// "2 points from bar 1 to bar 9: 300 Hz -> 8000 Hz"
+fn lane_summary(lane: &Lane, bpb: f64) -> String {
+    let param = lane.param;
+    let info = lane.info();
+    let (first, last) = match (lane.points.first(), lane.points.last()) {
+        (Some(f), Some(l)) => (f, l),
+        _ => return "no points".into(),
+    };
+    let n = lane.points.len();
+    if n == 1 {
+        return format!(
+            "1 point at bar {}: {}",
+            bar_of(first.beat, bpb),
+            fmt_value(param, info.clamp(first.value))
+        );
+    }
+    let values = if n == 2 {
+        format!(
+            "{} -> {}",
+            fmt_value(param, info.clamp(first.value)),
+            fmt_value(param, info.clamp(last.value))
+        )
+    } else {
+        let (lo, hi) = lane.range().expect("has points");
+        format!(
+            "between {} and {}",
+            fmt_value(param, lo),
+            fmt_value(param, hi)
+        )
+    };
+    format!(
+        "{n} points from bar {} to bar {}: {values}",
+        bar_of(first.beat, bpb),
+        bar_of(last.beat, bpb)
+    )
+}
+
+/// "1:300 9:8000:smooth", the way `points` can be written.
+fn lane_points_text(lane: &Lane, bpb: f64) -> String {
+    let info = lane.info();
+    lane.points
+        .iter()
+        .map(|p| {
+            let mut s = format!(
+                "{}:{}",
+                bar_of(p.beat, bpb),
+                fmt_num(info.clamp(p.value) as f64)
+            );
+            if p.shape != Shape::Linear {
+                s += &format!(":{}", p.shape.id());
+            }
+            s
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The fixed setting a lane takes over, as "gain 0.8", for replies.
+fn fixed_setting(work: &Project, track_id: Option<&str>, param: Param) -> Option<String> {
+    let synth = |f: fn(&Synth) -> f32| match &work.track(track_id?)?.instrument {
+        Instrument::Synth(s) => Some(f(s)),
+        Instrument::Drums { .. } => None,
+    };
+    let t = || work.track(track_id?);
+    let (name, v) = match param {
+        Param::Volume => ("gain", t()?.gain),
+        Param::Pan => ("pan", t()?.pan),
+        Param::Reverb => ("reverb", t()?.reverb),
+        Param::Cutoff => ("cutoff", synth(|s| s.cutoff)?),
+        Param::Resonance => ("resonance", synth(|s| s.resonance)?),
+        Param::Drive => ("drive", synth(|s| s.drive)?),
+        Param::Fm => ("fm", synth(|s| s.fm)?),
+        Param::Vibrato => ("vibrato", synth(|s| s.vibrato)?),
+        Param::Sub => ("sub", synth(|s| s.sub)?),
+        Param::Noise => ("noise", synth(|s| s.noise)?),
+        Param::MasterVolume => ("master_gain", work.master_gain),
+        Param::ReverbSize => ("reverb_size", work.reverb.size),
+        Param::ReverbTone => ("reverb_tone", work.reverb.tone),
+        Param::Unknown => return None,
+    };
+    Some(format!("{name} {}", fmt_value(param, v)))
+}
+
+/// automate: write, repeat, scale or clear automation points.
+fn automate(work: &mut Project, mut args: Args) -> Result<Value> {
+    let bpb = work.beats_per_bar as f64;
+    let mut warnings: Vec<String> = Vec::new();
+
+    // The lanes of a track, or of the song ("master" or no track).
+    let query = track_query(&mut args);
+    let song_named = query
+        .as_deref()
+        .is_some_and(|q| means_song(q) && find_track(work, q).is_err());
+    let track_id = match &query {
+        Some(q) if !song_named => Some(find_track(work, q)?.id.clone()),
+        _ => None,
+    };
+    let track_id = track_id.as_deref();
+    let (whose, place) = match track_id.and_then(|id| work.track(id)) {
+        Some(t) => {
+            let t = format!("track {} \"{}\"", t.id, t.name);
+            (t.clone(), format!("on {t}"))
+        }
+        None => (
+            "the whole song".to_string(),
+            "for the whole song".to_string(),
+        ),
+    };
+
+    let clear = match args.get("clear") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(v) => bail!("clear must be true or false (got {v})"),
+    };
+    let given = ["param", "parameter", "setting"]
+        .iter()
+        .find_map(|k| args.remove(*k));
+    let param = match given {
+        None | Some(Value::Null) if clear => None,
+        None | Some(Value::Null) => bail!(
+            "missing \"param\" (what should move): {}",
+            param_choices(work, track_id)
+        ),
+        Some(Value::String(s)) if clear && (s.trim() == "*" || norm(&s) == "all") => None,
+        Some(Value::String(s)) => Some(resolve_param(work, &s, track_id, song_named)?),
+        Some(v) => bail!("param must be a name such as \"volume\" or \"cutoff\" (got {v})"),
+    };
+
+    let bar_arg = |key: &str| -> Result<Option<f64>> {
+        let Some(v) = args.get(key) else {
+            return Ok(None);
+        };
+        let bar = loose_number(v)
+            .ok_or_else(|| anyhow!("{key} must be a bar number like 1 or 5 (got {v})"))?;
+        if !(1.0..=4097.0).contains(&bar) {
+            bail!("{key} must be a bar from 1 to 4097 (bar 1 = the start of the song); got {bar}");
+        }
+        Ok(Some((bar - 1.0) * bpb))
+    };
+    let (from, to) = (bar_arg("from_bar")?, bar_arg("to_bar")?);
+    if let (Some(f), Some(t)) = (from, to) {
+        if t <= f {
+            bail!(
+                "to_bar must be after from_bar: it is where the range stops, so from_bar 5, to_bar 9 means bars 5-8"
+            );
+        }
+    }
+    let range_text = match (from, to) {
+        (None, None) => String::new(),
+        (f, t) => {
+            let f = f.unwrap_or(0.0);
+            match t {
+                Some(t) => format!(" in {}", bar_range(f, t, bpb)),
+                None => format!(" from bar {} on", bar_of(f, bpb)),
+            }
+        }
+    };
+    let in_range =
+        |beat: f64| beat >= from.unwrap_or(f64::NEG_INFINITY) && beat < to.unwrap_or(f64::INFINITY);
+
+    let shape = match args.get("shape") {
+        None | Some(Value::Null) => Shape::Linear,
+        Some(v) => v
+            .as_str()
+            .and_then(Shape::parse)
+            .ok_or_else(|| anyhow!("unknown shape {v}; use linear (default), smooth or hold"))?,
+    };
+    let scale = match args.get("scale") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            loose_number(v)
+                .filter(|x| (0.0..=100.0).contains(x))
+                .ok_or_else(|| {
+                    anyhow!("scale must be a number from 0 to 100, e.g. 0.5 (got {v})")
+                })?,
+        ),
+    };
+    let mut points = args.remove("points").or_else(|| args.remove("point"));
+    if points.is_none() && args.contains_key("value") {
+        // {"param": "pan", "bar": 5, "value": -0.5}: one point.
+        let mut one = Map::new();
+        for key in ["bar", "beat", "value"] {
+            if let Some(v) = args.get(key) {
+                one.insert(key.into(), v.clone());
+            }
+        }
+        if !one.contains_key("bar") && !one.contains_key("beat") {
+            one.insert("bar".into(), json!(1));
+        }
+        points = Some(Value::Object(one));
+    }
+
+    let mut ops = Vec::new();
+    let mut said = Vec::new();
+    if clear {
+        let lanes = lanes_of(work, track_id);
+        let matching: Vec<&Lane> = lanes
+            .iter()
+            .filter(|l| param.is_none_or(|p| l.param == p))
+            .collect();
+        let removing: usize = matching
+            .iter()
+            .map(|l| l.points.iter().filter(|p| in_range(p.beat)).count())
+            .sum();
+        let what = match param {
+            Some(p) => p.id().to_string(),
+            None => "all automation".into(),
+        };
+        said.push(
+            if matching.is_empty() || (removing == 0 && points.is_none()) {
+                format!("{whose} had no {what} to clear{range_text}")
+            } else {
+                format!(
+                    "cleared {what} of {whose}{range_text} ({removing} point{})",
+                    if removing == 1 { "" } else { "s" }
+                )
+            },
+        );
+        ops.push(Op::ClearAutomation {
+            track_id: track_id.map(str::to_string),
+            param,
+            from,
+            to,
+        });
+    }
+
+    if let Some(factor) = scale {
+        let Some(param) = param else {
+            bail!("scale needs one \"param\", e.g. {{\"param\": \"volume\", \"scale\": 0.5}}");
+        };
+        if clear || points.is_some() {
+            bail!("scale works on the points a lane already has; leave out points and clear");
+        }
+        let lane = automation::find(lanes_of(work, track_id), param).ok_or_else(|| {
+            let fix = match fixed_setting(work, track_id, param) {
+                Some(f) => {
+                    format!("; change its fixed {f} with update_track or update_project instead")
+                }
+                None => String::new(),
+            };
+            anyhow!("{whose} has no {} automation to scale{fix}", param.id())
+        })?;
+        let scaled: Vec<Point> = lane
+            .points
+            .iter()
+            .filter(|p| in_range(p.beat))
+            .map(|p| Point {
+                value: (p.value as f64 * factor) as f32,
+                ..*p
+            })
+            .collect();
+        if scaled.is_empty() {
+            bail!(
+                "the {} lane of {whose} has no points{range_text} ({})",
+                param.id(),
+                lane_summary(lane, bpb)
+            );
+        }
+        let info = param.info();
+        if scaled
+            .iter()
+            .any(|p| p.value > info.max || p.value < info.min)
+        {
+            warnings.push(format!(
+                "some values went past {}'s range {}..{} and were clamped",
+                param.id(),
+                fmt_value(param, info.min),
+                fmt_value(param, info.max)
+            ));
+        }
+        let db = if matches!(param, Param::Volume | Param::MasterVolume) && factor > 0.0 {
+            format!(" ({:+.1} dB)", 20.0 * factor.log10())
+        } else {
+            String::new()
+        };
+        said.push(format!(
+            "scaled {} points of {}'s {} lane by {}{db}",
+            scaled.len(),
+            whose,
+            param.id(),
+            fmt_num(factor)
+        ));
+        ops.push(Op::SetAutomation {
+            track_id: track_id.map(str::to_string),
+            param,
+            points: scaled,
+        });
+    }
+
+    let mut written = None;
+    if let Some(v) = points {
+        let Some(param) = param else {
+            bail!(
+                "points need one \"param\" (not \"all\"); {}",
+                param_choices(work, track_id)
+            );
+        };
+        let mut pts = automation_points(v, param, bpb, shape)?;
+        automation::sort(&mut pts);
+        let every = match (args.get("every_bars"), args.get("every_beats")) {
+            (Some(v), _) => Some(
+                loose_number(v).filter(|x| *x > 0.0).ok_or_else(|| {
+                    anyhow!("every_bars must be a number above 0, e.g. 1 or 0.25 (got {v})")
+                })? * bpb,
+            ),
+            (None, Some(v)) => Some(
+                loose_number(v)
+                    .filter(|x| *x > 0.0)
+                    .ok_or_else(|| anyhow!("every_beats must be a number above 0 (got {v})"))?,
+            ),
+            _ => None,
+        };
+        let times = match args.get("times") {
+            None => None,
+            Some(v) => Some(
+                v.as_u64()
+                    .filter(|t| (1..=256).contains(t))
+                    .ok_or_else(|| {
+                        anyhow!("times must be a whole number from 1 to 256 (got {v})")
+                    })? as u32,
+            ),
+        };
+        let (start, span) = (pts[0].beat, pts[pts.len() - 1].beat - pts[0].beat);
+        let mut copies = String::new();
+        if every.is_some() || times.is_some() {
+            let every = every.unwrap_or(((span / bpb - 1e-9).ceil().max(1.0)) * bpb);
+            if every + 1e-9 < span {
+                bail!(
+                    "the points span {} bars but repeat every {} bars, so the copies would overlap; \
+                     repeat them less often or give a shorter pattern",
+                    fmt_num(span / bpb),
+                    fmt_num(every / bpb)
+                );
+            }
+            let times = times.unwrap_or_else(|| {
+                // To the end of the song.
+                let end = (work.length_beats() / bpb - 1e-9).ceil() * bpb;
+                let n = ((end - start) / every - 1e-9).ceil().max(1.0);
+                if n > 256.0 {
+                    warnings.push(format!(
+                        "the song is long enough for {n} copies; made 256 (repeat again from bar {} for more)",
+                        bar_of(start + every * 256.0, bpb)
+                    ));
+                }
+                n.min(256.0) as u32
+            });
+            pts = repeat_points(&pts, every, times);
+            check_end(pts[pts.len() - 1].beat, bpb)?;
+            if times > 1 {
+                let s = if (every / bpb - 1.0).abs() < 1e-9 {
+                    ""
+                } else {
+                    "s"
+                };
+                copies = format!(" ({times} copies, every {} bar{s})", fmt_num(every / bpb));
+            }
+        }
+        let info = param.info();
+        let clamped: Vec<(usize, f32)> = pts
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.value < info.min || p.value > info.max)
+            .map(|(i, p)| (i, p.value))
+            .collect();
+        if let Some(&(_, v)) = clamped.first() {
+            warnings.push(format!(
+                "{} value{} outside {}'s range {}..{} (e.g. {}) {} clamped; {} is {}",
+                clamped.len(),
+                if clamped.len() == 1 { "" } else { "s" },
+                param.id(),
+                fmt_num(info.min as f64),
+                fmt_num(info.max as f64),
+                fmt_num(v as f64),
+                if clamped.len() == 1 { "was" } else { "were" },
+                param.id(),
+                info.hint
+            ));
+        }
+        if param == Param::Fm {
+            if let Some(Instrument::Synth(s)) = track_id
+                .and_then(|id| work.track(id))
+                .map(|t| &t.instrument)
+            {
+                if !matches!(s.waveform, Waveform::Sine | Waveform::Triangle) {
+                    warnings.push(format!(
+                        "fm only bends sine and triangle waves, and this synth plays {}, so the lane is \
+                         not heard until its waveform changes, e.g. update_track {{\"track\": \"{}\", \"waveform\": \"sine\"}}",
+                        s.waveform.label(),
+                        track_id.unwrap_or_default()
+                    ));
+                }
+            }
+        }
+        let new_lane = automation::find(lanes_of(work, track_id), param).is_none()
+            || (clear && from.is_none() && to.is_none());
+        written = Some((param, pts.len(), new_lane, copies));
+        ops.push(Op::SetAutomation {
+            track_id: track_id.map(str::to_string),
+            param,
+            points: pts,
+        });
+    }
+
+    if ops.is_empty() {
+        bail!(
+            "nothing to do: give \"points\" to write, \"clear\": true to remove, or \"scale\" to change existing points"
+        );
+    }
+    for warning in ["every_bars", "every_beats", "times"]
+        .iter()
+        .filter(|k| args.contains_key(**k) && written.is_none())
+    {
+        warnings.push(format!("{warning} only repeats new points; it was ignored"));
+    }
+    if (from.is_some() || to.is_some()) && !clear && scale.is_none() {
+        warnings.push(
+            "from_bar/to_bar only apply to clear and scale; to write points elsewhere, give their bars"
+                .into(),
+        );
+    }
+    edit::apply_all(work, ops)?;
+
+    let mut result = json!({"track_id": track_id, "param": param.map(Param::id)});
+    if let Some((param, n, new_lane, copies)) = written {
+        let lane = automation::find(lanes_of(work, track_id), param).expect("just written");
+        said.push(format!(
+            "wrote {n} {} point{} {place}{copies}; the lane now has {}",
+            param.id(),
+            if n == 1 { "" } else { "s" },
+            lane_summary(lane, bpb)
+        ));
+        if new_lane {
+            if let Some(fixed) = fixed_setting(work, track_id, param) {
+                said.push(format!(
+                    "its fixed {fixed} is not heard while the lane has points (clear the lane to go back to it)"
+                ));
+            }
+        }
+        result["points"] = json!(n);
+        result["lane_points"] = json!(lane.points.len());
+    }
+    result["message"] = json!(said.join("; "));
+    if !warnings.is_empty() {
+        result["warnings"] = json!(warnings);
+    }
+    Ok(result)
+}
+
 /// At most about 160 characters, for the undo history.
 fn short(text: &str) -> String {
     if text.chars().count() <= 160 {
@@ -1467,20 +2255,35 @@ fn mix_tips(p: &Project, a: &Analysis, lufs: f64) -> Vec<String> {
     let gain_after = |gain: f64, db: f64| {
         ((gain * 10f64.powf(db / 20.0) * 20.0).round() / 20.0).clamp(0.05, 2.0)
     };
+    // An automated volume's fixed gain is not heard: scale its points instead.
+    let scale_by = |db: f64| fmt_num(((10f64.powf(db / 20.0) * 100.0).round() / 100.0).max(0.01));
     let master = p.master_gain as f64;
+    let master_automated = automation::find(&p.automation, Param::MasterVolume).is_some();
+    let master_call = |db: f64| {
+        if master_automated {
+            format!(
+                "automate {{\"param\": \"master_volume\", \"scale\": {}}}",
+                scale_by(db)
+            )
+        } else {
+            format!(
+                "update_project {{\"master_gain\": {}}}",
+                fmt_num(gain_after(master, db))
+            )
+        }
+    };
     if a.limiter_db > 6.0 || a.limiter_busy > 0.3 {
         tips.push(format!(
             "Too hot: the limiter is squashing the mix (up to {:.1} dB), which flattens the punch. \
-             Lower the master, e.g. update_project {{\"master_gain\": {}}}, or the loudest track's gain.",
+             Lower the master, e.g. {}, or the loudest track's gain.",
             a.limiter_db,
-            fmt_num(gain_after(master, -(a.limiter_db - 2.0).max(3.0)))
+            master_call(-(a.limiter_db - 2.0).max(3.0))
         ));
     } else if lufs < -18.0 {
-        if master < 1.99 {
+        if master < 1.99 || master_automated {
             tips.push(format!(
-                "Quiet: {lufs:.1} LUFS. Raise the master, e.g. update_project {{\"master_gain\": {}}} \
-                 (at most 2), or the track gains.",
-                fmt_num(gain_after(master, (-14.0 - lufs).min(12.0)))
+                "Quiet: {lufs:.1} LUFS. Raise the master, e.g. {} (at most 2), or the track gains.",
+                master_call((-14.0 - lufs).min(12.0))
             ));
         } else {
             tips.push(format!(
@@ -1526,11 +2329,19 @@ fn mix_tips(p: &Project, a: &Analysis, lufs: f64) -> Vec<String> {
             .map(|&(t, l)| (t, top - l))
             .collect();
         let call = |t: &aidaw_core::Track, db: f64| {
-            format!(
-                "update_track {{\"track\": \"{}\", \"gain\": {}}}",
-                t.id,
-                fmt_num(gain_after(t.gain as f64, db))
-            )
+            if automation::find(&t.automation, Param::Volume).is_some() {
+                format!(
+                    "automate {{\"track\": \"{}\", \"param\": \"volume\", \"scale\": {}}}",
+                    t.id,
+                    scale_by(db)
+                )
+            } else {
+                format!(
+                    "update_track {{\"track\": \"{}\", \"gain\": {}}}",
+                    t.id,
+                    fmt_num(gain_after(t.gain as f64, db))
+                )
+            }
         };
         if buried.len() >= 2 && buried.len() + 1 == heard.len() {
             let names: Vec<&str> = buried.iter().map(|(t, _)| t.name.as_str()).collect();
@@ -1684,6 +2495,16 @@ fn unknown_keys(tool: &Tool, args: &Args) -> Vec<String> {
             || (tool.name == "add_melody" && k == "melody")
             || (tool.name == "copy_bars" && k == "bar")
             || (tool.name == "set_loop" && (k == "bar" || k == "to_bar"))
+            || (tool.name == "automate"
+                && [
+                    "value",
+                    "bar",
+                    "every_beats",
+                    "parameter",
+                    "setting",
+                    "point",
+                ]
+                .contains(&k.as_str()))
             || (tool.name.starts_with("add_") && k == "instrument")
             || (tool.name == "get_project" && k == "full");
         if !known {
@@ -2219,6 +3040,9 @@ fn overview(p: &Project, only: Option<&str>, with_notes: bool) -> String {
             if r.on { "" } else { " (switched off)" }
         ));
     }
+    if only.is_none() {
+        s += &automation_overview(&p.automation, None, bpb, with_notes, "\n- song automation");
+    }
     for t in p.tracks.iter().filter(|t| only.is_none_or(|id| t.id == id)) {
         let color = match &t.color {
             Some(_) => {
@@ -2239,6 +3063,13 @@ fn overview(p: &Project, only: Option<&str>, with_notes: bool) -> String {
             if t.mute { " MUTED" } else { "" },
             if t.solo { " SOLO" } else { "" }
         ));
+        s += &automation_overview(
+            &t.automation,
+            Some(&t.instrument),
+            bpb,
+            with_notes,
+            "\n    automation",
+        );
         for c in &t.clips {
             let (lo, hi) = c.notes.iter().fold((127u8, 0u8), |(lo, hi), n| {
                 (lo.min(n.pitch), hi.max(n.pitch))
@@ -2272,6 +3103,47 @@ fn overview(p: &Project, only: Option<&str>, with_notes: bool) -> String {
     s
 }
 
+/// The lanes with points, for get_project: one line ("automation: cutoff 2
+/// points from bar 1 to bar 9: ...; volume ...") or, with notes, a line per
+/// lane listing every point as BAR:VALUE.
+fn automation_overview(
+    lanes: &[Lane],
+    inst: Option<&Instrument>,
+    bpb: f64,
+    with_notes: bool,
+    prefix: &str,
+) -> String {
+    let lanes: Vec<&Lane> = lanes
+        .iter()
+        .filter(|l| !l.points.is_empty() && l.param != Param::Unknown)
+        .collect();
+    let silent = |l: &Lane| match inst {
+        Some(inst) if !l.param.suits_track(inst) => " (does nothing: drums have no such setting)",
+        _ => "",
+    };
+    if with_notes {
+        lanes
+            .iter()
+            .map(|l| {
+                format!(
+                    "{prefix} {} (BAR:VALUE){}: {}",
+                    l.param.id(),
+                    silent(l),
+                    lane_points_text(l, bpb)
+                )
+            })
+            .collect()
+    } else if lanes.is_empty() {
+        String::new()
+    } else {
+        let each: Vec<String> = lanes
+            .iter()
+            .map(|l| format!("{} {}{}", l.param.id(), lane_summary(l, bpb), silent(l)))
+            .collect();
+        format!("{prefix}: {}", each.join("; "))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2290,6 +3162,7 @@ mod tests {
             reverb: 0.0,
             color: None,
             clips: Vec::new(),
+            automation: Vec::new(),
         }
     }
 
@@ -2374,6 +3247,34 @@ mod tests {
         );
         assert!(
             tips[1].starts_with("Lead is 11 LU quieter than Drums"),
+            "{tips:?}"
+        );
+    }
+
+    #[test]
+    fn tips_for_automated_volumes_scale_the_points() {
+        let (mut p, a) = measured(&[("Drums", -13.7), ("Pad", -26.3), ("Bass", -24.2)]);
+        p.tracks[0].automation = vec![Lane {
+            param: Param::Volume,
+            points: vec![Point::new(0.0, 0.8)],
+        }];
+        let tips = mix_tips(&p, &a, -13.1);
+        // 4.5 dB down, as a factor for the lane's points.
+        assert!(
+            tips[0].contains(r#"automate {"track": "t1", "param": "volume", "scale": 0.6}"#),
+            "{tips:?}"
+        );
+
+        let (mut p, mut a) = measured(&[("Keys", -14.0)]);
+        p.automation = vec![Lane {
+            param: Param::MasterVolume,
+            points: vec![Point::new(0.0, 1.0)],
+        }];
+        a.limiter_db = 9.0;
+        a.limiter_busy = 0.5;
+        let tips = mix_tips(&p, &a, -9.0);
+        assert!(
+            tips[0].contains(r#"automate {"param": "master_volume", "scale": 0.45}"#),
             "{tips:?}"
         );
     }

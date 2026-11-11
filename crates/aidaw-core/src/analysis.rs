@@ -492,6 +492,7 @@ mod tests {
                     velocity: 100,
                 }],
             }],
+            automation: Vec::new(),
         });
         let a = analyze(&p).unwrap();
         assert_eq!(a.mix.lufs, None);

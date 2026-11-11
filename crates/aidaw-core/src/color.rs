@@ -114,6 +114,7 @@ mod tests {
             reverb: 0.0,
             color: None,
             clips: Vec::new(),
+            automation: Vec::new(),
         }
     }
 
