@@ -41,6 +41,9 @@ still write notes for you: see [4. Plain chat](#4-plain-chat-paste-the-answer).
 | `analyze` | Listen to the mix: loudness, limiter, low/mid/high balance, each track alone, and tips |
 | `render_wav` | Render the song to a WAV file |
 
+Every parameter of every tool, with an example call, is in [TOOLS.md](TOOLS.md), which is generated
+from the code; `aidaw-mcp docs` prints the same reference.
+
 The musical tools (`add_chords`, `add_drum_pattern`, `add_melody`) do the note maths for you.
 Give them a `track` (a name such as `"Bass"`) and optionally a `bar` (1 = start of the song).
 If the track does not exist, they create it when its name matches a preset ("Drums", "Bass",

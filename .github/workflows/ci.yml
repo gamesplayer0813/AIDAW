@@ -5,23 +5,43 @@ on:
     branches: [main]
   pull_request:
 
+# A new push to a pull request makes its older runs pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  windows:
-    runs-on: windows-latest
+  # The quick verdict: formatting, lints and every test on a Linux runner,
+  # which starts sooner and builds about twice as fast as a Windows one.
+  linux:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Install ALSA headers (for cpal)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  # The platform AIDAW is for: the tests again (saving files, paths and fonts
+  # differ on Windows), then the release build, packaged like a release.
+  windows:
+    runs-on: windows-latest
+    env:
+      # Warnings in Windows-only code fail here, as clippy fails them on Linux.
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
       - run: cargo build --release --workspace
+      - run: bash packaging/package-windows.sh target/release dist
       - uses: actions/upload-artifact@v4
         with:
           name: aidaw-windows-x64
-          path: |
-            target/release/aidaw.exe
-            target/release/aidaw-mcp.exe
-            examples/demo.aidaw.json
+          path: dist/AIDAW/

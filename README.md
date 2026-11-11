@@ -33,7 +33,8 @@
 
 ### 0. 拿到程序
 
-- **懒人**：去 GitHub Actions 最新一次 CI 下载 artifact `aidaw-windows-x64`，里面有 `aidaw.exe`、`aidaw-mcp.exe` 和 demo 工程。
+- **懒人**：去 [Releases](https://github.com/gamesplayer0813/AIDAW/releases/latest) 下载 `AIDAW-win64.zip`，解压到随便哪个文件夹，双击 `aidaw.exe`。里面还有 `aidaw-mcp.exe`、demo 工程、给 AI 看的说明书和一份 `README.txt`。Windows 弹出「Windows 已保护你的电脑」？点「更多信息」→「仍要运行」，只是 exe 没花钱买签名而已，本小姐才不会害你。
+- **想尝鲜的**：每次 CI 都会把最新代码打成同样的包，在 GitHub Actions 里下载 artifact `aidaw-windows-x64`（要登录 GitHub）。
 - **想自己编译的**：看下面的「构建」。哼，看你能不能编过。
 
 ### 1. 打开 GUI
@@ -130,7 +131,7 @@ Claude Code / Cursor / Windsurf / Cline 等 MCP 客户端配置方式同理。
 - **普通聊天 AI**：`aidaw-mcp guide` 打印一页速查表，整页贴给它就行
 - **连命令都懒得敲**：点「问 AI」，展开「什么都不想装？从任何聊天 AI 粘贴音符」，复制里面的提示词发给聊天 AI，再把它的回答整段复制，回 GUI 点一个片段按 `Ctrl+V`。它认 `[{"pitch":"A4","start":0,"duration":1}]` 这样的列表，前后的废话和 ```` ``` ```` 代码块都会自己剥掉。AI 写得烂？`Ctrl+Z` 扔掉就好♡
 
-完整说明见 [docs/LLM_GUIDE.md](docs/LLM_GUIDE.md)。
+完整说明见 [docs/LLM_GUIDE.md](docs/LLM_GUIDE.md)；每个工具的每个参数见 [docs/TOOLS.md](docs/TOOLS.md)，它是 `aidaw-mcp docs` 从代码直接生成的，永远不会过时。
 
 ### 28 个 MCP 工具
 
@@ -201,7 +202,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-CI（GitHub Actions，`windows-latest`）每个 PR 都会跑上面这些，并上传两个 exe 作为 artifact。加了新的界面文字或音色？记得在 `i18n.rs` 里补中文翻译，不然测试 `every_string_is_translated` 会骂你的♡
+CI（GitHub Actions）每个 PR 跑两个 job：`ubuntu-latest` 跑上面三条，几分钟就出结果；`windows-latest` 在真正的 Windows 上再跑一遍测试（存文件、路径、字体在 Windows 上不一样），然后编译 release 版，打成和发版一样的包，作为 artifact `aidaw-windows-x64` 上传。在 Linux 上自己跑的话先装 ALSA 开发包（Ubuntu：`sudo apt install libasound2-dev`）。
+
+加了新的界面文字或音色？记得在 `i18n.rs` 里补中文翻译，不然测试 `every_string_is_translated` 会骂你的♡ 改了 MCP 工具？跑一下 `cargo run -p aidaw-mcp -- docs docs/TOOLS.md` 重新生成工具文档，再在本文件和 `docs/LLM_GUIDE.md` 的工具列表里写上新工具、改对工具的个数，这些测试都会盯着的。
+
+## 发版（给维护者）
+
+1. 把 `Cargo.toml` 里 `[workspace.package]` 的 `version` 改成新版本（比如 `0.2.0`），合进 main。
+2. 推一个对应的 tag：`git tag v0.2.0` 再 `git push origin v0.2.0`。懒得开命令行？在 GitHub 的 **Actions → Release** 点 **Run workflow**，它会按 `Cargo.toml` 的版本自己打 tag。
+3. Release workflow 会在 Windows 上测试、编译，把两个 exe、`README.txt`、`LLM_GUIDE.md`、`TOOLS.md`、demo 工程和许可证打成 `AIDAW-win64.zip`，挂到 GitHub Release 上。tag 和 `Cargo.toml` 的版本对不上、或者这个版本已经发过，它会直接报错，绝不乱发。哼，比杂鱼手动拷文件靠谱多了♡
 
 ## 路线图（本小姐接下来要做的事）
 

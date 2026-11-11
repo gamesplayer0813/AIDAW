@@ -663,3 +663,197 @@ pub fn export(format: &str) -> Option<Value> {
 }
 
 pub const FORMATS: &str = "mcp, openai, anthropic, gemini";
+
+/// Every tool with every parameter, in Markdown: what `aidaw-mcp docs`
+/// prints and docs/TOOLS.md holds (a test keeps that file equal to this).
+pub fn markdown() -> String {
+    let mut md = format!(
+        "# AIDAW tools\n\n\
+         <!-- Generated from crates/aidaw-mcp/src/tools.rs. Don't edit it here: change that file, \
+         then run `cargo run -p aidaw-mcp -- docs docs/TOOLS.md`. -->\n\n\
+         All {} tools of `aidaw-mcp`, with every parameter. They are the same over MCP and on the \
+         command line (`aidaw-mcp tools --format ...`, `aidaw-mcp call`). How to connect a model \
+         and compose with them: [LLM_GUIDE.md](LLM_GUIDE.md).\n\n\
+         | Tool | What it does |\n|---|---|\n",
+        TOOLS.len()
+    );
+    for t in TOOLS {
+        md += &format!(
+            "| [`{0}`](#{0}) | {1} |\n",
+            t.name,
+            cell(first_sentence(t.description))
+        );
+    }
+    for t in TOOLS {
+        md += &format!("\n## `{}`\n\n{}\n\n", t.name, text(t.description));
+        if t.params.is_empty() {
+            md += "No parameters.\n";
+        } else {
+            md += "| Parameter | Type | Required | Description |\n|---|---|---|---|\n";
+            for p in t.params {
+                md += &format!(
+                    "| `{}` | {} | {} | {} |\n",
+                    p.name,
+                    type_name(p.ty),
+                    if p.required { "yes" } else { "no" },
+                    cell(p.desc)
+                );
+            }
+        }
+        md += &format!("\nExample:\n\n```json\n{}\n```\n", t.example);
+        let aliases: Vec<String> = ALIASES
+            .iter()
+            .filter(|(_, real)| *real == t.name)
+            .map(|(alias, _)| format!("`{alias}`"))
+            .collect();
+        if !aliases.is_empty() {
+            md += &format!("\nAlso answers to {}.\n", aliases.join(", "));
+        }
+    }
+    md
+}
+
+fn type_name(ty: Ty) -> &'static str {
+    match ty {
+        Str => "string",
+        Num => "number",
+        Int => "integer",
+        Bool => "boolean",
+        Notes => "string or array",
+        Drums => "object",
+        Ops => "array",
+    }
+}
+
+/// Up to the first full stop: the summary of a description. Not a dot
+/// after a space (". = rest" in a drum legend) or in "e.g.".
+fn first_sentence(s: &str) -> &str {
+    let mut from = 0;
+    while let Some(i) = s[from..].find(". ").map(|i| from + i) {
+        let before = &s[..i];
+        let symbol = before.is_empty() || before.ends_with(char::is_whitespace);
+        if !symbol && !before.ends_with("e.g") && !before.ends_with("i.e") {
+            return &s[..=i];
+        }
+        from = i + 2;
+    }
+    s
+}
+
+/// Prose for Markdown: a `<` outside code would start an HTML tag and hide
+/// the text after it (as in "<project>.wav").
+fn text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut code = false;
+    for c in s.chars() {
+        match c {
+            '`' => code = !code,
+            '<' if !code => {
+                out += "&lt;";
+                continue;
+            }
+            _ => {}
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Prose for a table cell, where `|` (even inside code) ends the cell.
+fn cell(s: &str) -> String {
+    text(s).replace('|', "\\|").replace('\n', " ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// A file of this repository, with Windows line ends made plain (a
+    /// checkout on Windows may convert them).
+    fn repo_file(path: &str) -> String {
+        let full = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(path);
+        std::fs::read_to_string(&full)
+            .unwrap_or_else(|e| panic!("{}: {e}", full.display()))
+            .replace("\r\n", "\n")
+    }
+
+    #[test]
+    fn the_tool_reference_matches_the_tools() {
+        let fresh = markdown();
+        let saved = repo_file("docs/TOOLS.md");
+        if saved != fresh {
+            let line = saved
+                .lines()
+                .zip(fresh.lines())
+                .position(|(a, b)| a != b)
+                .unwrap_or_else(|| saved.lines().count().min(fresh.lines().count()))
+                + 1;
+            panic!(
+                "docs/TOOLS.md is out of date (from line {line}): run \
+                 `cargo run -p aidaw-mcp -- docs docs/TOOLS.md`"
+            );
+        }
+    }
+
+    #[test]
+    fn the_readme_and_the_guide_name_every_tool_and_count_them_right() {
+        for doc in ["README.md", "docs/LLM_GUIDE.md"] {
+            let text = repo_file(doc);
+            let missing: Vec<&str> = TOOLS
+                .iter()
+                .map(|t| t.name)
+                .filter(|name| !text.contains(&format!("`{name}`")))
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "{doc} never names {missing:?}: add them where it lists the tools"
+            );
+        }
+        let readme = repo_file("README.md");
+        let counts: Vec<&str> = readme
+            .match_indices(" 个 MCP 工具")
+            .map(|(i, _)| {
+                let before = &readme[..i];
+                &before[before.trim_end_matches(|c: char| c.is_ascii_digit()).len()..]
+            })
+            .collect();
+        assert!(
+            !counts.is_empty(),
+            "README.md no longer says how many MCP tools there are"
+        );
+        for count in counts {
+            assert_eq!(
+                count,
+                TOOLS.len().to_string(),
+                "README.md says \"{count} 个 MCP 工具\", but there are {}",
+                TOOLS.len()
+            );
+        }
+    }
+
+    #[test]
+    fn markdown_escapes_what_would_break_a_table_or_hide_text() {
+        assert_eq!(
+            first_sentence("Delete a clip. Then more."),
+            "Delete a clip."
+        );
+        assert_eq!(first_sentence("No full stop"), "No full stop");
+        assert_eq!(
+            first_sentence("Steps: x = hit, . = rest. Shorter ones repeat."),
+            "Steps: x = hit, . = rest."
+        );
+        assert_eq!(
+            first_sentence("Loose, e.g. a name. More."),
+            "Loose, e.g. a name."
+        );
+        assert_eq!(
+            text("defaults to <project>.wav"),
+            "defaults to &lt;project>.wav"
+        );
+        assert_eq!(text("keep `a<b` as code"), "keep `a<b` as code");
+        assert_eq!(cell("standard | 808\nnext"), "standard \\| 808 next");
+    }
+}
