@@ -9,12 +9,13 @@ use aidaw_core::analysis::{self, Analysis, Levels};
 use aidaw_core::edit::{self, Op};
 use aidaw_core::music::{self, ChordStyle};
 use aidaw_core::{
-    io as pio, pitch, presets, render, DrumKit, Instrument, Note, Project, Synth, TimeSignature,
-    Waveform,
+    color, io as pio, pitch, presets, render, DrumKit, Instrument, Note, Project, Synth,
+    TimeSignature, Waveform,
 };
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Map, Value};
 
+use crate::history::{self, History};
 use crate::tools::{self, Tool};
 
 type Args = Map<String, Value>;
@@ -70,8 +71,10 @@ const NUMERIC_KEYS: &[&str] = &[
     "swing",
     "timing",
     "seed",
+    "position",
+    "steps",
 ];
-const BOOL_KEYS: &[&str] = &["mute", "solo", "overwrite"];
+const BOOL_KEYS: &[&str] = &["mute", "solo", "overwrite", "on", "play"];
 /// Accepted everywhere although not advertised in the schemas.
 const HIDDEN_KEYS: &[&str] = &[
     "track_id",
@@ -178,6 +181,8 @@ impl Session {
                     project.set_time_signature(ts);
                 }
                 pio::save(&project, &path)?;
+                // A new song: the old one's undo history no longer applies.
+                History::of(&path).clear();
                 self.path = Some(path.clone());
                 Ok(format!(
                     "created {} ({bpm} BPM, {}). Next: add_track, e.g. {{\"name\": \"Drums\", \"instrument\": \"drum_kit\"}}",
@@ -252,6 +257,28 @@ impl Session {
                 let measured = analysis::analyze(&project)?;
                 Ok(analysis_report(&project, &measured))
             }
+            "undo" => {
+                let path = self.path()?.to_path_buf();
+                let steps = match args.get("steps") {
+                    None => 1,
+                    Some(v) => v
+                        .as_u64()
+                        .filter(|s| (1..=history::KEEP as u64).contains(s))
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "steps must be a whole number from 1 to {} (got {v})",
+                                history::KEEP
+                            )
+                        })? as usize,
+                };
+                let (undone, project) = history::undo(&path, steps)?;
+                let left = History::of(&path).len();
+                Ok(format!(
+                    "undid {}. {left} more of your edits can be undone.\nProject now: {}",
+                    undone.join("; before that "),
+                    summary(&project)
+                ))
+            }
             "apply_ops" => {
                 let ops = match args.remove("ops") {
                     Some(Value::Array(ops)) => ops,
@@ -261,7 +288,12 @@ impl Session {
                     },
                     _ => bail!("ops must be an array of objects like {{\"op\": \"add_track\", \"name\": \"Bass\"}}"),
                 };
-                self.edit(|work| {
+                let names: Vec<&str> = ops
+                    .iter()
+                    .filter_map(|o| o.get("op").or_else(|| o.get("tool"))?.as_str())
+                    .collect();
+                let what = short(&format!("apply_ops ({})", names.join(", ")));
+                self.edit(&what, |work| {
                     let mut results = Vec::with_capacity(ops.len());
                     for (i, item) in ops.clone().into_iter().enumerate() {
                         let mut item = match item {
@@ -295,7 +327,10 @@ impl Session {
                 })
             }
             name if is_edit_tool(name) => {
-                self.edit(|work| Ok(vec![apply_tool(work, tool, args.clone())?]))
+                let what = short(&format!("{name} {}", Value::Object(args.clone())));
+                self.edit(&what, |work| {
+                    Ok(vec![apply_tool(work, tool, args.clone())?])
+                })
             }
             other => bail!("tool {other} is not implemented"),
         }
@@ -309,11 +344,14 @@ impl Session {
     /// autosaves a few hundred milliseconds after each edit). If the file's
     /// modification time changed meanwhile, the edit is replayed on the fresh
     /// version instead of overwriting the human's change.
-    fn edit(&self, f: impl Fn(&mut Project) -> Result<Vec<Value>>) -> Result<String> {
+    ///
+    /// Edits that change the music are remembered (as `what`) for `undo`.
+    fn edit(&self, what: &str, f: impl Fn(&mut Project) -> Result<Vec<Value>>) -> Result<String> {
         let path = self.path()?;
         for attempt in 0..EDIT_RETRIES {
             let before = pio::modified(path);
             let mut work = pio::load(path)?;
+            let original = work.clone();
             let results = f(&mut work)?;
             if pio::modified(path) != before {
                 // Somebody wrote the file while we were editing: start over.
@@ -323,6 +361,10 @@ impl Session {
                 continue;
             }
             pio::save(&work, path)?;
+            if !work.same_music(&original) {
+                // Best effort: the edit itself has been saved either way.
+                let _ = History::of(path).record(&original, &work, what);
+            }
             return Ok(format!(
                 "{}\nProject now: {}",
                 json!({ "results": results }),
@@ -439,6 +481,9 @@ const EDIT_TOOLS: &[&str] = &[
     "copy_bars",
     "quantize",
     "humanize",
+    "split_clip",
+    "set_loop",
+    "set_playhead",
 ];
 
 fn is_edit_tool(name: &str) -> bool {
@@ -481,6 +526,9 @@ fn apply_tool(work: &mut Project, tool: &Tool, mut args: Args) -> Result<Value> 
         "add_chords" | "add_drum_pattern" | "add_melody" => return musical(work, tool.name, args),
         "copy_bars" => return copy_bars(work, args),
         "quantize" | "humanize" => return groove(work, tool.name, args),
+        "split_clip" => return split_clips(work, args),
+        "set_loop" => return set_loop(work, args),
+        "set_playhead" => return set_playhead(work, args),
         "add_track" | "update_track" => {
             let existing = match tool.name {
                 "update_track" => {
@@ -579,13 +627,57 @@ fn apply_tool(work: &mut Project, tool: &Tool, mut args: Args) -> Result<Value> 
         _ => {}
     }
     let created_instrument = (tool.name == "add_track").then(|| args.get("instrument").cloned());
+    // A track's row and colour are edits of their own in the core.
+    let color = match tool.name {
+        "add_track" | "update_track" => args.remove("color"),
+        _ => None,
+    };
+    let row = match tool.name {
+        "update_track" => args.remove("position"),
+        _ => None,
+    };
     for key in ["bar", "bars", "beat", "track_name", "clip_name"] {
         args.remove(key);
     }
+    let track_id = args
+        .get("track_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     args.insert("op".into(), Value::String(tool.name.into()));
     let op: Op = serde_json::from_value(Value::Object(args))
         .map_err(|e| anyhow!("invalid arguments for {}: {e}", tool.name))?;
     let mut result = edit::apply(work, op)?;
+    let track_id = track_id.or_else(|| result["track_id"].as_str().map(str::to_string));
+    if let (Some(c), Some(id)) = (color, &track_id) {
+        let color = match c {
+            Value::String(s) => Some(s),
+            Value::Null => None,
+            other => bail!(
+                "color must be a name like \"orange\" or a hex code like \"#ff8a3d\" (got {other})"
+            ),
+        };
+        let r = edit::apply(
+            work,
+            Op::SetTrackColor {
+                track_id: id.clone(),
+                color,
+            },
+        )?;
+        result["color"] = r["color"].clone();
+    }
+    if let (Some(v), Some(id)) = (row, &track_id) {
+        let n = v.as_u64().filter(|r| *r >= 1).ok_or_else(|| {
+            anyhow!("position must be a row number from 1 (the top), e.g. 1 (got {v})")
+        })?;
+        let r = edit::apply(
+            work,
+            Op::MoveTrack {
+                track_id: id.clone(),
+                index: n as usize - 1,
+            },
+        )?;
+        result["position"] = json!(r["index"].as_u64().unwrap_or(0) + 1);
+    }
     if let Some(inst) = created_instrument {
         let inst: Instrument = match inst {
             Some(v) => serde_json::from_value(v)?,
@@ -1098,6 +1190,192 @@ fn groove(work: &mut Project, tool: &str, mut args: Args) -> Result<Value> {
     Ok(result)
 }
 
+/// split_clip: cut the clip(s) crossing a bar.
+fn split_clips(work: &mut Project, mut args: Args) -> Result<Value> {
+    let bpb = work.beats_per_bar as f64;
+    position(work, &mut args)?;
+    let at = args.get("start").and_then(Value::as_f64).ok_or_else(|| {
+        anyhow!("missing \"bar\": where to cut, e.g. {{\"clip\": \"c1\", \"bar\": 3}} cuts at the start of bar 3")
+    })?;
+    let crosses = |c: &aidaw_core::Clip| c.start < at - 1e-9 && at < c.end() - 1e-9;
+    let place = format!("bar {} (beat {})", bar_of(at, bpb), fmt_num(at));
+    let ids: Vec<String> = if has_any(&args, &["clip", "clip_id", "clip_name"]) {
+        let id = resolve_clip(work, &mut args)?;
+        let c = work.clip(&id).expect("resolved").1;
+        if !crosses(c) {
+            bail!(
+                "{place} is not inside clip {id}, which covers {} (beats {}..{}); cut somewhere inside it",
+                bar_range(c.start, c.end(), bpb),
+                fmt_num(c.start),
+                fmt_num(c.end())
+            );
+        }
+        vec![id]
+    } else {
+        let track = match track_query(&mut args) {
+            Some(q) => Some(find_track(work, &q)?.id.clone()),
+            None => None,
+        };
+        let ids: Vec<String> = work
+            .tracks
+            .iter()
+            .filter(|t| track.as_ref().is_none_or(|id| *id == t.id))
+            .flat_map(|t| t.clips.iter().filter(|c| crosses(c)).map(|c| c.id.clone()))
+            .collect();
+        if ids.is_empty() {
+            bail!(
+                "no clip crosses {place}, so there is nothing to cut. {}",
+                clip_list(work)
+            );
+        }
+        ids
+    };
+    let mut parts = Vec::new();
+    for id in &ids {
+        let r = edit::apply(
+            work,
+            Op::SplitClip {
+                clip_id: id.clone(),
+                at,
+            },
+        )?;
+        parts.push(format!(
+            "{id} now ends there and the new {} starts there",
+            r["new_clip_id"].as_str().unwrap_or("?")
+        ));
+    }
+    let message = format!("cut {} clip(s) at {place}: {}", ids.len(), parts.join("; "));
+    Ok(json!({"message": message, "clips": ids}))
+}
+
+/// A true/false argument.
+fn bool_arg(args: &Args, key: &str) -> Result<Option<bool>> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => v
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| anyhow!("{key} must be true or false (got {v})")),
+    }
+}
+
+/// set_loop: an A/B loop for the app, from bars or a clip.
+fn set_loop(work: &mut Project, mut args: Args) -> Result<Value> {
+    let bpb = work.beats_per_bar as f64;
+    let on = bool_arg(&args, "on")?;
+    let play = bool_arg(&args, "play")?;
+    let region = if has_any(&args, &["clip", "clip_id", "clip_name"]) {
+        let id = resolve_clip(work, &mut args)?;
+        let c = work.clip(&id).expect("resolved").1;
+        Some((c.start, c.end()))
+    } else if let Some(v) = args.get("from_bar").or_else(|| args.get("bar")) {
+        let from = v
+            .as_f64()
+            .filter(|b| (1.0..=4096.0).contains(b))
+            .ok_or_else(|| {
+                anyhow!("from_bar must be a bar number from 1 (the start of the song), e.g. 5 (got {v})")
+            })?;
+        let bars = match (args.get("bars"), args.get("to_bar")) {
+            (Some(b), _) => b
+                .as_f64()
+                .filter(|b| *b > 0.0 && *b <= 4096.0)
+                .ok_or_else(|| {
+                    anyhow!("bars must be a number of bars above 0, e.g. 4 (got {b})")
+                })?,
+            (None, Some(t)) => match t.as_f64() {
+                Some(to) if to >= from => to - from + 1.0,
+                _ => bail!("to_bar must be a bar number at or after from_bar (got {t})"),
+            },
+            (None, None) => 1.0,
+        };
+        let start = (from - 1.0) * bpb;
+        Some((start, start + bars * bpb))
+    } else if args.contains_key("bars") {
+        bail!(
+            "say where the loop starts: from_bar (e.g. {{\"from_bar\": 5, \"bars\": 4}}) or a clip"
+        );
+    } else {
+        None
+    };
+    if let Some((_, end)) = region {
+        check_end(end, bpb)?;
+    }
+    let (start, end) = region.unzip();
+    edit::apply(work, Op::SetLoop { start, end, on })?;
+    let mut message = match work.transport.loop_region {
+        Some(r) if r.on => format!(
+            "looping {} in the app: live playback repeats {} (render_wav and analyze still play the whole song)",
+            bar_range(r.start, r.end, bpb),
+            if r.end - r.start > bpb + 1e-9 { "them" } else { "it" }
+        ),
+        Some(r) => format!(
+            "looping is off: the app plays the whole song again (the loop, {}, is kept; set_loop {{}} switches it back on)",
+            bar_range(r.start, r.end, bpb)
+        ),
+        None => "there was no loop to switch off; the app plays the whole song".to_string(),
+    };
+    if let Some(play) = play {
+        let beat = work.active_loop().map_or(0.0, |(s, _)| s);
+        edit::apply(
+            work,
+            Op::SetPlayhead {
+                beat,
+                play: Some(play),
+            },
+        )?;
+        message += if play {
+            "; started playing there"
+        } else {
+            "; stopped playing"
+        };
+    } else if work.active_loop().is_some() {
+        message += ". The human hears it when they press Play in the app (or pass \"play\": true)";
+    }
+    Ok(json!({"message": message, "loop": work.transport.loop_region}))
+}
+
+/// set_playhead: ask the app to put its playhead at a bar.
+fn set_playhead(work: &mut Project, mut args: Args) -> Result<Value> {
+    let bpb = work.beats_per_bar as f64;
+    let play = bool_arg(&args, "play")?;
+    position(work, &mut args)?;
+    let beat = match args.get("start").and_then(Value::as_f64) {
+        Some(b) => b,
+        // Just "play": from the loop, or the top of the song.
+        None if play.is_some() => work.active_loop().map_or(0.0, |(s, _)| s),
+        None => bail!("missing \"bar\": where to put the playhead, e.g. {{\"bar\": 9}}"),
+    };
+    edit::apply(work, Op::SetPlayhead { beat, play })?;
+    let place = format!("bar {} (beat {})", bar_of(beat, bpb), fmt_num(beat));
+    let message = match play {
+        Some(true) => format!("the app plays from {place} now"),
+        Some(false) => format!("the app stopped, with the playhead at {place}"),
+        None => format!(
+            "moved the app's playhead to {place}: the human hears that spot when they press Play \
+             (or pass \"play\": true)"
+        ),
+    };
+    let mut result = json!({"message": message, "beat": beat});
+    if let Some((s, e)) = work.active_loop() {
+        if beat < s || beat >= e {
+            result["warnings"] = json!([format!(
+                "the app loops {}, so Play starts there; set_loop {{\"on\": false}} to play from {place}",
+                bar_range(s, e, bpb)
+            )]);
+        }
+    }
+    Ok(result)
+}
+
+/// At most about 160 characters, for the undo history.
+fn short(text: &str) -> String {
+    if text.chars().count() <= 160 {
+        return text.to_string();
+    }
+    let cut: String = text.chars().take(157).collect();
+    format!("{cut}...")
+}
+
 /// "1:05.3"
 fn clock(seconds: f64) -> String {
     let m = (seconds / 60.0).floor();
@@ -1405,6 +1683,7 @@ fn unknown_keys(tool: &Tool, args: &Args) -> Vec<String> {
             || (tool.name == "add_drum_pattern" && music::drum_note(k).is_some())
             || (tool.name == "add_melody" && k == "melody")
             || (tool.name == "copy_bars" && k == "bar")
+            || (tool.name == "set_loop" && (k == "bar" || k == "to_bar"))
             || (tool.name.starts_with("add_") && k == "instrument")
             || (tool.name == "get_project" && k == "full");
         if !known {
@@ -1933,9 +2212,24 @@ fn overview(p: &Project, only: Option<&str>, with_notes: bool) -> String {
         p.reverb.size,
         p.reverb.tone,
     );
-    for t in p.tracks.iter().filter(|t| only.is_none_or(|id| t.id == id)) {
+    if let Some(r) = p.transport.loop_region.filter(|r| r.is_valid()) {
         s.push_str(&format!(
-            "\n- {} \"{}\" [{}] gain {:.2} pan {:.2} reverb {:.2}{}{}",
+            ", the app loops {}{}",
+            bar_range(r.start, r.end, bpb),
+            if r.on { "" } else { " (switched off)" }
+        ));
+    }
+    for t in p.tracks.iter().filter(|t| only.is_none_or(|id| t.id == id)) {
+        let color = match &t.color {
+            Some(_) => {
+                let rgb = t.rgb();
+                let c = color::name_of(rgb).map_or_else(|| color::hex(rgb), str::to_string);
+                format!(" color {c}")
+            }
+            None => String::new(),
+        };
+        s.push_str(&format!(
+            "\n- {} \"{}\" [{}] gain {:.2} pan {:.2} reverb {:.2}{}{}{color}",
             t.id,
             t.name,
             instrument_label(&t.instrument),
@@ -1994,6 +2288,7 @@ mod tests {
             mute: false,
             solo: false,
             reverb: 0.0,
+            color: None,
             clips: Vec::new(),
         }
     }

@@ -9,6 +9,7 @@
 //! The GUI watches the same file and reloads it live, so a human sees every
 //! change the AI makes and can fine-tune it (and undo it) in the editor.
 
+mod history;
 mod session;
 mod tools;
 
