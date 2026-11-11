@@ -1273,3 +1273,94 @@ fn automation_lanes_fades_and_sweeps() {
     assert_eq!(lane(Param::Cutoff), [(0.0, 200.0), (32.0, 6000.0)]);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn recordings_on_audio_tracks() {
+    let dir = temp_dir("audio");
+    let path = dir.join("song.aidaw.json");
+    // A one-second 440 Hz "take", as the app would record it.
+    let takes = dir.join("song audio");
+    std::fs::create_dir_all(&takes).unwrap();
+    let wav = takes.join("Take 1.wav");
+    let tone: Vec<f32> = (0..44_100)
+        .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / 44_100.0).sin() * 0.5)
+        .collect();
+    aidaw_core::audio::write_wav_24(&wav, 44_100, 1, &tone).unwrap();
+
+    let mut c = Client::start();
+    c.call(
+        "new_project",
+        json!({"path": path, "bpm": 120, "overwrite": true}),
+    );
+    let out = c.call(
+        "add_track",
+        json!({"name": "Vocals", "instrument": "audio"}),
+    );
+    assert!(out.contains("audio (recordings)"), "{out}");
+    c.call(
+        "add_track",
+        json!({"name": "Keys", "instrument": "soft_keys"}),
+    );
+
+    // Wrong track, missing file, notes on an audio track: clear errors.
+    let e = c.call_err(
+        "add_clip",
+        json!({"track": "Keys", "audio": "song audio/Take 1.wav"}),
+    );
+    assert!(e.contains("\"instrument\": \"audio\""), "{e}");
+    let e = c.call_err("add_clip", json!({"track": "Vocals", "audio": "nope.wav"}));
+    assert!(e.contains("nope.wav"), "{e}");
+    let e = c.call_err("add_clip", json!({"track": "Vocals", "bars": 1}));
+    assert!(e.contains("\"audio\""), "{e}");
+
+    // One second at 120 BPM is two beats; the path is kept relative.
+    let out = c.call(
+        "add_clip",
+        json!({"track": "Vocals", "bar": 2, "audio": "song audio/Take 1.wav", "gain": 0.8}),
+    );
+    assert!(out.contains("\"seconds\":1.0"), "{out}");
+    let p = load(&path);
+    let clip = &p.tracks[0].clips[0];
+    assert_eq!((clip.start, clip.length), (4.0, 2.0));
+    let a = clip.audio.as_ref().unwrap();
+    assert_eq!((a.file.as_str(), a.gain), ("song audio/Take 1.wav", 0.8));
+    assert_eq!(clip.name, "Take 1");
+
+    let out = c.call(
+        "update_clip",
+        json!({"clip": "Take 1", "fade_out": 0.25, "offset": "0.1", "bars": 1}),
+    );
+    assert!(!out.contains("warning"), "{out}");
+    let p = load(&path);
+    let clip = &p.tracks[0].clips[0];
+    let a = clip.audio.as_ref().unwrap();
+    assert_eq!((a.fade_out, a.offset, clip.length), (0.25, 0.1, 4.0));
+    let e = c.call_err("add_notes", json!({"clip": "Take 1", "notes": "C4/1"}));
+    assert!(e.contains("recording"), "{e}");
+    c.call("add_chords", json!({"track": "Keys", "chords": "C"}));
+    let e = c.call_err("update_clip", json!({"clip": "c2", "fade_in": 1}));
+    assert!(e.contains("audio clips"), "{e}");
+
+    let overview = c.call("get_project", json!({}));
+    assert!(
+        overview.contains("[audio (recordings)]")
+            && overview
+                .contains("audio \"song audio/Take 1.wav\" from 0.1s gain 0.80 fades 0s/0.25s"),
+        "{overview}"
+    );
+
+    // The recording is heard in renders and in the analysis.
+    let out = c.call("render_wav", json!({"output_path": "mix.wav"}));
+    assert!(!out.contains("warning"), "{out}");
+    let mix = aidaw_core::audio::load_wav(&dir.join("mix.wav")).unwrap();
+    let loud = mix.peak_between(2.2, 2.7);
+    assert!(loud > 0.1, "the take plays in bar 2: {loud}");
+    let report = c.call("analyze", json!({}));
+    assert!(report.contains("Vocals"), "{report}");
+
+    // A missing file is a warning, not a failure.
+    std::fs::remove_file(&wav).unwrap();
+    let out = c.call("render_wav", json!({"output_path": "mix.wav"}));
+    assert!(out.contains("warning") && out.contains("silent"), "{out}");
+    std::fs::remove_dir_all(&dir).ok();
+}

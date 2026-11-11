@@ -1,11 +1,21 @@
 [package]
 name = "aidaw-engine"
-description = "Real-time audio playback for AIDAW (WASAPI on Windows via cpal)"
+description = "Real-time playback and recording for AIDAW (WASAPI or ASIO on Windows via cpal)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# ASIO drivers on Windows. Off by default: building it needs the Steinberg
+# ASIO SDK (downloaded by asio-sys, or CPAL_ASIO_DIR) and LLVM/clang, and
+# the SDK's licence (GPLv3 or Steinberg's own) then applies to the binary.
+# See the README's ASIO section.
+asio = ["cpal/asio"]
+
 [dependencies]
 aidaw-core.workspace = true
 anyhow.workspace = true
-cpal = "0.15"
+cpal = "0.18.2"
+hound = "3.5"
+midir = "0.11.1"
+rtrb = "0.4.1"

@@ -97,7 +97,7 @@ impl LaneKey {
         let t = p.track(id)?;
         let synth = match &t.instrument {
             Instrument::Synth(s) => Some(s),
-            Instrument::Drums { .. } => None,
+            Instrument::Drums { .. } | Instrument::Audio => None,
         };
         Some(match self.param {
             Param::Volume => t.gain,
@@ -495,7 +495,17 @@ pub fn paint_header(
         theme::TEXT,
     );
     let (detail, tint) = if !key.usable(project) {
-        (tr("not used by drums").to_string(), theme::WARN)
+        let audio = key
+            .track_id
+            .as_deref()
+            .and_then(|id| project.track(id))
+            .is_some_and(|t| t.instrument.is_audio());
+        let why = if audio {
+            tr("not used by audio tracks")
+        } else {
+            tr("not used by drums")
+        };
+        (why.to_string(), theme::WARN)
     } else {
         match key.value_at(project, playhead) {
             Some(v) => (info.format(v), theme::TEXT_DIM),

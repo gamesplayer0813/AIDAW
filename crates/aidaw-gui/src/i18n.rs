@@ -1029,6 +1029,7 @@ fn zh(en: &str) -> Option<&'static str> {
             "点一下就能加点，这条线会带着参数随时间走～这么简单，杂鱼也会吧？"
         }
         "not used by drums" => "鼓组用不上这个",
+        "not used by audio tracks" => "音频轨用不上这个",
         "From this point to the next:" => "从这个点到下一个点：",
         "Straight line" => "直线",
         "Smooth curve" => "平滑曲线",
@@ -1047,6 +1048,165 @@ fn zh(en: &str) -> Option<&'static str> {
         "Straight, smooth or steps; clear or remove the lane" => {
             "改成直线、平滑或阶梯；清空或删除包络道"
         }
+
+        // ---- recording ----
+        "Audio track" => "音频轨",
+        "Recording" => "录音",
+        "Take {}" => "录音 {}",
+        "COUNT-IN" => "预备拍",
+        "Count-in" => "预备拍",
+        "Stop recording (R)" => "停止录音（R）",
+        "Record (R): sing or play into the armed track. A bar of clicks counts you in." => {
+            "录音（R）：对着待录音的音轨唱或弹。开始前先响一小节嗒嗒声帮你数拍，别抢拍哦。"
+        }
+        "Metronome: a click on every beat while the song plays" => "节拍器：播放时每一拍响一下",
+        "One bar of clicks before recording starts, so you come in on time" => {
+            "录音前先响一小节嗒嗒声，让你准时进来"
+        }
+        "Recording after one bar of count-in… press R or Space to stop" => {
+            "一小节预备拍之后开始录音…… 按 R 或空格停止"
+        }
+        "Recording… press R or Space to stop" => "正在录音…… 按 R 或空格停止",
+        "Saving the take…" => "正在保存录音……",
+        "Still saving the last take, one moment…" => "上一条录音还在保存，稍等一下……",
+        "Save the song first: recordings are kept in a folder next to it" => {
+            "先保存歌曲：录音会放在它旁边的文件夹里"
+        }
+        "no sound device" => "没有声音设备",
+        "Couldn't open the input: {}" => "无法打开输入：{}",
+        "Couldn't start recording: {}" => "无法开始录音：{}",
+        "Couldn't monitor the input: {}" => "无法监听输入：{}",
+        "Recording failed: {}" => "录音失败：{}",
+        "Recording stopped: the take couldn't be written (is the disk full?)" => {
+            "录音已停止：无法写入这条录音（硬盘满了吗？）"
+        }
+        "Recorded {}s (Ctrl+Z removes the take)" => "录好了 {} 秒（Ctrl+Z 可以删掉这条）",
+        "Recorded {}s, but {} samples were lost because the computer was too busy" => {
+            "录好了 {} 秒，但电脑太忙，丢了 {} 个采样"
+        }
+        "Recorded {} from the MIDI keyboard" => "从 MIDI 键盘录下了 {}",
+        "Nothing was played on the MIDI keyboard, so no clip was made" => {
+            "MIDI 键盘上什么都没弹，所以没有生成片段"
+        }
+        "The recording was too short, so it was dropped" => "录音太短，已丢弃",
+        "Couldn't load the recording {}: {}" => "无法载入录音 {}：{}",
+        "Couldn't copy the file next to the song: {}" => "无法把文件复制到歌曲旁边：{}",
+        "Couldn't copy the recording {} next to the song: {}" => "无法把录音 {} 复制到歌曲旁边：{}",
+        "the file is missing" => "文件不见了",
+        "Still loading the recordings, try again in a moment" => "录音还在载入，过一会儿再试",
+        "Import audio (WAV)…" => "导入音频（WAV）…",
+        "Put a WAV file (a recording, a loop, a sample) on an audio track at the playhead" => {
+            "把一个 WAV 文件（录音、循环乐段、采样）放到音频轨上播放头所在的位置"
+        }
+        "Imported the audio file (a copy is kept next to the song)" => {
+            "已导入音频文件（歌曲旁边留了一份副本）"
+        }
+        "Imported the audio file. Save the song to keep a copy next to it." => {
+            "已导入音频文件。保存歌曲后会在它旁边留一份副本。"
+        }
+        "A recording can only go on an audio track: click one first" => {
+            "录音只能放在音频轨上：先点一条音频轨"
+        }
+        "Notes can't go on an audio track: click an instrument track first" => {
+            "音符不能放在音频轨上：先点一条乐器音轨"
+        }
+        "Audio tracks hold recordings: arm the track and press ● Record (R), or use File › Import audio" => {
+            "音频轨放的是录音：先让它待录音，再按 ● 录音（R），或者用「文件 › 导入音频」"
+        }
+        "Press ● Record (R), or File › Import audio" => "按 ● 录音（R），或者「文件 › 导入音频」",
+        "This audio track holds recordings. Press ● Record (R) to sing or play into it, or File › Import audio to bring in a WAV." => {
+            "这是放录音的音频轨啦。按 ● 录音（R）对着它唱或者弹，或者用「文件 › 导入音频」塞个 WAV 进来。还愣着干嘛，杂鱼～"
+        }
+        "file missing" => "文件不见了",
+        "loading…" => "载入中…",
+        "Loading the recording…" => "正在载入录音……",
+        "Can't find {}. Put the file back next to the song, or delete this clip." => {
+            "找不到 {}。把文件放回歌曲旁边，或者删掉这个片段。"
+        }
+        "{}s of recording" => "{} 秒录音",
+        "How loud this recording plays (0 dB = as recorded)" => "这条录音放多响（0 dB = 原样）",
+        "Seconds the recording takes to fade in (or drag the yellow handle)" => {
+            "录音淡入用多少秒（也可以拖黄色小方块）"
+        }
+        "Seconds the recording takes to fade out at the end of the clip" => {
+            "片段结尾的录音淡出用多少秒"
+        }
+        "Starts at" => "从这里开始",
+        "Where in the file the clip begins, in seconds (drag the left edge to trim)" => {
+            "片段从文件的第几秒开始（也可以拖左边缘来修剪）"
+        }
+        "drag the edges to trim · yellow handles fade · click to move the playhead · Shift: off the grid" => {
+            "拖两边修剪 · 黄色小方块调淡入淡出 · 点击移动播放头 · 按住 Shift 不对齐网格"
+        }
+        "Arm for recording: Record (R) records onto the armed track" => {
+            "待录音：按录音（R）就录到待录音的音轨上"
+        }
+        "Armed: Record (R) records onto this track. Click to disarm." => {
+            "待录音中：按录音（R）就录到这条音轨上。再点一下取消。"
+        }
+        "Arm for recording: Record (R) then records the microphone or line input onto this track" => {
+            "设为待录音：之后按录音（R）就把麦克风或线路输入录到这条音轨上"
+        }
+        "Arm for recording: Record (R) then records what you play on the MIDI keyboard onto this track" => {
+            "设为待录音：之后按录音（R）就把你在 MIDI 键盘上弹的录到这条音轨上"
+        }
+        "Armed: press Record (R) to record" => "待录音：按录音（R）开始",
+        "Arm this track for recording" => "把这条音轨设为待录音",
+        "An armed track records when you press Record. One audio track records at a time." => {
+            "按下录音时，待录音的音轨就开始录。音频轨一次只能录一条，贪心可不行。"
+        }
+        "Audio track (voice, guitar, WAV files)" => "音频轨（人声、吉他、WAV 文件）",
+        "A track for recordings instead of notes: record a microphone or an instrument, or import WAV files" => {
+            "放录音而不是音符的音轨：录麦克风或乐器，或者导入 WAV 文件"
+        }
+        "Records from" => "录音来源",
+        "Input {}" => "输入 {}",
+        "Input {}+{} (stereo)" => "输入 {}+{}（立体声）",
+        "Which input of the sound card: a microphone is usually Input 1, a stereo keyboard or mixer Input 1+2" => {
+            "声卡的哪个输入：麦克风一般是输入 1，立体声键盘或调音台是输入 1+2"
+        }
+        "Hear the input while armed (monitoring)" => "待录音时听到输入（监听）",
+        "Plays what comes in through the speakers or headphones. Use headphones: speakers feed back into the microphone and howl." => {
+            "把输入的声音从音箱或耳机放出来。戴耳机啦笨蛋，用音箱的话声音会钻回麦克风里啸叫的。"
+        }
+        "Choose the microphone…" => "选择麦克风…",
+        "Opens the Sound window, where you pick the input device" => "打开「声音」窗口，在那里选输入设备",
+        "Takes are saved as WAV files in the \"<song> audio\" folder next to the song. Click a take to trim it, fade it or change its volume below." => {
+            "录音会存成 WAV，乖乖待在歌曲旁边的「<歌名> audio」文件夹里。点一下录音片段，就能在下面修剪、淡入淡出、调音量，这么简单杂鱼也会吧？"
+        }
+        "Driver" => "驱动",
+        "ASIO: the lowest delay with an audio interface" => "ASIO：配合声卡（音频接口）延迟最低",
+        "This build has no ASIO. WASAPI works with every sound card; for ASIO see \"ASIO\" in README.txt." => {
+            "这个版本没有 ASIO。WASAPI 什么声卡都能用；非要 ASIO 的话，去看 README.txt 里的「ASIO」一节。"
+        }
+        "delay {} ms" => "延迟 {} 毫秒",
+        "How long it takes from AIDAW to your ears. Recordings are lined up with the song automatically." => {
+            "声音从 AIDAW 到你耳朵要多久。录音会自动和歌曲对齐，不用你操心。"
+        }
+        "Recording input (microphone, guitar, line in):" => "录音输入（麦克风、吉他、线路输入）：",
+        "With ASIO, recording uses the inputs of the same device." => "用 ASIO 时，录音用的是同一个设备的输入。",
+        "No microphone or other input found. Plug one in and click Refresh." => {
+            "没找到麦克风或其他输入。插上一个，再点「刷新列表」。"
+        }
+        "Waiting for the input to start…" => "等待输入启动……",
+        "No level at all? In Windows Settings › Privacy & security › Microphone, turn on \"Let desktop apps access your microphone\"." => {
+            "电平完全不动？去 Windows 设置 › 隐私和安全性 › 麦克风，打开「允许桌面应用访问你的麦克风」。被系统拦住了可不能怪我哦。"
+        }
+        "Input level: sing or play, it should move. Red means too loud: turn the gain down on your audio interface." => {
+            "输入电平：唱或弹的时候它应该会动。变红就是太响了，把声卡上的增益调小一点啦，笨蛋。"
+        }
+        "no input open" => "没有打开输入",
+        "MIDI keyboards:" => "MIDI 键盘：",
+        "No MIDI keyboard found. Plug one in (USB) and click Refresh." => {
+            "没找到 MIDI 键盘。插上一个（USB），再点「刷新列表」。"
+        }
+        "Keys play the armed instrument track, or the selected one. Arm it and press Record to record the notes." => {
+            "琴键会弹待录音的乐器音轨，没有的话就弹选中的那条。设为待录音再按录音，就能把音符录下来。"
+        }
+        "MIDI isn't available on this computer: {}" => "这台电脑上用不了 MIDI：{}",
+        "Couldn't open {}: {}" => "无法打开 {}：{}",
+        "MIDI keyboard {} not found" => "没找到 MIDI 键盘 {}",
+        "Look again for speakers, inputs and MIDI keyboards" => "重新查找扬声器、输入和 MIDI 键盘",
 
         _ => return None,
     })

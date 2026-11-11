@@ -1,13 +1,13 @@
 //! Application state, file sync with the AI, undo/redo and the top-level layout.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant, SystemTime};
 
 use aidaw_core::edit::{self, Op};
-use aidaw_core::{io as pio, render, Cue, LoopRegion, Note, Project};
+use aidaw_core::{io as pio, render, AudioPool, Cue, LoopRegion, Note, Project};
 use aidaw_engine::Engine;
 use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, Rect, RichText};
 
@@ -17,6 +17,7 @@ use crate::i18n::{self, tr, trf};
 use crate::icons::{self, Icon};
 use crate::lanes::LaneKey;
 use crate::onboarding::{self, Tutorial, WelcomeChoice};
+use crate::record::{AudioLoad, PendingTake, Recording};
 use crate::scale::Scale;
 use crate::settings::Settings;
 use crate::theme;
@@ -106,6 +107,8 @@ pub struct App {
     pub engine_error: Option<String>,
     pub show_sound: bool,
     pub device_names: Vec<String>,
+    /// Inputs (microphones, line inputs) of the driver, for the Sound window.
+    pub input_names: Vec<String>,
     /// When Play was last pressed, to notice a device that never starts.
     play_pressed_at: Option<Instant>,
 
@@ -184,6 +187,29 @@ pub struct App {
     pub scale_root: u8,
     pub scale: Scale,
     pub scale_lock: bool,
+
+    // ---- recording (see record.rs) ----
+    /// The sound files the song's audio clips play, by file name.
+    pub audio: Arc<AudioPool>,
+    /// Sound files loading on a background thread.
+    pub audio_load: Option<AudioLoad>,
+    /// Files that could not be loaded (not tried again until Save As).
+    pub audio_failed: HashSet<String>,
+    /// Tracks armed for recording (by id): one audio, one instrument.
+    pub armed: BTreeSet<String>,
+    pub recording: Option<Recording>,
+    /// A take whose file is still being finished.
+    pub pending_take: Option<PendingTake>,
+    /// Input levels shown on the meters, per channel.
+    pub input_peaks: Vec<f32>,
+    /// What the engine monitors: the track index and its inputs.
+    pub monitoring: Option<(usize, Vec<u16>)>,
+    /// The track MIDI keyboards play, as last told to the engine.
+    pub live_track: Option<usize>,
+    /// Why the input could not be opened (not retried until it changes).
+    pub input_error: Option<String>,
+    /// When a MIDI key was last played.
+    pub midi_seen: Option<Instant>,
 }
 
 /// A blank song that is ready to draw in: a piano track and a drum track,
@@ -275,6 +301,22 @@ fn mtime(path: &std::path::Path) -> Option<SystemTime> {
     pio::modified(path)
 }
 
+/// Open the driver and speakers chosen in the Sound window; if they are
+/// gone (unplugged, or an ASIO driver this build lacks), the system default.
+fn open_engine(project: &Project, settings: &Settings) -> Result<Engine, String> {
+    let (driver, output) = (settings.driver.as_deref(), settings.output.as_deref());
+    match Engine::open(project, driver, output) {
+        Ok(e) => Ok(e),
+        Err(e) if driver.is_some() || output.is_some() => {
+            crate::sound::log(&format!(
+                "audio: {driver:?} / {output:?} failed ({e:#}); trying the default"
+            ));
+            Engine::new(project).map_err(|e| format!("{e:#}"))
+        }
+        Err(e) => Err(format!("{e:#}")),
+    }
+}
+
 /// A WAV export in progress on a background thread.
 struct ExportJob {
     path: PathBuf,
@@ -287,7 +329,7 @@ impl App {
         let settings = Settings::load();
         i18n::set(settings.lang.unwrap_or_else(i18n::system));
         let (project, path, status) = first_song(path);
-        let opened = Engine::new(&project).map_err(|e| format!("{e:#}"));
+        let opened = open_engine(&project, &settings);
         crate::sound::log_engine(&opened);
         App::with(project, path, settings, opened, status)
     }
@@ -321,6 +363,7 @@ impl App {
             engine_error,
             show_sound: false,
             device_names: Vec::new(),
+            input_names: Vec::new(),
             play_pressed_at: None,
             queued_history: None,
             selected_clip: None,
@@ -364,9 +407,21 @@ impl App {
             scale_root: 0,
             scale: Scale::Major,
             scale_lock: true,
+            audio: Arc::new(AudioPool::new()),
+            audio_load: None,
+            audio_failed: HashSet::new(),
+            armed: BTreeSet::new(),
+            recording: None,
+            pending_take: None,
+            input_peaks: Vec::new(),
+            monitoring: None,
+            live_track: None,
+            input_error: None,
+            midi_seen: None,
         };
         // A request already in the file is old news: don't act on it.
         app.seen_cue = app.project.transport.cue.map(|c| c.id);
+        app.engine_ready();
         app.select_first_clip();
         app.reveal_automation(&Project::new("", 120.0));
         app
@@ -379,6 +434,26 @@ impl App {
         let (tracks, song) = crate::arrange::changed_lanes(before, &self.project);
         self.lanes_open.extend(tracks);
         self.master_lanes_open |= song;
+    }
+
+    /// Bring a freshly opened engine up to date: the sound files, the
+    /// metronome, MIDI keyboards.
+    fn engine_ready(&mut self) {
+        self.monitoring = None;
+        self.live_track = None;
+        self.input_error = None;
+        if let Some(e) = &mut self.engine {
+            e.set_audio(self.audio.clone());
+            e.set_metronome(self.settings.metronome);
+            e.open_midi(None);
+            for problem in e.midi_problems() {
+                crate::sound::log(&format!("midi: {problem}"));
+            }
+            let ports = e.midi_ports();
+            if !ports.is_empty() {
+                crate::sound::log(&format!("midi: listening to {ports:?}"));
+            }
+        }
     }
 
     fn select_first_clip(&mut self) {
@@ -398,6 +473,7 @@ impl App {
     /// the file changes too: undoing into another file's song would
     /// autosave that song over the file just opened.
     pub fn load_project(&mut self, project: Project, path: Option<PathBuf>, status: &str) {
+        self.stop_recording();
         self.settle();
         let old = self.swap_in(Version::of(project));
         if path == self.path {
@@ -407,6 +483,8 @@ impl App {
         }
         // A playhead request already in the file is old news.
         self.seen_cue = self.project.transport.cue.map(|c| c.id);
+        self.armed.clear();
+        self.reset_audio();
         self.disk_mtime = path.as_deref().and_then(mtime);
         self.newer_on_disk = None;
         self.path = path;
@@ -494,9 +572,13 @@ impl App {
     }
 
     pub fn toggle_play(&mut self) {
+        if self.is_recording() {
+            self.stop_recording();
+            return;
+        }
         match &self.engine {
             Some(e) => {
-                if e.is_playing() {
+                if e.is_playing() || e.counting_in().is_some() {
                     e.pause();
                 } else {
                     e.play();
@@ -511,27 +593,33 @@ impl App {
         }
     }
 
-    /// (Re)open audio output, on the default device or a named one.
-    pub fn open_audio(&mut self, device: Option<&str>) {
+    /// (Re)open audio output: `driver` (`None` for the system's default)
+    /// and its device called `output` (`None` for the default one). The
+    /// choice is remembered for the next start.
+    pub fn open_audio(&mut self, driver: Option<&str>, output: Option<&str>) {
+        self.stop_recording();
+        self.finish_take_now();
+        let position = self.playhead;
         self.engine = None; // release the old device first
-        let opened = match device {
-            Some(name) => Engine::with_device(&self.project, name),
-            None => Engine::new(&self.project),
-        }
-        .map_err(|e| format!("{e:#}"));
+        let opened = Engine::open(&self.project, driver, output).map_err(|e| format!("{e:#}"));
         crate::sound::log_engine(&opened);
         match opened {
             Ok(e) => {
                 self.status = trf("Sound now plays through {}", &[&e.device_name()]);
                 e.test_tone();
+                e.seek(position);
                 self.engine = Some(e);
                 self.engine_error = None;
+                self.settings.driver = driver.map(String::from);
+                self.settings.output = output.map(String::from);
+                self.settings.save();
             }
             Err(err) => {
                 self.status = tr("Couldn't open that sound device").into();
                 self.engine_error = Some(err);
             }
         }
+        self.engine_ready();
     }
 
     /// If Play was pressed but the device never asked for audio, say so.
@@ -564,6 +652,7 @@ impl App {
 
     /// Stop, back at the start of the song (or of the loop, while it is on).
     pub fn stop(&mut self) {
+        self.stop_recording();
         let home = self.project.active_loop().map_or(0.0, |(start, _)| start);
         if let Some(e) = &self.engine {
             e.pause();
@@ -716,7 +805,7 @@ impl App {
 
     /// Make what was edited so far its own undo step, before undo, redo or
     /// a reload replaces the song.
-    fn settle(&mut self) {
+    pub(crate) fn settle(&mut self) {
         self.notice_edits();
         self.history.end_gesture(&self.project);
     }
@@ -945,7 +1034,9 @@ impl App {
                 "Saving to {} (AI tools can now use this file)",
                 &[&p.display()],
             );
+            let old_folder = self.folder().map(std::path::Path::to_path_buf);
             self.path = Some(p);
+            self.bring_audio_along(old_folder.as_deref());
             self.save_now();
         }
     }
@@ -953,6 +1044,10 @@ impl App {
     fn export_wav_dialog(&mut self) {
         if self.export.is_some() {
             self.status = tr("An export is already running").into();
+            return;
+        }
+        if self.is_loading_audio() || self.pending_take.is_some() {
+            self.status = tr("Still loading the recordings, try again in a moment").into();
             return;
         }
         let name = format!("{}.wav", self.project.name);
@@ -967,12 +1062,13 @@ impl App {
                 .map(|e| e.sample_rate())
                 .unwrap_or(44_100);
             let project = self.project.clone();
+            let audio = self.audio.clone();
             let progress = Arc::new(AtomicU32::new(0));
             let (tx, rx) = mpsc::channel();
             let (path, prog) = (p.clone(), progress.clone());
             // Rendering a long song takes seconds; keep the window responsive.
             std::thread::spawn(move || {
-                let r = render::render_to_wav_with_progress(&project, &path, sr, |x| {
+                let r = render::render_to_wav_with_progress(&project, &audio, &path, sr, |x| {
                     prog.store((x * 1000.0) as u32, Ordering::Relaxed);
                 })
                 .map_err(|e| format!("{e:#}"));
@@ -1042,6 +1138,12 @@ impl App {
         }
         if !ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(Key::Space)) {
             self.toggle_play();
+        }
+        let record = ctx.input(|i| {
+            i.key_pressed(Key::R) && !i.modifiers.command && !i.modifiers.alt && !i.modifiers.shift
+        });
+        if record && !ctx.wants_keyboard_input() {
+            self.toggle_record();
         }
     }
 
@@ -1170,6 +1272,14 @@ impl App {
                 if ui.button(tr("Save As…  (Ctrl+S)")).clicked() {
                     ui.close_menu();
                     self.save_as_dialog();
+                }
+                if ui
+                    .add(icons::button(Icon::Import, tr("Import audio (WAV)…")))
+                    .on_hover_text(tr("Put a WAV file (a recording, a loop, a sample) on an audio track at the playhead"))
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.import_audio_dialog();
                 }
                 if ui
                     .add_enabled(
@@ -1320,6 +1430,7 @@ impl App {
             self.toggle_play();
         }
         self.ui_rects.insert("play", play.rect);
+        self.record_buttons(ui);
         let looping = self.project.active_loop().is_some();
         if ui
             .add(
@@ -1343,6 +1454,8 @@ impl App {
         let bar = (self.playhead / bpb).floor() as i64 + 1;
         let beat = (self.playhead % bpb).floor() as i64 + 1;
         let pro = self.pro();
+        let count_in = self.engine.as_ref().and_then(|e| e.counting_in());
+        let recording = self.is_recording();
         theme::card(theme::CANVAS, egui::Stroke::new(1.0_f32, theme::BORDER))
             .inner_margin(egui::Margin::symmetric(12, 2))
             .show(ui, |ui| {
@@ -1360,14 +1473,35 @@ impl App {
                         .font(egui::FontId::monospace(19.0))
                         .color(theme::CYAN)
                 };
-                caption(ui, tr("BAR"));
-                let pos = if pro {
-                    format!("{bar:>3}.{beat}")
+                if let Some(left) = count_in {
+                    // Count the clicks down: 4, 3, 2, 1, then recording starts.
+                    ui.label(
+                        RichText::new(tr("COUNT-IN"))
+                            .font(theme::bold_font(9.5))
+                            .extra_letter_spacing(1.0)
+                            .color(theme::DANGER),
+                    );
+                    ui.label(lcd(format!("{:>3}", left.ceil() as i64)).color(theme::DANGER));
                 } else {
-                    format!("{bar:>3}")
-                };
-                ui.label(lcd(pos))
-                    .on_hover_text(tr("Where the song is playing: bar number . beat"));
+                    if recording {
+                        ui.label(
+                            RichText::new("● REC")
+                                .font(theme::bold_font(9.5))
+                                .extra_letter_spacing(1.0)
+                                .color(theme::DANGER),
+                        )
+                        .on_hover_text(tr("Recording… press R or Space to stop"));
+                    } else {
+                        caption(ui, tr("BAR"));
+                    }
+                    let pos = if pro {
+                        format!("{bar:>3}.{beat}")
+                    } else {
+                        format!("{bar:>3}")
+                    };
+                    ui.label(lcd(pos))
+                        .on_hover_text(tr("Where the song is playing: bar number . beat"));
+                }
                 let (r, _) = ui.allocate_exact_size(egui::vec2(1.0, 22.0), egui::Sense::hover());
                 ui.painter().rect_filled(r, 0.0, theme::BORDER);
                 caption(ui, if pro { "BPM" } else { tr("SPEED") }).on_hover_text(if pro {
@@ -1420,6 +1554,70 @@ impl App {
                     self.project.bpm = bpm;
                 }
             });
+    }
+
+    /// Record, the metronome and (Pro) the count-in switch.
+    fn record_buttons(&mut self, ui: &mut egui::Ui) {
+        let recording = self.is_recording();
+        let round = |image: egui::Image<'static>| {
+            egui::Button::image(image)
+                .corner_radius(17)
+                .min_size(egui::vec2(34.0, 34.0))
+        };
+        let rec = ui
+            .add(
+                round(icons::image(
+                    Icon::Record,
+                    18.0,
+                    if recording {
+                        Color32::WHITE
+                    } else {
+                        theme::DANGER
+                    },
+                ))
+                .fill(if recording {
+                    theme::DANGER
+                } else {
+                    theme::SURFACE
+                }),
+            )
+            .on_hover_text(if recording {
+                tr("Stop recording (R)")
+            } else {
+                tr("Record (R): sing or play into the armed track. A bar of clicks counts you in.")
+            });
+        if rec.clicked() {
+            self.toggle_record();
+        }
+        self.ui_rects.insert("record", rec.rect);
+        let click = self.settings.metronome;
+        let metronome = ui
+            .add(
+                round(icons::image(
+                    Icon::Metronome,
+                    18.0,
+                    if click { theme::CYAN } else { theme::TEXT_DIM },
+                ))
+                .selected(click),
+            )
+            .on_hover_text(tr("Metronome: a click on every beat while the song plays"));
+        if metronome.clicked() {
+            self.settings.metronome = !click;
+            self.settings.save();
+            if let Some(e) = &self.engine {
+                e.set_metronome(!click);
+            }
+        }
+        if self.pro()
+            && ui
+                .toggle_value(&mut self.settings.count_in, tr("Count-in"))
+                .on_hover_text(tr(
+                    "One bar of clicks before recording starts, so you come in on time",
+                ))
+                .changed()
+        {
+            self.settings.save();
+        }
     }
 
     fn sound_button(&mut self, ui: &mut egui::Ui) {
@@ -1488,10 +1686,11 @@ impl eframe::App for App {
         self.poll_export();
         self.check_audio_alive();
         self.shortcuts(ctx);
-        if let Some(e) = &self.engine {
+        if let Some(e) = &mut self.engine {
             e.maintain();
             self.playhead = e.position();
         }
+        self.record_frame();
 
         self.edit_shortcuts(ctx);
 
@@ -1537,12 +1736,22 @@ impl eframe::App for App {
         // A whole drag or slider gesture is one undo step.
         self.commit_edits(ctx);
         self.system_font.poll(ctx);
+        // Device names, which Windows gives in its own language.
+        let midi = match (&self.engine, self.show_sound) {
+            (Some(e), true) => e.midi_ports(),
+            _ => Vec::new(),
+        };
         let names = std::mem::take(&mut self.check_names)
             .then(|| song_names(&self.project))
             .into_iter()
             .flatten();
-        let devices = self.show_sound.then_some(&self.device_names);
-        let devices = devices.into_iter().flatten().map(String::as_str);
+        let devices = self
+            .show_sound
+            .then_some([&self.device_names, &self.input_names, &midi])
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(String::as_str);
         self.system_font
             .want_for(ctx, names.chain(devices).chain([self.status.as_str()]));
         // Safety net: never leave a held note ringing after the mouse is released.
@@ -1553,10 +1762,19 @@ impl eframe::App for App {
             self.save_now();
         }
 
-        if self.is_playing() {
+        let counting_in = self
+            .engine
+            .as_ref()
+            .is_some_and(|e| e.counting_in().is_some());
+        if self.is_playing() || counting_in || self.is_recording() {
             ctx.request_repaint();
-        } else if self.export.is_some() {
-            ctx.request_repaint_after(Duration::from_millis(100));
+        } else if self.export.is_some()
+            || self.pending_take.is_some()
+            || self.is_loading_audio()
+            || !self.armed.is_empty()
+        {
+            // Progress, a take being saved, recordings loading, input meters.
+            ctx.request_repaint_after(Duration::from_millis(50));
         } else {
             ctx.request_repaint_after(POLL_INTERVAL);
         }
@@ -1798,6 +2016,15 @@ impl App {
             self.edit_focus = EditFocus::Notes;
             self.select_all_notes();
         }
+        // A recording has no notes: the keys act on the clip itself.
+        let audio_clip = self
+            .selected_clip
+            .as_deref()
+            .and_then(|id| self.project.clip(id))
+            .is_some_and(|(_, c)| c.is_audio());
+        if audio_clip {
+            self.edit_focus = EditFocus::Clips;
+        }
         match self.edit_focus {
             EditFocus::Notes => {
                 if escape {
@@ -1923,16 +2150,22 @@ impl App {
                         tr("Add an instrument first (+ Add instrument on the left)").into();
                     return;
                 };
+                let audio_track = self
+                    .project
+                    .track(&track_id)
+                    .is_some_and(|t| t.instrument.is_audio());
+                if audio_track != clip.is_audio() {
+                    self.status = if clip.is_audio() {
+                        tr("A recording can only go on an audio track: click one first")
+                    } else {
+                        tr("Notes can't go on an audio track: click an instrument track first")
+                    }
+                    .into();
+                    return;
+                }
                 let wanted = editing::bar_start(playhead, bar);
                 let start = self.free_spot(&track_id, wanted, clip.length);
-                let op = Op::AddClip {
-                    track_id: track_id.clone(),
-                    start,
-                    length: clip.length,
-                    name: Some(clip.name),
-                    notes: clip.notes,
-                };
-                if let Some(v) = self.run_op(op) {
+                if let Some(v) = self.add_clip_copy(&track_id, start, clip) {
                     self.selected_track = Some(track_id);
                     self.selected_clip = v["clip_id"].as_str().map(String::from);
                     self.selected_notes.clear();
@@ -2053,7 +2286,15 @@ impl App {
         else {
             return;
         };
-        ctx.copy_text(Copied::Clip(clip.clone()).to_text());
+        let mut clip = clip.clone();
+        // A recording is named by its full path, so it pastes into another
+        // song too.
+        if let Some(a) = &mut clip.audio {
+            a.file = aidaw_core::audio::resolve(self.folder(), &a.file)
+                .to_string_lossy()
+                .into_owned();
+        }
+        ctx.copy_text(Copied::Clip(clip).to_text());
         if cut {
             self.delete_selected_clip();
             self.status = tr("Cut the clip (Ctrl+V pastes it at the playhead)").into();
@@ -2075,14 +2316,7 @@ impl App {
         };
         let after = clip.end();
         let start = self.free_spot(&track_id, after, clip.length);
-        let op = Op::AddClip {
-            track_id: track_id.clone(),
-            start,
-            length: clip.length,
-            name: Some(clip.name),
-            notes: clip.notes,
-        };
-        if let Some(v) = self.run_op(op) {
+        if let Some(v) = self.add_clip_copy(&track_id, start, clip) {
             self.selected_track = Some(track_id);
             self.selected_clip = v["clip_id"].as_str().map(String::from);
             self.selected_notes.clear();
@@ -2095,7 +2329,7 @@ impl App {
     }
 
     /// Where a clip `length` beats long fits on the track, at `from` or later.
-    fn free_spot(&self, track_id: &str, from: f64, length: f64) -> f64 {
+    pub(crate) fn free_spot(&self, track_id: &str, from: f64, length: f64) -> f64 {
         let clips = self.project.track(track_id).map_or(&[][..], |t| &t.clips);
         editing::free_spot(clips, from, length)
     }

@@ -3,8 +3,11 @@
 //! master limiter works, the balance of lows, mids and highs, the loudness
 //! of each stretch of bars, and each track played on its own.
 
+use std::sync::Arc;
+
 use anyhow::Result;
 
+use crate::audio::AudioPool;
 use crate::model::Project;
 use crate::render::{self, Sequencer};
 
@@ -65,8 +68,9 @@ pub fn section_bars(total_bars: u32) -> u32 {
 }
 
 /// Render the song (nothing is written to disk) and measure it, and each
-/// audible track alone. The renders run in parallel.
-pub fn analyze(project: &Project) -> Result<Analysis> {
+/// audible track alone. The renders run in parallel. `audio` holds the files
+/// the audio clips play.
+pub fn analyze(project: &Project, audio: &Arc<AudioPool>) -> Result<Analysis> {
     render::check_render_args(project, SAMPLE_RATE)?;
     let solos: Vec<(usize, Project)> = project
         .tracks
@@ -82,10 +86,10 @@ pub fn analyze(project: &Project) -> Result<Analysis> {
         })
         .collect();
     let (mix, alone) = std::thread::scope(|s| {
-        let mix = s.spawn(|| measure(project, true));
+        let mix = s.spawn(|| measure(project, audio, true));
         let alone: Vec<_> = solos
             .iter()
-            .map(|(i, p)| (*i, s.spawn(move || measure(p, false))))
+            .map(|(i, p)| (*i, s.spawn(move || measure(p, audio, false))))
             .collect();
         let alone: Vec<(usize, Measured)> = alone
             .into_iter()
@@ -126,7 +130,7 @@ struct Measured {
 
 /// Render `project` block by block and measure it; `detail` adds the band
 /// balance and the sections.
-fn measure(project: &Project, detail: bool) -> Measured {
+fn measure(project: &Project, audio: &Arc<AudioPool>, detail: bool) -> Measured {
     let project = &*render::playable(project);
     let sr = SAMPLE_RATE as f64;
     let song_seconds = project.length_beats() * project.seconds_per_beat();
@@ -140,6 +144,7 @@ fn measure(project: &Project, detail: bool) -> Measured {
     let mut section_sums = vec![(0.0f64, 0usize); total_bars.div_ceil(per_section) as usize];
 
     let mut seq = Sequencer::new(SAMPLE_RATE);
+    seq.set_audio(audio.clone());
     let mut block = vec![0.0f32; BLOCK * 2];
     let mut loudness = Loudness::new(sr);
     let mut bands = Bands::new(sr);
@@ -425,7 +430,7 @@ mod tests {
     #[test]
     fn the_demo_measures_sensibly() {
         let p = demo();
-        let a = analyze(&p).unwrap();
+        let a = analyze(&p, &Default::default()).unwrap();
         let lufs = a.mix.lufs.unwrap();
         assert!((-30.0..-8.0).contains(&lufs), "{lufs}");
         let peak = a.mix.peak_db.unwrap();
@@ -451,12 +456,12 @@ mod tests {
     #[test]
     fn a_squashed_mix_shows_the_limiter_working() {
         let mut p = demo();
-        let calm = analyze(&p).unwrap();
+        let calm = analyze(&p, &Default::default()).unwrap();
         p.master_gain = 2.0;
         for t in &mut p.tracks {
             t.gain = 2.0;
         }
-        let hot = analyze(&p).unwrap();
+        let hot = analyze(&p, &Default::default()).unwrap();
         assert!(
             hot.limiter_db > calm.limiter_db + 3.0,
             "{} vs {}",
@@ -480,6 +485,7 @@ mod tests {
             solo: false,
             reverb: 0.0,
             color: None,
+            input: Vec::new(),
             clips: vec![Clip {
                 id: "c1".into(),
                 name: String::new(),
@@ -491,10 +497,11 @@ mod tests {
                     duration: 1.0,
                     velocity: 100,
                 }],
+                audio: None,
             }],
             automation: Vec::new(),
         });
-        let a = analyze(&p).unwrap();
+        let a = analyze(&p, &Default::default()).unwrap();
         assert_eq!(a.mix.lufs, None);
         assert_eq!(a.mix.peak_db, None);
         assert_eq!(a.first_sound, None);
