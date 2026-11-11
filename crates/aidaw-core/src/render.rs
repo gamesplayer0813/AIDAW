@@ -23,6 +23,10 @@
 //! - The master bus runs through a peak limiter and a soft clipper, so
 //!   stacking many loud tracks never hard-clips or produces NaNs: the output
 //!   is always strictly inside ±1.0.
+//! - Tracks can play hosted plugins and run effect plugins (see
+//!   [`crate::rack`]): plugin instruments get their notes as sample-accurate
+//!   note-on/off events, and a track with plugins renders into its own bus,
+//!   through its effects, before its volume, pan and reverb send.
 //! - [`Sequencer::process`] does not allocate (state buffers are reserved up
 //!   front), so it is safe to call from a real-time audio callback.
 
@@ -33,6 +37,7 @@ use anyhow::{Context, Result};
 
 use crate::model::{DrumKit, Instrument, Project, Reverb, Synth, Waveform};
 use crate::pitch;
+use crate::rack::{NoteEvent, Rack, Transport};
 
 /// Voices above this count start stealing (with a short fade).
 const MAX_VOICES: usize = 96;
@@ -62,7 +67,11 @@ const MAX_UNISON: usize = 5;
 
 /// Longest stretch rendered in one pass; longer blocks are split, so the
 /// reverb send buffer can be allocated once, up front.
-const MAX_BLOCK: usize = 1024;
+const MAX_BLOCK: usize = crate::rack::MAX_BLOCK;
+/// Plugin-instrument notes sounding or waiting at once; more are dropped.
+const MAX_PLUGIN_NOTES: usize = 1024;
+/// Note events handed to one plugin in one block; more wait a block.
+const MAX_EVENTS: usize = 512;
 /// Freeverb's comb and all-pass delays in samples at 44.1 kHz (scaled to
 /// the actual sample rate). The right side is `STEREO_SPREAD` longer.
 const COMB_TUNING: [usize; 8] = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617];
@@ -583,6 +592,130 @@ struct TrackGain {
     cur: [f32; 3],
 }
 
+/// A note on a plugin instrument. The plugin makes the sound; this only
+/// keeps time, to send the note-on and the note-off at the right frames.
+#[derive(Clone, Copy)]
+struct PluginNote {
+    /// The track the note was played on; its plugin is looked up from this
+    /// once, then the note stays with that plugin (`slot`).
+    track: usize,
+    slot: Option<u64>,
+    pitch: u8,
+    velocity: f32,
+    id: i32,
+    /// Frames to wait before the note starts.
+    delay: u32,
+    started: bool,
+    /// Frames the note is held once started.
+    gate: u64,
+    age: u64,
+    /// A preview that sounds until [`Sequencer::release_held`].
+    held: bool,
+    /// End it at the start of the next block (after a seek or a stop).
+    cut: bool,
+    done: bool,
+    /// Its plugin was found this block (else the plugin is gone).
+    seen: bool,
+}
+
+impl PluginNote {
+    /// Advance by one block of `frames`, writing the events it makes.
+    fn step(&mut self, frames: u32, events: &mut Vec<NoteEvent>) {
+        let room = events.len() < events.capacity();
+        let off = |offset| NoteEvent {
+            offset,
+            pitch: self.pitch,
+            velocity: 0.0,
+            on: false,
+            id: self.id,
+        };
+        if self.cut {
+            if self.started {
+                if !room {
+                    return; // try again next block
+                }
+                events.push(off(0));
+            }
+            self.done = true;
+            return;
+        }
+        let mut at = 0;
+        if !self.started {
+            if self.delay >= frames {
+                self.delay -= frames;
+                return;
+            }
+            if !room {
+                self.done = true; // never started, so nothing hangs
+                return;
+            }
+            at = self.delay;
+            self.delay = 0;
+            self.started = true;
+            events.push(NoteEvent {
+                offset: at,
+                pitch: self.pitch,
+                velocity: self.velocity,
+                on: true,
+                id: self.id,
+            });
+        }
+        let left = u64::from(frames - at);
+        let remain = self.gate.saturating_sub(self.age);
+        if remain < left {
+            if events.len() < events.capacity() {
+                events.push(off(at + remain as u32));
+                self.done = true;
+            } else {
+                self.cut = true;
+            }
+        } else {
+            self.age += left;
+        }
+    }
+}
+
+/// Advance `voice` by one frame: its sample (0 while it waits to start), or
+/// `None` once it is done.
+#[inline]
+fn tick(
+    voice: &mut Voice,
+    sr: f32,
+    rng: &mut u32,
+    fade_step: f32,
+    fade_in_step: f32,
+) -> Option<f32> {
+    if voice.done {
+        return None;
+    }
+    if let Some(n) = voice.fade_at {
+        if n == 0 {
+            voice.fading = true;
+            voice.fade_at = None;
+        } else {
+            voice.fade_at = Some(n - 1);
+        }
+    }
+    if voice.delay > 0 {
+        voice.delay -= 1;
+        return Some(0.0);
+    }
+    let mut s = voice.next(sr, rng);
+    if voice.fade_in < 1.0 {
+        voice.fade_in = (voice.fade_in + fade_in_step).min(1.0);
+        s *= voice.fade_in;
+    }
+    if voice.fading {
+        voice.fade -= fade_step;
+        if voice.fade <= 0.0 {
+            voice.fade = 0.0;
+            voice.done = true;
+        }
+        s *= voice.fade;
+    }
+    Some(s)
+}
+
 pub struct Sequencer {
     sample_rate: f32,
     /// Playhead in beats.
@@ -602,6 +735,15 @@ pub struct Sequencer {
     /// What the tracks send to the reverb in the current block (mono).
     send: Box<[f32]>,
     room: Room,
+    /// Notes playing on plugin instruments.
+    plugin_notes: Vec<PluginNote>,
+    next_note_id: i32,
+    /// The events of one track in the current block (capacity reserved).
+    events: Vec<NoteEvent>,
+    /// Frames rendered so far, for [`Transport::frames`].
+    clock: u64,
+    /// Where [`Self::process_looping`] wraps, for [`Transport::loop_end`].
+    loop_end: Option<f64>,
 }
 
 impl Sequencer {
@@ -619,6 +761,11 @@ impl Sequencer {
             chase: false,
             send: vec![0.0; MAX_BLOCK].into_boxed_slice(),
             room: Room::new(sample_rate),
+            plugin_notes: Vec::with_capacity(MAX_PLUGIN_NOTES),
+            next_note_id: 0,
+            events: Vec::with_capacity(MAX_EVENTS),
+            clock: 0,
+            loop_end: None,
         }
     }
 
@@ -642,6 +789,12 @@ impl Sequencer {
             v.held = false;
         }
         self.voices.retain(|v| !v.done);
+        // Plugin notes that are sounding end at once; waiting ones never start.
+        for n in &mut self.plugin_notes {
+            n.cut = true;
+            n.held = false;
+        }
+        self.plugin_notes.retain(|n| n.started);
     }
 
     /// How far the master limiter turned the sound down at most since the
@@ -659,24 +812,53 @@ impl Sequencer {
         self.voices.len()
     }
 
-    /// Whether anything is still audible: a voice, or the reverb's tail.
+    /// Notes sounding (or about to start) on plugin instruments.
+    pub fn active_plugin_notes(&self) -> usize {
+        self.plugin_notes.len()
+    }
+
+    /// Whether anything is still audible: a voice, a plugin note, or the
+    /// reverb's tail. (Plugins may ring on by themselves; see the engine.)
     pub fn is_sounding(&self) -> bool {
-        !self.voices.is_empty() || !self.room.asleep
+        !self.voices.is_empty() || !self.plugin_notes.is_empty() || !self.room.asleep
     }
 
     /// Render `out.len() / 2` stereo frames (interleaved L/R) and advance the playhead.
     pub fn process(&mut self, project: &Project, out: &mut [f32]) {
-        self.render_block(project, out, true);
+        self.process_with(project, None, out);
+    }
+
+    /// [`Self::process`] with the project's plugins in `rack`.
+    pub fn process_with(
+        &mut self,
+        project: &Project,
+        rack: Option<&mut (dyn Rack + '_)>,
+        out: &mut [f32],
+    ) {
+        self.loop_end = None;
+        self.render_block(project, rack, out, true);
     }
 
     /// Like [`Self::process`], but when the playhead reaches `loop_end` it
     /// jumps back to beat 0 mid-block and keeps going. Notes already sounding
     /// ring out naturally across the wrap, as in a real loop.
     pub fn process_looping(&mut self, project: &Project, out: &mut [f32], loop_end: Option<f64>) {
+        self.process_looping_with(project, None, out, loop_end);
+    }
+
+    /// [`Self::process_looping`] with the project's plugins in `rack`.
+    pub fn process_looping_with(
+        &mut self,
+        project: &Project,
+        mut rack: Option<&mut (dyn Rack + '_)>,
+        out: &mut [f32],
+        loop_end: Option<f64>,
+    ) {
         let Some(end) = loop_end.filter(|e| e.is_finite() && *e > 0.0) else {
-            self.process(project, out);
+            self.process_with(project, rack, out);
             return;
         };
+        self.loop_end = Some(end);
         let frames_per_beat = self.sample_rate as f64 * project.seconds_per_beat();
         let mut rest = out;
         while !rest.is_empty() {
@@ -686,7 +868,7 @@ impl Sequencer {
             let until = ((end - self.position) * frames_per_beat).ceil().max(1.0);
             let n = (rest.len() / 2).min(until as usize).max(1) * 2;
             let (now, later) = rest.split_at_mut(n.min(rest.len()));
-            self.render_block(project, now, true);
+            self.render_block(project, rack.as_deref_mut(), now, true);
             rest = later;
         }
     }
@@ -694,7 +876,18 @@ impl Sequencer {
     /// Render only the voices already sounding (e.g. note previews) without
     /// triggering clip notes or moving the playhead. Used while stopped.
     pub fn process_voices(&mut self, project: &Project, out: &mut [f32]) {
-        self.render_block(project, out, false);
+        self.process_voices_with(project, None, out);
+    }
+
+    /// [`Self::process_voices`] with the project's plugins in `rack`, so
+    /// their tails and note previews keep sounding while stopped.
+    pub fn process_voices_with(
+        &mut self,
+        project: &Project,
+        rack: Option<&mut (dyn Rack + '_)>,
+        out: &mut [f32],
+    ) {
+        self.render_block(project, rack, out, false);
     }
 
     /// Start a short one-off note on `track`'s instrument, for auditioning.
@@ -713,8 +906,11 @@ impl Sequencer {
         let Some(t) = project.tracks.get(track) else {
             return;
         };
-        self.spawn(track, &t.instrument, pitch_, 100, 0, u64::MAX);
-        if let Some(v) = self.voices.last_mut() {
+        if self.spawn(track, &t.instrument, pitch_, 100, 0, u64::MAX) {
+            if let Some(n) = self.plugin_notes.last_mut() {
+                n.held = true;
+            }
+        } else if let Some(v) = self.voices.last_mut() {
             v.held = true;
         }
     }
@@ -725,16 +921,32 @@ impl Sequencer {
             v.held = false;
             v.gate = v.age;
         }
+        for n in self.plugin_notes.iter_mut().filter(|n| n.held) {
+            n.held = false;
+            n.gate = n.age;
+        }
     }
 
-    fn render_block(&mut self, project: &Project, out: &mut [f32], advance: bool) {
+    fn render_block(
+        &mut self,
+        project: &Project,
+        mut rack: Option<&mut (dyn Rack + '_)>,
+        out: &mut [f32],
+        advance: bool,
+    ) {
         for chunk in out.chunks_mut(MAX_BLOCK * 2) {
-            self.render_chunk(project, chunk, advance);
+            self.render_chunk(project, rack.as_deref_mut(), chunk, advance);
         }
     }
 
     /// [`Self::render_block`] for at most [`MAX_BLOCK`] frames.
-    fn render_chunk(&mut self, project: &Project, out: &mut [f32], advance: bool) {
+    fn render_chunk(
+        &mut self,
+        project: &Project,
+        mut rack: Option<&mut (dyn Rack + '_)>,
+        out: &mut [f32],
+        advance: bool,
+    ) {
         out.fill(0.0);
         let frames = out.len() / 2;
         if frames == 0 {
@@ -763,53 +975,59 @@ impl Sequencer {
         let inv_frames = 1.0 / frames as f32;
         let fade_step = 1.0 / (FADE_SECONDS * sr);
         let fade_in_step = 1.0 / (CHASE_FADE_SECONDS * sr);
+        // Gains of track `i` across this block: where they start, and the
+        // step per frame towards where they end.
+        let gains = &self.gains;
+        let ramp = |i: usize, track: &crate::model::Track| {
+            let target = track_gains(track, any_solo);
+            let from = if i >= old_len { target } else { gains[i].cur };
+            let step = [
+                (target[0] - from[0]) * inv_frames,
+                (target[1] - from[1]) * inv_frames,
+                (target[2] - from[2]) * inv_frames,
+            ];
+            (from, step, from == [0.0; 3] && target == [0.0; 3])
+        };
+
+        // Tracks with plugins start the block with an empty bus.
+        if let Some(rack) = rack.as_deref_mut() {
+            for i in 0..n_tracks {
+                if rack.routes(i) {
+                    if let Some([l, r]) = rack.bus(i) {
+                        l[..frames].fill(0.0);
+                        r[..frames].fill(0.0);
+                    }
+                }
+            }
+        }
 
         for voice in self.voices.iter_mut() {
             let Some(track) = project.tracks.get(voice.track) else {
                 voice.done = true;
                 continue;
             };
-            let target = track_gains(track, any_solo);
-            let from = if voice.track >= old_len {
-                target
-            } else {
-                self.gains[voice.track].cur
-            };
-            let silent = from == [0.0; 3] && target == [0.0; 3];
-            let step = [
-                (target[0] - from[0]) * inv_frames,
-                (target[1] - from[1]) * inv_frames,
-                (target[2] - from[2]) * inv_frames,
-            ];
+            let noise = &mut self.noise;
+            // On a track with plugins the voice goes into the track's bus;
+            // its gains are applied when the bus is mixed.
+            if let Some([l, r]) = rack
+                .as_deref_mut()
+                .filter(|r| r.routes(voice.track))
+                .and_then(|r| r.bus(voice.track))
+            {
+                for frame in 0..frames {
+                    let Some(s) = tick(voice, sr, noise, fade_step, fade_in_step) else {
+                        break;
+                    };
+                    l[frame] += s;
+                    r[frame] += s;
+                }
+                continue;
+            }
+            let (from, step, silent) = ramp(voice.track, track);
             for frame in 0..frames {
-                if voice.done {
+                let Some(s) = tick(voice, sr, noise, fade_step, fade_in_step) else {
                     break;
-                }
-                if let Some(n) = voice.fade_at {
-                    if n == 0 {
-                        voice.fading = true;
-                        voice.fade_at = None;
-                    } else {
-                        voice.fade_at = Some(n - 1);
-                    }
-                }
-                if voice.delay > 0 {
-                    voice.delay -= 1;
-                    continue;
-                }
-                let mut s = voice.next(sr, &mut self.noise);
-                if voice.fade_in < 1.0 {
-                    voice.fade_in = (voice.fade_in + fade_in_step).min(1.0);
-                    s *= voice.fade_in;
-                }
-                if voice.fading {
-                    voice.fade -= fade_step;
-                    if voice.fade <= 0.0 {
-                        voice.fade = 0.0;
-                        voice.done = true;
-                    }
-                    s *= voice.fade;
-                }
+                };
                 if !silent {
                     let k = frame as f32;
                     out[frame * 2] += s * (from[0] + step[0] * k);
@@ -819,6 +1037,65 @@ impl Sequencer {
             }
         }
         self.voices.retain(|v| !v.done);
+
+        match rack {
+            Some(rack) => {
+                let transport = Transport {
+                    sample_rate: f64::from(sr),
+                    bpm: project.bpm,
+                    beats_per_bar: project.beats_per_bar,
+                    beat: b0,
+                    playing: advance,
+                    loop_end: self.loop_end,
+                    frames: self.clock,
+                };
+                for n in &mut self.plugin_notes {
+                    if n.slot.is_none() {
+                        n.slot = rack.instrument(n.track);
+                    }
+                    n.seen = false;
+                }
+                for (i, track) in project.tracks.iter().enumerate() {
+                    if !rack.routes(i) {
+                        continue;
+                    }
+                    let events = &mut self.events;
+                    events.clear();
+                    if let Some(slot) = rack.instrument(i) {
+                        for n in self
+                            .plugin_notes
+                            .iter_mut()
+                            .filter(|n| n.slot == Some(slot))
+                        {
+                            n.seen = true;
+                            n.step(frames as u32, events);
+                        }
+                        sort_events(events);
+                    }
+                    rack.process(i, frames, events, &transport);
+                    let Some([l, r]) = rack.bus(i) else {
+                        continue;
+                    };
+                    let (from, step, silent) = ramp(i, track);
+                    if silent {
+                        continue;
+                    }
+                    for f in 0..frames {
+                        let k = f as f32;
+                        let (bl, br) = (l[f], r[f]);
+                        out[f * 2] += bl * (from[0] + step[0] * k);
+                        out[f * 2 + 1] += br * (from[1] + step[1] * k);
+                        send[f] += 0.5 * (bl + br) * (from[2] + step[2] * k);
+                    }
+                }
+                // Notes whose plugin is gone (track deleted, plugin swapped)
+                // go with it.
+                self.plugin_notes.retain(|n| n.seen && !n.done);
+            }
+            None => self.plugin_notes.clear(),
+        }
+        self.clock += frames as u64;
+
         for (g, t) in self.gains.iter_mut().zip(&project.tracks) {
             g.cur = track_gains(t, any_solo);
         }
@@ -881,9 +1158,14 @@ impl Sequencer {
                         continue;
                     }
                     let gate = (held * frames_per_beat).max(1.0) as u64;
-                    self.spawn(ti, &track.instrument, note.pitch, note.velocity, 0, gate);
-                    if let Some(v) = self.voices.last_mut() {
-                        v.age = ((beat - at) * frames_per_beat) as u64;
+                    let age = ((beat - at) * frames_per_beat) as u64;
+                    if self.spawn(ti, &track.instrument, note.pitch, note.velocity, 0, gate) {
+                        // A plugin starts the note now, for what is left of it.
+                        if let Some(n) = self.plugin_notes.last_mut() {
+                            n.age = age;
+                        }
+                    } else if let Some(v) = self.voices.last_mut() {
+                        v.age = age;
                         v.fade_in = 0.0;
                     }
                 }
@@ -921,6 +1203,8 @@ impl Sequencer {
         }
     }
 
+    /// Start a note on `inst`: a voice of a built-in instrument, or (returns
+    /// true) a note on a plugin instrument.
     fn spawn(
         &mut self,
         track: usize,
@@ -929,9 +1213,30 @@ impl Sequencer {
         vel: u8,
         delay: u32,
         gate: u64,
-    ) {
+    ) -> bool {
         let sr = self.sample_rate;
         let kind = match inst {
+            Instrument::Vst3(_) => {
+                if self.plugin_notes.len() < MAX_PLUGIN_NOTES {
+                    self.next_note_id = self.next_note_id.wrapping_add(1) & i32::MAX;
+                    self.plugin_notes.push(PluginNote {
+                        track,
+                        slot: None,
+                        pitch: pitch_.min(127),
+                        velocity: f32::from(vel.clamp(1, 127)) / 127.0,
+                        id: self.next_note_id,
+                        delay,
+                        started: false,
+                        gate,
+                        age: 0,
+                        held: false,
+                        cut: false,
+                        done: false,
+                        seen: false,
+                    });
+                }
+                return true;
+            }
             Instrument::Synth(p) => Kind::Synth(SynthVoice::new(p, sr)),
             Instrument::Drums { kit } => {
                 let kit = kit_params(*kit);
@@ -998,6 +1303,7 @@ impl Sequencer {
             fade_in: 1.0,
             fade_at: None,
         });
+        false
     }
 
     /// Make room for a new voice. Prefers voices that are already fading or
@@ -1028,6 +1334,19 @@ impl Sequencer {
             v.held = false;
         }
         self.voices.retain(|v| !v.done);
+    }
+}
+
+/// Order a block's events by frame, note-offs before note-ons on the same
+/// frame (so a repeated note ends before it starts again). Insertion sort:
+/// the list is short and nearly sorted, and this must not allocate.
+fn sort_events(events: &mut [NoteEvent]) {
+    for i in 1..events.len() {
+        let mut j = i;
+        while j > 0 && (events[j].offset, events[j].on) < (events[j - 1].offset, events[j - 1].on) {
+            events.swap(j, j - 1);
+            j -= 1;
+        }
     }
 }
 
@@ -1600,14 +1919,35 @@ pub fn tail_seconds(project: &Project) -> f64 {
     }
 }
 
+/// [`tail_seconds`] plus whatever the rack's plugins need to ring out.
+pub fn tail_seconds_with(project: &Project, rack: Option<&(dyn Rack + '_)>) -> f64 {
+    let plugins = rack.map_or(0.0, |r| r.tail_seconds());
+    tail_seconds(project)
+        + if plugins.is_finite() {
+            plugins.clamp(0.0, 30.0)
+        } else {
+            0.0
+        }
+}
+
 /// Render the whole project (plus a tail for releases) to interleaved stereo.
 pub fn render(project: &Project, sample_rate: u32) -> Vec<f32> {
-    let total_seconds = project.length_beats() * project.seconds_per_beat() + tail_seconds(project);
+    render_with(project, None, sample_rate)
+}
+
+/// [`render`] with the project's plugins in `rack`.
+pub fn render_with(
+    project: &Project,
+    mut rack: Option<&mut (dyn Rack + '_)>,
+    sample_rate: u32,
+) -> Vec<f32> {
+    let tail = tail_seconds_with(project, rack.as_deref());
+    let total_seconds = project.length_beats() * project.seconds_per_beat() + tail;
     let total_frames = (total_seconds * sample_rate as f64) as usize;
     let mut seq = Sequencer::new(sample_rate);
     let mut out = vec![0.0f32; total_frames * 2];
     for chunk in out.chunks_mut(512 * 2) {
-        seq.process(project, chunk);
+        seq.process_with(project, rack.as_deref_mut(), chunk);
     }
     out
 }
@@ -1665,10 +2005,23 @@ pub fn render_to_wav_with_progress(
     project: &Project,
     path: &Path,
     sample_rate: u32,
+    progress: impl FnMut(f64),
+) -> Result<f64> {
+    render_to_wav_with(project, None, path, sample_rate, progress)
+}
+
+/// [`render_to_wav_with_progress`] with the project's plugins in `rack`
+/// (prepared for `sample_rate`, ideally for offline processing).
+pub fn render_to_wav_with(
+    project: &Project,
+    mut rack: Option<&mut (dyn Rack + '_)>,
+    path: &Path,
+    sample_rate: u32,
     mut progress: impl FnMut(f64),
 ) -> Result<f64> {
     check_render_args(project, sample_rate)?;
-    let total_seconds = project.length_beats() * project.seconds_per_beat() + tail_seconds(project);
+    let tail = tail_seconds_with(project, rack.as_deref());
+    let total_seconds = project.length_beats() * project.seconds_per_beat() + tail;
     let total_frames = (total_seconds * sample_rate as f64) as usize;
     let spec = hound::WavSpec {
         channels: 2,
@@ -1685,7 +2038,7 @@ pub fn render_to_wav_with_progress(
     while done < total_frames {
         let n = (total_frames - done).min(512);
         let out = &mut block[..n * 2];
-        seq.process(project, out);
+        seq.process_with(project, rack.as_deref_mut(), out);
         for s in out.iter() {
             let s = if s.is_finite() { *s } else { 0.0 };
             w.write_sample((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)?;

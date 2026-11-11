@@ -7,11 +7,16 @@ pub mod io;
 pub mod model;
 pub mod music;
 pub mod pitch;
+pub mod plugin;
 pub mod presets;
+pub mod rack;
 pub mod render;
 pub mod transform;
 
-pub use model::{Clip, DrumKit, Instrument, Note, Project, Reverb, Synth, Track, Waveform};
+pub use model::{
+    Blob, Clip, DrumKit, Effect, EffectKind, Instrument, Note, PluginRef, Project, Reverb, Synth,
+    Track, Waveform,
+};
 
 #[cfg(test)]
 mod tests {
