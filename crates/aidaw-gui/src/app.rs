@@ -2497,7 +2497,8 @@ mod tests {
         pio::save(&mine, &path).unwrap();
         let mut a = app(mine.clone(), Some(path.clone()));
         a.selected_notes = sel(&[1]); // E4
-                                      // The AI adds a note in front of the others.
+
+        // The AI adds a note in front of the others.
         let mut theirs = mine.clone();
         theirs.clip_mut("c1").unwrap().notes.insert(
             0,
