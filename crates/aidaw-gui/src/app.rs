@@ -7,7 +7,7 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant, SystemTime};
 
 use aidaw_core::edit::{self, Op};
-use aidaw_core::{io as pio, render, Note, Project};
+use aidaw_core::{io as pio, render, Cue, LoopRegion, Note, Project};
 use aidaw_engine::Engine;
 use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, Rect, RichText};
 
@@ -39,6 +39,8 @@ pub enum Drag {
     MoveClip {
         clip_id: String,
         grab_offset: f64,
+        /// Alt+drag: `clip_id` is a fresh copy of this clip.
+        copy_of: Option<String>,
     },
     ResizeClip {
         clip_id: String,
@@ -62,6 +64,22 @@ pub enum Drag {
         beat: f64,
         row: f32,
         keep: BTreeSet<usize>,
+    },
+    /// Dragging a track's header to another row.
+    MoveTrack {
+        track_id: String,
+    },
+    /// Drawing a new loop region from `anchor` (beats) in the loop strip.
+    LoopNew {
+        anchor: f64,
+    },
+    /// Moving the loop region, grabbed `grab` beats after its start.
+    LoopMove {
+        grab: f64,
+    },
+    /// Dragging one end of the loop region (its start, or else its end).
+    LoopEdge {
+        start: bool,
     },
 }
 
@@ -110,6 +128,10 @@ pub struct App {
     humanize_seed: u64,
     pub last_note_length: f64,
     pub playhead: f64,
+    /// Scroll the song view so the playhead shows (the AI moved it).
+    pub reveal_playhead: bool,
+    /// Id of the AI's last playhead request carried out (see [`Cue`]).
+    seen_cue: Option<u64>,
 
     disk_mtime: Option<SystemTime>,
     /// Modification time of the project file when a newer AIDAW wrote it.
@@ -286,6 +308,8 @@ impl App {
                 .map_or(0, |d| d.as_nanos() as u64),
             last_note_length: 1.0,
             playhead: 0.0,
+            reveal_playhead: false,
+            seen_cue: None,
             last_poll: Instant::now(),
             status,
             export: None,
@@ -307,6 +331,8 @@ impl App {
             scale: Scale::Major,
             scale_lock: true,
         };
+        // A request already in the file is old news: don't act on it.
+        app.seen_cue = app.project.transport.cue.map(|c| c.id);
         app.select_first_clip();
         app
     }
@@ -335,6 +361,8 @@ impl App {
         } else {
             self.history.clear();
         }
+        // A playhead request already in the file is old news.
+        self.seen_cue = self.project.transport.cue.map(|c| c.id);
         self.disk_mtime = path.as_deref().and_then(mtime);
         self.newer_on_disk = None;
         self.path = path;
@@ -487,12 +515,14 @@ impl App {
         }
     }
 
+    /// Stop, back at the start of the song (or of the loop, while it is on).
     pub fn stop(&mut self) {
+        let home = self.project.active_loop().map_or(0.0, |(start, _)| start);
         if let Some(e) = &self.engine {
             e.pause();
-            e.seek(0.0);
+            e.seek(home);
         }
-        self.playhead = 0.0;
+        self.playhead = home;
     }
 
     pub fn seek(&mut self, beat: f64) {
@@ -666,7 +696,9 @@ impl App {
 
     fn undo(&mut self) {
         self.settle();
-        if let Some(prev) = self.history.take_undo() {
+        if let Some(mut prev) = self.history.take_undo() {
+            // The AI's playhead requests are not edits: never bring an old one back.
+            prev.project.transport.cue = self.project.transport.cue;
             let current = self.swap_in(prev);
             self.history.undone(current);
             self.ev_undos += 1;
@@ -676,7 +708,8 @@ impl App {
 
     fn redo(&mut self) {
         self.settle();
-        if let Some(next) = self.history.take_redo() {
+        if let Some(mut next) = self.history.take_redo() {
+            next.project.transport.cue = self.project.transport.cue;
             let current = self.swap_in(next);
             self.history.redone(current);
             self.status = tr("Redone").into();
@@ -697,13 +730,20 @@ impl App {
         if on_disk.is_some() && self.disk_mtime.is_some() && on_disk != self.disk_mtime {
             match pio::load(&path) {
                 Ok(theirs) => {
-                    if theirs != self.project {
+                    let cue = theirs.transport.cue;
+                    if !theirs.same_music(&self.project)
+                        || theirs.transport.loop_region != self.project.transport.loop_region
+                    {
                         self.history.push(Version::of(theirs));
                         self.status = tr(
                             "The AI changed the song while you were editing; kept your version (Ctrl+Z shows the AI's)",
                         )
                         .into();
                     }
+                    // A playhead request is not an edit: keep it and carry it out.
+                    self.project.transport.cue = cue;
+                    self.history.not_an_edit(|p| p.transport.cue = cue);
+                    self.follow_cue(cue);
                 }
                 Err(e) if pio::is_newer_format(&e) => self.newer_on_disk = on_disk,
                 Err(_) => {}
@@ -742,7 +782,16 @@ impl App {
         // On a parse error (e.g. a non-atomic writer mid-write) just retry next poll.
         if let Ok(p) = loaded {
             self.disk_mtime = Some(m);
-            if p != self.project {
+            let cue = p.transport.cue;
+            let music = p.same_music(&self.project);
+            if p != self.project
+                && music
+                && p.transport.loop_region == self.project.transport.loop_region
+            {
+                // Only a playhead request: nothing to undo.
+                self.project.transport.cue = cue;
+                self.history.not_an_edit(|p| p.transport.cue = cue);
+            } else if p != self.project {
                 // Keep the local version on the undo stack so AI edits can be reverted.
                 self.settle();
                 let local = self.swap_in(Version::of(p));
@@ -752,9 +801,55 @@ impl App {
                 if self.selected_clip.is_none() {
                     self.select_first_clip();
                 }
-                self.status = tr("Reloaded external change (Ctrl+Z to revert)").into();
+                self.status = if music {
+                    // Only the loop changed.
+                    self.loop_status()
+                } else {
+                    tr("Reloaded external change (Ctrl+Z to revert)").into()
+                };
             }
+            self.follow_cue(cue);
         }
+    }
+
+    /// Carry out a playhead request from the AI, once.
+    fn follow_cue(&mut self, cue: Option<Cue>) {
+        let Some(cue) = cue.filter(|c| self.seen_cue != Some(c.id)) else {
+            return;
+        };
+        self.seen_cue = Some(cue.id);
+        self.seek(cue.beat);
+        self.reveal_playhead = true;
+        let bar_of = |beat: f64| (beat / self.bar()).floor() as i64 + 1;
+        let bar = bar_of(cue.beat);
+        // Play never starts outside a loop that is on (see the engine).
+        let loop_start = self
+            .project
+            .active_loop()
+            .filter(|&(start, end)| cue.beat < start || cue.beat >= end)
+            .map(|(start, _)| bar_of(start));
+        let playing = self.is_playing();
+        match cue.play {
+            Some(true) if !playing => self.toggle_play(),
+            Some(false) if playing => self.toggle_play(),
+            _ => {}
+        }
+        self.status = match (cue.play, loop_start) {
+            (Some(true), Some(start)) => {
+                trf("The AI started playback at the loop, bar {}", &[&start])
+            }
+            (Some(true), None) => trf("The AI started playback at bar {}", &[&bar]),
+            (Some(false), _) => trf("The AI stopped playback at bar {}", &[&bar]),
+            (None, Some(start)) => trf(
+                "The AI moved the playhead to bar {}, outside the loop: Play starts at bar {}",
+                &[&bar, &start],
+            ),
+            (None, None) if playing => trf("The AI moved the playhead to bar {}", &[&bar]),
+            (None, None) => trf(
+                "The AI moved the playhead to bar {} (Space plays from there)",
+                &[&bar],
+            ),
+        };
     }
 
     fn open_dialog(&mut self) {
@@ -1139,7 +1234,9 @@ impl App {
                     .corner_radius(17)
                     .min_size(egui::vec2(34.0, 34.0)),
             )
-            .on_hover_text(tr("Stop and go back to the start"))
+            .on_hover_text(tr(
+                "Stop and go back to the start (of the loop, while the loop is on)",
+            ))
             .clicked()
         {
             self.stop();
@@ -1156,6 +1253,23 @@ impl App {
             self.toggle_play();
         }
         self.ui_rects.insert("play", play.rect);
+        let looping = self.project.active_loop().is_some();
+        if ui
+            .add(
+                egui::Button::image(icons::image(Icon::Repeat, 18.0, theme::TEXT))
+                    .selected(looping)
+                    .corner_radius(17)
+                    .min_size(egui::vec2(34.0, 34.0)),
+            )
+            .on_hover_text(if looping {
+                tr("Loop is on: playback repeats the marked part (L). Click to play the whole song again.")
+            } else {
+                tr("Loop: play one part over and over while you work on it (L).\nDrag in the thin strip above the bar numbers to choose the part.")
+            })
+            .clicked()
+        {
+            self.toggle_loop();
+        }
         ui.add_space(4.0);
 
         let bpb = self.project.beats_per_bar.max(1) as f64;
@@ -1516,7 +1630,7 @@ pub fn notes_text(n: usize) -> String {
 // ---- editing keys ------------------------------------------------------------
 
 impl App {
-    fn bar(&self) -> f64 {
+    pub fn bar(&self) -> f64 {
         self.project.beats_per_bar.max(1) as f64
     }
 
@@ -1595,6 +1709,19 @@ impl App {
                 i.modifiers.shift,
             )
         });
+        let (toggle_loop, split) = ctx.input(|i| {
+            let plain = !i.modifiers.command && !i.modifiers.alt && !i.modifiers.shift;
+            (
+                plain && i.key_pressed(Key::L),
+                plain && i.key_pressed(Key::S),
+            )
+        });
+        if toggle_loop {
+            self.toggle_loop();
+        }
+        if split {
+            self.split_at_playhead();
+        }
 
         // What gets pasted depends on what was copied, not on the focus.
         if let Some(text) = paste {
@@ -1859,7 +1986,7 @@ impl App {
 
     /// Put a copy of the selected clip right after it and select the copy,
     /// so pressing Ctrl+D again keeps repeating it.
-    fn duplicate_clip(&mut self) {
+    pub fn duplicate_clip(&mut self) {
         let Some((track_id, clip)) = self
             .selected_clip
             .as_deref()
@@ -1909,5 +2036,193 @@ impl App {
         if let Some(clip) = self.open_clip_mut() {
             clip.start = (clip.start + bar * dir as f64).max(0.0);
         }
+    }
+}
+
+// ---- loop, split and track order ----------------------------------------------
+
+impl App {
+    /// What loop edges and splits snap to: the grid in Pro mode, whole bars
+    /// in Easy mode (where parts always line up with bars).
+    pub fn bar_or_grid(&self) -> f64 {
+        if self.pro() {
+            self.grid()
+        } else {
+            self.bar()
+        }
+    }
+
+    pub fn snap_bar_or_grid(&self, beat: f64) -> f64 {
+        let step = self.bar_or_grid();
+        (beat / step).round() * step
+    }
+
+    /// Loop `start..end` (beats) and switch the loop on.
+    pub fn set_loop(&mut self, start: f64, end: f64) {
+        let region = LoopRegion {
+            start: start.max(0.0),
+            end,
+            on: true,
+        };
+        if region.is_valid() {
+            self.project.transport.loop_region = Some(region);
+        }
+    }
+
+    /// The Loop button and L: switch the loop on or off. The first time it
+    /// loops the clip open in the piano roll, or else the 4 bars from the
+    /// playhead's bar.
+    pub fn toggle_loop(&mut self) {
+        let region = match self
+            .project
+            .transport
+            .loop_region
+            .filter(LoopRegion::is_valid)
+        {
+            Some(r) => LoopRegion { on: !r.on, ..r },
+            None => {
+                let bar = self.bar();
+                let (start, end) = match self
+                    .selected_clip
+                    .as_deref()
+                    .and_then(|id| self.project.clip(id))
+                {
+                    Some((_, c)) if c.length >= aidaw_core::transport::MIN_LOOP_BEATS => {
+                        (c.start, c.end())
+                    }
+                    _ => {
+                        let start = (self.playhead.max(0.0) / bar).floor() * bar;
+                        (start, start + 4.0 * bar)
+                    }
+                };
+                LoopRegion {
+                    start,
+                    end,
+                    on: true,
+                }
+            }
+        };
+        self.project.transport.loop_region = Some(region);
+        self.status = self.loop_status();
+    }
+
+    /// Loop just this clip.
+    pub fn loop_clip(&mut self, clip_id: &str) {
+        if let Some((_, c)) = self.project.clip(clip_id) {
+            let (start, end) = (c.start, c.end());
+            self.set_loop(start, end);
+            self.status = self.loop_status();
+        }
+    }
+
+    /// Take the loop region away; playback goes back to looping the song.
+    pub fn remove_loop(&mut self) {
+        self.project.transport.loop_region = None;
+        self.status = tr("Loop removed: the whole song plays").into();
+    }
+
+    /// "Loop on: bars 5–8 play over and over", for the status bar.
+    pub fn loop_status(&self) -> String {
+        match self.project.transport.loop_region {
+            Some(r) if r.on && r.is_valid() => {
+                let bar = self.bar();
+                let first = (r.start / bar + 1e-9).floor() as i64 + 1;
+                let last = ((r.end / bar - 1e-9).ceil() as i64).max(first);
+                if first == last {
+                    trf(
+                        "Loop on: bar {} plays over and over (L turns the loop off)",
+                        &[&first],
+                    )
+                } else {
+                    trf(
+                        "Loop on: bars {}–{} play over and over (L turns the loop off)",
+                        &[&first, &last],
+                    )
+                }
+            }
+            Some(_) => tr("Loop off: the whole song plays (L turns the loop back on)").into(),
+            None => tr("No loop: the whole song plays").into(),
+        }
+    }
+
+    /// S: cut the clip under the playhead in two there.
+    pub fn split_at_playhead(&mut self) {
+        let at = self.playhead;
+        self.split(None, at);
+    }
+
+    /// Cut a clip in two near beat `at` (song time; snapped like the loop).
+    /// Without a `clip_id` it cuts the open clip when `at` is inside it,
+    /// else the selected track's clip there. The part after the cut is
+    /// selected, so pressing S again while playing keeps cutting.
+    pub fn split(&mut self, clip_id: Option<&str>, at: f64) {
+        let inside = |c: &aidaw_core::Clip| at > c.start && at < c.end();
+        let target = clip_id
+            .and_then(|id| self.project.clip(id))
+            .or_else(|| {
+                self.selected_clip
+                    .as_deref()
+                    .and_then(|id| self.project.clip(id))
+                    .filter(|(_, c)| inside(c))
+            })
+            .or_else(|| {
+                let track = self.project.track(self.selected_track.as_deref()?)?;
+                track.clips.iter().find(|c| inside(c)).map(|c| (track, c))
+            })
+            .map(|(t, c)| (t.id.clone(), c.id.clone(), c.start, c.end()));
+        let Some((track_id, clip_id, start, end)) = target else {
+            self.status = tr(
+                "Put the playhead inside a clip first (click the bar numbers), then press S to cut it there",
+            )
+            .into();
+            return;
+        };
+        let cut = self.snap_bar_or_grid(at);
+        if cut <= start + 1e-9 || cut >= end - 1e-9 {
+            self.status = if self.pro() {
+                tr("That is the edge of the clip: cut a little further inside it")
+            } else {
+                tr("Parts are cut at bar lines, and the nearest one here is the edge of the part: move the playhead further into it")
+            }
+            .into();
+            return;
+        }
+        let op = Op::SplitClip { clip_id, at: cut };
+        if let Some(v) = self.run_op(op) {
+            let bar = (cut / self.bar()).floor() as i64 + 1;
+            self.selected_track = Some(track_id);
+            self.selected_clip = v["new_clip_id"].as_str().map(String::from);
+            self.selected_notes.clear();
+            self.edit_focus = EditFocus::Clips;
+            self.roll_scroll_to_notes = true;
+            self.status = trf(
+                "Cut the clip in two at bar {} (Ctrl+Z puts it back together)",
+                &[&bar],
+            );
+        }
+    }
+
+    /// Put a track on row `index` (0 = the top one).
+    pub fn move_track(&mut self, track_id: &str, index: usize) {
+        self.run_op(Op::MoveTrack {
+            track_id: track_id.into(),
+            index,
+        });
+    }
+
+    /// Alt+drag: put a copy of the clip on top of it (everything but the
+    /// id is the same) and return the copy's id, to drag that instead.
+    pub fn copy_clip_in_place(&mut self, clip_id: &str) -> Option<String> {
+        let id = self.project.next_id("c");
+        let track = self
+            .project
+            .tracks
+            .iter_mut()
+            .find(|t| t.clips.iter().any(|c| c.id == clip_id))?;
+        let mut copy = track.clips.iter().find(|c| c.id == clip_id)?.clone();
+        copy.id.clone_from(&id);
+        track.clips.push(copy);
+        track.clips.sort_by(|a, b| a.start.total_cmp(&b.start));
+        Some(id)
     }
 }

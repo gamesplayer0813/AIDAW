@@ -479,6 +479,7 @@ mod tests {
             mute: true,
             solo: false,
             reverb: 0.0,
+            color: None,
             clips: vec![Clip {
                 id: "c1".into(),
                 name: String::new(),

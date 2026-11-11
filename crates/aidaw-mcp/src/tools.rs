@@ -13,12 +13,13 @@ Pitches are names like \"C4\" (middle C = 60), \"F#3\", \"Bb2\" or MIDI numbers.
 referred to by name (\"Bass\") or id (\"t1\", \"c1\").
 Easiest workflow: new_project -> add_track with a preset (list_presets) -> add_chords / add_melody / \
 add_drum_pattern (they create clips for you) -> copy_bars to repeat parts -> get_project to check -> \
-analyze to check the mix -> render_wav to listen.
+analyze to check the mix -> render_wav to listen. To show the human what you changed, set_loop or \
+set_playhead points the app at it; undo takes back your last edit.
 Every error message says what was wrong and shows a valid example; read it and retry. Call help for the \
 full cheat sheet.";
 
 /// Returned by the `help` tool and `aidaw-mcp guide`.
-pub const GUIDE: &str = r#"AIDAW cheat sheet
+pub const GUIDE: &str = r##"AIDAW cheat sheet
 =================
 TIME   Beats (1 = quarter note). 4/4 => 4 beats per bar. bar 1 = beat 0, bar 2 = beat 4, bar 5 = beat 16.
        Other meters: update_project {"time_signature": "3/4"} (3 beats), "6/8" (3 beats = six eighths),
@@ -91,6 +92,23 @@ ARRANGE AND POLISH
   humanize {"track": "Keys", "timing": 0.02, "velocity": 8}
            Small random timing and velocity changes so programmed parts sound played. Once is
            enough; the same "seed" gives the same result.
+  split_clip {"clip": "c1", "bar": 3}
+           Cuts a clip in two at the start of bar 3 (no clip: every clip crossing bar 3). Notes
+           starting before the cut stay, shortened to end there; the rest go to the new clip.
+  update_track {"track": "Bass", "position": 1, "color": "orange"}
+           Moves a track to the top row and gives it a colour (names, "#ff8a3d" or "auto").
+
+SHOW THE HUMAN (in the AIDAW app, when it has this song open)
+  set_loop {"from_bar": 5, "bars": 4, "play": true}
+           The app repeats bars 5-8 and starts playing them. {"clip": "Chorus"} loops a clip;
+           {"on": false} plays the whole song again. render_wav and analyze ignore the loop.
+  set_playhead {"bar": 9}
+           Puts the app's playhead at bar 9; "play": true starts playing there, false stops.
+
+UNDO
+  undo {}  takes back your last edit ({"steps": 3}: the last three). Only edits made through these
+           tools, newest first; if the human changed the song in the app since, undo refuses
+           rather than lose their work.
 
 CHECK YOUR WORK
   get_project {}                    compact overview (tracks, clips, bars)
@@ -98,7 +116,7 @@ CHECK YOUR WORK
   get_project {"detail": "json"}    raw project JSON
   analyze {}                        hear the mix as numbers: loudness (LUFS), limiter, low/mid/high
                                     balance, each track alone, loudness along the song, and tips
-"#;
+"##;
 
 #[derive(Clone, Copy)]
 pub enum Ty {
@@ -158,6 +176,8 @@ const INSTRUMENT: &str = "preset id (78 of them, see list_presets), e.g. soft_ke
 const KIT: &str = "drum tracks only: standard | 808 | 909 | acoustic | lofi | trap | electro";
 const REVERB: &str = "0-1 how much of this track goes to the shared reverb: 0 dry, 0.2-0.35 typical for keys, \
                       pads and leads, 0.1 drums, 0 bass. New tracks start with their preset's usual amount";
+const COLOR: &str = "colour of the track in the app: blue, orange, green, purple, yellow, cyan, pink, violet, \
+                     red, teal, white, gray, a hex code like \"#ff8a3d\", or \"auto\" for its own colour";
 const NOTES: &str = "notes as a melody string like \"C4/1 E4/0.5 G4/0.5\" (PITCH/BEATS, r = rest), or an \
                      array of {pitch, start, duration, velocity} with start in beats from the clip start";
 
@@ -232,15 +252,18 @@ pub const TOOLS: &[Tool] = &[
             p("gain", Num, "volume 0-2 (default 0.8)"),
             p("pan", Num, "-1 left .. 1 right"),
             p("reverb", Num, REVERB),
+            p("color", Str, COLOR),
         ],
     },
     Tool {
         name: "update_track",
-        description: "Change a track's name, instrument preset, drum kit, volume, pan, reverb, mute/solo, or tweak its synth sound.",
+        description: "Change a track's name, instrument preset, drum kit, volume, pan, reverb, mute/solo, its row (position) and colour in the app, or tweak its synth sound.",
         example: r#"{"track": "Bass", "instrument": "pluck", "gain": 0.6, "cutoff": 1200}"#,
         params: &[
             req("track", Str, TRACK),
             p("name", Str, "new name"),
+            p("position", Int, "move the track to this row in the app, 1 = the top"),
+            p("color", Str, COLOR),
             p("instrument", Str, INSTRUMENT),
             p("gain", Num, "volume 0-2, 1 = unity"),
             p("pan", Num, "-1 left .. 1 right"),
@@ -373,6 +396,45 @@ pub const TOOLS: &[Tool] = &[
         ],
     },
     Tool {
+        name: "split_clip",
+        description: "Cut clips in two at a bar, like scissors, so the parts can be moved, copied or removed on their own. Notes that start before the cut stay (shortened to end there); the rest go to a new clip that starts at the cut. Give clip, or track (its clips crossing the cut), or neither (every clip crossing the cut).",
+        example: r#"{"clip": "c1", "bar": 3}"#,
+        params: &[
+            p("bar", Num, "1-based bar to cut at: 3 cuts between bars 2 and 3, 3.5 half way through bar 3"),
+            p("beat", Num, "absolute beat to cut at (alternative to bar)"),
+            p("clip", Str, CLIP),
+            p("track", Str, "cut every clip on this track that crosses the cut"),
+        ],
+    },
+    Tool {
+        name: "set_loop",
+        description: "Make the AIDAW app repeat part of the song while the human listens (an A/B loop), e.g. the bars you just changed. Give from_bar and bars, or a clip; on: false plays the whole song again (the loop is kept for later). play: true also starts playing at the loop. Only live playback in the app loops; render_wav and analyze always use the whole song.",
+        example: r#"{"from_bar": 5, "bars": 4, "play": true}"#,
+        params: &[
+            p("from_bar", Num, "first bar of the loop (1 = the start of the song)"),
+            p("bars", Num, "how many bars to loop (default 1)"),
+            p("clip", Str, "loop exactly this clip instead (name or id)"),
+            p("on", Bool, "false: stop looping; true (default): loop"),
+            p("play", Bool, "true: start playing at the loop's start; false: stop playing"),
+        ],
+    },
+    Tool {
+        name: "set_playhead",
+        description: "Put the AIDAW app's playhead at a bar, so the human hears that spot when they press Play. play: true starts playing there at once, false stops. Use it to point the human at what you changed.",
+        example: r#"{"bar": 9, "play": true}"#,
+        params: &[
+            p("bar", Num, "1-based bar: 1 = the start of the song, 9.5 = half way through bar 9"),
+            p("beat", Num, "absolute beat instead of bar (0 = the start)"),
+            p("play", Bool, "true: start playing there; false: stop"),
+        ],
+    },
+    Tool {
+        name: "undo",
+        description: "Take back your last edit (or several), e.g. when analyze or the human says it was a mistake. Only edits made through these tools are undone, newest first; if the human changed the song in the app since, undo refuses rather than lose their work.",
+        example: r#"{"steps": 1}"#,
+        params: &[p("steps", Int, "how many of your edits to take back, 1-30 (default 1)")],
+    },
+    Tool {
         name: "add_chords",
         description: "Write a chord progression from chord symbols; one chord per bar unless \"Am:2\" gives beats. Voiced around middle C. Creates the clip (and track) if needed.",
         example: r#"{"track": "Keys", "chords": "Am F C G", "bar": 1, "style": "block"}"#,
@@ -469,6 +531,23 @@ pub const ALIASES: &[(&str, &str)] = &[
     ("analyze_mix", "analyze"),
     ("check_mix", "analyze"),
     ("listen", "analyze"),
+    ("split", "split_clip"),
+    ("split_clips", "split_clip"),
+    ("cut_clip", "split_clip"),
+    ("loop", "set_loop"),
+    ("set_loop_region", "set_loop"),
+    ("loop_bars", "set_loop"),
+    ("seek", "set_playhead"),
+    ("move_playhead", "set_playhead"),
+    ("go_to_bar", "set_playhead"),
+    ("play_from", "set_playhead"),
+    ("undo_last", "undo"),
+    ("undo_edit", "undo"),
+    ("revert", "undo"),
+    ("move_track", "update_track"),
+    ("reorder_track", "update_track"),
+    ("set_track_color", "update_track"),
+    ("color_track", "update_track"),
 ];
 
 pub fn find(name: &str) -> Option<&'static Tool> {

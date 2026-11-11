@@ -131,7 +131,11 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             |y: f32| 127 - (((y - origin.y - RULER_H) / kh).floor() as i32).clamp(0, 127);
         // Key rows counted from the top (pitch 127), not rounded.
         let row_of = |y: f32| (y - origin.y - RULER_H) / kh;
-        let color = track_color(track_index);
+        let color = app
+            .project
+            .tracks
+            .get(track_index)
+            .map_or(theme::ACCENT, track_color);
         let bpb = app.project.beats_per_bar.max(1) as f64;
 
         // Grid.

@@ -13,6 +13,7 @@ fn compose_and_render_over_mcp() {
     let wav = dir.join("song.wav");
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_aidaw-mcp"))
+        .env("APPDATA", app_data())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -120,6 +121,7 @@ impl Client {
     fn start() -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_aidaw-mcp"))
             .env_remove("AIDAW_PROJECT")
+            .env("APPDATA", app_data())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -174,6 +176,11 @@ impl Drop for Client {
     }
 }
 
+/// Where the server under test keeps its undo history (not the real one).
+fn app_data() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("aidaw-mcp-appdata-{}", std::process::id()))
+}
+
 fn temp_dir(tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("aidaw-mcp-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -194,7 +201,7 @@ fn tool_list_is_simple_and_documented() {
         .contains("add_chords"));
     let tools = c.rpc("tools/list", json!({}));
     let tools = tools["tools"].as_array().unwrap();
-    assert!(tools.len() <= 24, "keep the tool list small");
+    assert!(tools.len() <= 28, "keep the tool list small");
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     for expected in [
         "help",
@@ -391,6 +398,7 @@ fn cli(args: &[&str], project: &std::path::Path) -> (bool, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_aidaw-mcp"))
         .args(args)
         .env("AIDAW_PROJECT", project)
+        .env("APPDATA", app_data())
         .output()
         .unwrap();
     (
@@ -932,5 +940,123 @@ fn time_signatures_set_the_bar_length_and_are_shown() {
     let out = c.call("update_project", json!({"beats_per_bar": 4}));
     assert!(out.contains(", 4/4,"), "{out}");
     assert_eq!(load(&path).time_signature, None);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn undo_loop_playhead_split_and_track_order() {
+    let dir = temp_dir("undo");
+    let path = dir.join("song.aidaw.json");
+    let mut c = Client::start();
+    c.call(
+        "new_project",
+        json!({"path": path, "overwrite": true, "bpm": 120}),
+    );
+    assert!(c.call_err("undo", json!({})).contains("nothing to undo"));
+    c.call("add_chords", json!({"track": "Keys", "chords": "Am F C G"}));
+    let chords_only = load(&path);
+    c.call(
+        "add_drum_pattern",
+        json!({"track": "Drums", "bars": 4, "pattern": {"kick": "x...x...x...x..."}}),
+    );
+
+    // Cut every clip at bar 3; a cut outside a clip is explained.
+    let out = c.call("split_clip", json!({"bar": 3}));
+    assert!(out.contains("cut 2 clip(s) at bar 3"), "{out}");
+    let p = load(&path);
+    for t in &p.tracks {
+        let spans: Vec<(f64, f64)> = t.clips.iter().map(|c| (c.start, c.end())).collect();
+        assert_eq!(spans, [(0.0, 8.0), (8.0, 16.0)], "{}", t.name);
+    }
+    let err = c.call_err("split_clip", json!({"clip": "c1", "bar": 7}));
+    assert!(err.contains("not inside clip c1"), "{err}");
+    assert!(c
+        .call_err("split_clip", json!({"bar": 40}))
+        .contains("nothing to cut"));
+
+    // Rows and colours.
+    let out = c.call(
+        "update_track",
+        json!({"track": "Drums", "position": 1, "color": "Orange"}),
+    );
+    assert!(
+        out.contains(r##""color":"#ff8a3d""##) && out.contains(r#""position":1"#),
+        "{out}"
+    );
+    let p = load(&path);
+    assert_eq!(p.tracks[0].name, "Drums");
+    assert_eq!(p.tracks[0].color.as_deref(), Some("#ff8a3d"));
+    assert!(
+        out.contains("\"Drums\" [drum_kit]") && out.contains("color orange"),
+        "{out}"
+    );
+    assert!(c
+        .call_err("update_track", json!({"track": "Drums", "color": "plaid"}))
+        .contains("unknown colour"));
+    assert!(c
+        .call_err("update_track", json!({"track": "Drums", "position": 0}))
+        .contains("from 1"));
+    c.call("move_track", json!({"track": "Keys", "position": 1}));
+    assert_eq!(load(&path).tracks[0].name, "Keys");
+    c.call("add_track", json!({"name": "Pad", "color": "#123456"}));
+    assert_eq!(load(&path).tracks[2].color.as_deref(), Some("#123456"));
+
+    // Loops and the playhead, for the human in the app.
+    let out = c.call(
+        "set_loop",
+        json!({"from_bar": 2, "bars": "2", "play": "true"}),
+    );
+    assert!(
+        out.contains("looping bars 2-3") && out.contains("started playing"),
+        "{out}"
+    );
+    let p = load(&path);
+    assert_eq!(p.active_loop(), Some((4.0, 12.0)));
+    let cue = p.transport.cue.unwrap();
+    assert_eq!((cue.beat, cue.play), (4.0, Some(true)));
+    c.call("set_loop", json!({"clip": "c1"}));
+    assert_eq!(load(&path).active_loop(), Some((0.0, 8.0)));
+    let out = c.call("set_playhead", json!({"bar": 3}));
+    assert!(out.contains("bar 3 (beat 8)"), "{out}");
+    assert!(out.contains("Play starts there"), "outside the loop: {out}");
+    let cue = load(&path).transport.cue.unwrap();
+    assert_eq!((cue.beat, cue.play), (8.0, None));
+    let out = c.call("set_loop", json!({"on": false}));
+    assert!(out.contains("looping is off"), "{out}");
+    assert!(
+        out.contains("the app loops bar"),
+        "the summary shows the loop kept: {out}"
+    );
+    assert!(c
+        .call_err("set_playhead", json!({}))
+        .contains("missing \"bar\""));
+    c.call("seek", json!({"play": false}));
+    assert_eq!(load(&path).transport.cue.unwrap().play, Some(false));
+
+    // Undo takes back edits newest first; the loop and playhead stay put.
+    let out = c.call("undo", json!({}));
+    assert!(out.contains("undid add_track"), "{out}");
+    assert_eq!(load(&path).tracks.len(), 2);
+    let out = c.call("undo", json!({"steps": 4}));
+    assert!(
+        out.contains("undid update_track") && out.contains("before that split_clip"),
+        "{out}"
+    );
+    let p = load(&path);
+    assert!(p.same_music(&chords_only), "back to just the chords");
+    assert!(p.transport.loop_region.is_some(), "the loop stays");
+    assert!(out.contains("1 more of your edits"), "{out}");
+
+    // The human changed the song in the app: undo leaves it alone.
+    let mut p = load(&path);
+    p.name = "Renamed in the app".into();
+    aidaw_core::io::save(&p, &path).unwrap();
+    let err = c.call_err("undo", json!({}));
+    assert!(err.contains("changed after your last edit"), "{err}");
+    assert_eq!(load(&path).name, "Renamed in the app");
+
+    // A new song starts with a clean slate.
+    c.call("new_project", json!({"path": path, "overwrite": true}));
+    assert!(c.call_err("undo", json!({})).contains("nothing to undo"));
     std::fs::remove_dir_all(&dir).ok();
 }
