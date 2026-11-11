@@ -23,6 +23,10 @@
 # - The SDK is C++, and MinGW would link the C++ library as libstdc++-6.dll,
 #   which Windows doesn't have. A folder holding only the static libstdc++.a
 #   makes the linker take that instead, so the exe needs no extra DLLs.
+# - asio-sys only names the C++ library when it compiles the SDK, which it
+#   skips when an earlier build left the compiled SDK behind; the next link
+#   then fails ("undefined reference to operator new"). The copy names it on
+#   every run.
 set -euo pipefail
 
 target=x86_64-pc-windows-gnu
@@ -49,7 +53,10 @@ rm -rf "$work/asio-sys"
 cp -r "$src" "$work/asio-sys"
 sed -i 's/^\([[:space:]]*\)\.clang_arg("-x")/\1.layout_tests(std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc"))\n\1.clang_arg("-x")/' \
     "$work/asio-sys/build.rs"
-if ! grep -q 'layout_tests' "$work/asio-sys/build.rs"; then
+sed -i 's/^\([[:space:]]*\)println!("cargo:rustc-link-lib=static=asio");/&\n\1println!("cargo:rustc-link-lib=stdc++");/' \
+    "$work/asio-sys/build.rs"
+if ! grep -q 'layout_tests' "$work/asio-sys/build.rs" ||
+    ! grep -q 'rustc-link-lib=stdc++' "$work/asio-sys/build.rs"; then
     echo "couldn't patch asio-sys $version: its build.rs changed, update this script" >&2
     exit 1
 fi
