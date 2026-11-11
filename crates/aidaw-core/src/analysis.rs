@@ -4,6 +4,7 @@
 //! of each stretch of bars, and each track played on its own.
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use crate::model::Project;
 use crate::rack::Rack;
@@ -19,7 +20,7 @@ const SILENCE: f32 = 0.001;
 const ABSOLUTE_GATE: f64 = -70.0;
 
 /// Loudness and peak of a mix or of one track.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Levels {
     /// Integrated loudness in LUFS, `None` when silent.
     pub lufs: Option<f64>,
@@ -28,7 +29,7 @@ pub struct Levels {
 }
 
 /// Loudness of a stretch of bars.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Section {
     /// First and last bar (1-based).
     pub bars: (u32, u32),
@@ -36,7 +37,7 @@ pub struct Section {
     pub lufs: Option<f64>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Analysis {
     /// Length of the song without the release tail, in seconds.
     pub seconds: f64,

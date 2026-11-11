@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/aidaw-core", "crates/aidaw-engine", "crates/aidaw-mcp", "crates/aidaw-gui"]
+members = ["crates/aidaw-core", "crates/aidaw-engine", "crates/aidaw-mcp", "crates/aidaw-gui", "crates/aidaw-plugin"]
 
 [workspace.package]
 version = "0.1.0"
