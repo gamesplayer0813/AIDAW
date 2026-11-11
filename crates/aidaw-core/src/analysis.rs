@@ -6,9 +6,11 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use crate::audio::AudioPool;
 use crate::model::Project;
+use crate::rack::Rack;
 use crate::render::{self, Sequencer};
 
 /// Sample rate the analysis renders at.
@@ -21,7 +23,7 @@ const SILENCE: f32 = 0.001;
 const ABSOLUTE_GATE: f64 = -70.0;
 
 /// Loudness and peak of a mix or of one track.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Levels {
     /// Integrated loudness in LUFS, `None` when silent.
     pub lufs: Option<f64>,
@@ -30,7 +32,7 @@ pub struct Levels {
 }
 
 /// Loudness of a stretch of bars.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Section {
     /// First and last bar (1-based).
     pub bars: (u32, u32),
@@ -38,7 +40,7 @@ pub struct Section {
     pub lufs: Option<f64>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Analysis {
     /// Length of the song without the release tail, in seconds.
     pub seconds: f64,
@@ -71,6 +73,22 @@ pub fn section_bars(total_bars: u32) -> u32 {
 /// audible track alone. The renders run in parallel. `audio` holds the files
 /// the audio clips play.
 pub fn analyze(project: &Project, audio: &Arc<AudioPool>) -> Result<Analysis> {
+    analyze_with(project, audio, |_| None)
+}
+
+/// The sample rate [`analyze_with`] prepares racks for.
+pub const ANALYSIS_SAMPLE_RATE: u32 = SAMPLE_RATE;
+
+/// [`analyze`] for a song with plugins: `make_rack` builds the plugins for
+/// the whole mix and then for each track played alone (that project has
+/// every other track muted, so their plugins can be left out). All racks
+/// are built, and dropped again, on the calling thread; only the renders
+/// run in parallel.
+pub fn analyze_with(
+    project: &Project,
+    audio: &Arc<AudioPool>,
+    mut make_rack: impl FnMut(&Project) -> Option<Box<dyn Rack>>,
+) -> Result<Analysis> {
     render::check_render_args(project, SAMPLE_RATE)?;
     let solos: Vec<(usize, Project)> = project
         .tracks
@@ -85,18 +103,29 @@ pub fn analyze(project: &Project, audio: &Arc<AudioPool>) -> Result<Analysis> {
             (i, alone)
         })
         .collect();
+    let mix_rack = make_rack(project);
+    let solo_racks: Vec<Option<Box<dyn Rack>>> = solos.iter().map(|(_, p)| make_rack(p)).collect();
+    let mut racks = Vec::with_capacity(solos.len() + 1);
     let (mix, alone) = std::thread::scope(|s| {
-        let mix = s.spawn(|| measure(project, audio, true));
+        let mix = s.spawn(move || measure(project, audio, mix_rack, true));
         let alone: Vec<_> = solos
             .iter()
-            .map(|(i, p)| (*i, s.spawn(move || measure(p, audio, false))))
+            .zip(solo_racks)
+            .map(|((i, p), rack)| (*i, s.spawn(move || measure(p, audio, rack, false))))
             .collect();
         let alone: Vec<(usize, Measured)> = alone
             .into_iter()
-            .map(|(i, h)| (i, h.join().expect("analysis thread")))
+            .map(|(i, h)| {
+                let (m, rack) = h.join().expect("analysis thread");
+                racks.push(rack);
+                (i, m)
+            })
             .collect();
-        (mix.join().expect("analysis thread"), alone)
+        let (mix, rack) = mix.join().expect("analysis thread");
+        racks.push(rack);
+        (mix, alone)
     });
+    drop(racks);
     let tracks = project
         .tracks
         .iter()
@@ -129,12 +158,18 @@ struct Measured {
 }
 
 /// Render `project` block by block and measure it; `detail` adds the band
-/// balance and the sections.
-fn measure(project: &Project, audio: &Arc<AudioPool>, detail: bool) -> Measured {
+/// balance and the sections. The rack comes back, to be dropped by the caller.
+fn measure(
+    project: &Project,
+    audio: &Arc<AudioPool>,
+    mut rack: Option<Box<dyn Rack>>,
+    detail: bool,
+) -> (Measured, Option<Box<dyn Rack>>) {
     let project = &*render::playable(project);
     let sr = SAMPLE_RATE as f64;
     let song_seconds = project.length_beats() * project.seconds_per_beat();
-    let total = ((song_seconds + render::tail_seconds(project)) * sr) as usize;
+    let tail = render::tail_seconds_with(project, rack.as_deref());
+    let total = ((song_seconds + tail) * sr) as usize;
     let song_frames = ((song_seconds * sr) as usize).min(total);
     let frames_per_beat = sr * project.seconds_per_beat();
     let bar_beats = f64::from(project.beats_per_bar.max(1));
@@ -155,7 +190,7 @@ fn measure(project: &Project, audio: &Arc<AudioPool>, detail: bool) -> Measured 
     while done < total {
         let n = (total - done).min(BLOCK);
         let out = &mut block[..n * 2];
-        seq.process(project, out);
+        seq.process_with(project, rack.as_deref_mut(), out);
         let cut = seq.take_limiter_reduction_db() as f64;
         limiter_db = limiter_db.max(cut);
         if done < song_frames {
@@ -195,7 +230,7 @@ fn measure(project: &Project, audio: &Arc<AudioPool>, detail: bool) -> Measured 
             }
         })
         .collect();
-    Measured {
+    let measured = Measured {
         seconds: song_seconds,
         levels: Levels {
             lufs: loudness.integrated(),
@@ -206,7 +241,8 @@ fn measure(project: &Project, audio: &Arc<AudioPool>, detail: bool) -> Measured 
         bands: bands.shares(),
         sections,
         first_sound,
-    }
+    };
+    (measured, rack)
 }
 
 /// Loudness of a mean square (summed over both channels), or `None` below
@@ -484,6 +520,7 @@ mod tests {
             mute: true,
             solo: false,
             reverb: 0.0,
+            effects: Vec::new(),
             color: None,
             input: Vec::new(),
             clips: vec![Clip {

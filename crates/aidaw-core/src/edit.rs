@@ -2,12 +2,16 @@
 //! also the JSON shape of the MCP tool arguments, so the vocabulary the AI
 //! uses and the code that validates it live in one place.
 
+use std::collections::BTreeMap;
+
 use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::automation::{self, Lane, Param, Point};
-use crate::model::{AudioRef, Clip, Instrument, Note, Project, TimeSignature, Track};
+use crate::model::{
+    AudioRef, Clip, Effect, EffectKind, Instrument, Note, PluginRef, Project, TimeSignature, Track,
+};
 use crate::transport::{Cue, LoopRegion, MIN_LOOP_BEATS};
 use crate::{color, transform};
 
@@ -147,6 +151,32 @@ pub enum Op {
         velocity: u8,
         #[serde(default)]
         seed: u64,
+    },
+    /// Put an effect plugin into a track's chain at `index` (default: last).
+    AddEffect {
+        track_id: String,
+        plugin: PluginRef,
+        index: Option<usize>,
+        #[serde(default)]
+        bypass: bool,
+    },
+    RemoveEffect {
+        effect_id: String,
+    },
+    /// Switch an effect off (`bypass`) or on again, or move it to `index`
+    /// in its track's chain.
+    UpdateEffect {
+        effect_id: String,
+        bypass: Option<bool>,
+        index: Option<usize>,
+    },
+    /// Set parameters of a track's plugin instrument, or of one of the
+    /// track's effects (`effect_id`): parameter id -> value 0..1. They apply
+    /// on top of the plugin's saved settings.
+    SetPluginParams {
+        track_id: String,
+        effect_id: Option<String>,
+        params: BTreeMap<String, f64>,
     },
     /// Move a track to `index` (0 = the top row); the others close up.
     MoveTrack {
@@ -313,6 +343,13 @@ fn lanes_mut<'a>(
         );
     }
     if !param.suits_track(&t.instrument) {
+        if let Some(plugin) = t.instrument.plugin() {
+            bail!(
+                "track {id} plays the plugin {}, which has no {} (only the built-in synth does); plugin tracks can automate volume, pan and reverb",
+                plugin.name,
+                param.id()
+            );
+        }
         if t.instrument.is_audio() {
             bail!(
                 "track {id} is an audio track, which has no {} (only synths do); audio tracks can automate volume, pan and reverb",
@@ -389,6 +426,9 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
             reverb,
         } => {
             let reverb = unit(reverb.unwrap_or(0.0), "reverb")?;
+            if let Some(p) = instrument.as_ref().and_then(Instrument::plugin) {
+                p.check()?;
+            }
             let id = project.next_id("t");
             project.tracks.push(Track {
                 id: id.clone(),
@@ -399,6 +439,7 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
                 mute: false,
                 solo: false,
                 reverb,
+                effects: Vec::new(),
                 color: None,
                 input: Vec::new(),
                 clips: Vec::new(),
@@ -417,6 +458,9 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
             reverb,
         } => {
             let reverb = reverb.map(|v| unit(v, "reverb")).transpose()?;
+            if let Some(p) = instrument.as_ref().and_then(Instrument::plugin) {
+                p.check()?;
+            }
             let t = project
                 .track_mut(&track_id)
                 .ok_or_else(|| anyhow!("no track {track_id}"))?;
@@ -696,6 +740,85 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
                 sort_notes(c);
             }
             Ok(json!({"changed": changed}))
+        }
+        Op::AddEffect {
+            track_id,
+            plugin,
+            index,
+            bypass,
+        } => {
+            plugin.check()?;
+            let id = project.next_id("fx");
+            let t = project
+                .track_mut(&track_id)
+                .ok_or_else(|| anyhow!("no track {track_id}"))?;
+            let at = index.unwrap_or(t.effects.len()).min(t.effects.len());
+            t.effects.insert(
+                at,
+                Effect {
+                    id: id.clone(),
+                    bypass,
+                    kind: EffectKind::Vst3(plugin),
+                },
+            );
+            Ok(json!({"effect_id": id, "position": at + 1}))
+        }
+        Op::RemoveEffect { effect_id } => {
+            for t in &mut project.tracks {
+                if let Some(i) = t.effects.iter().position(|e| e.id == effect_id) {
+                    t.effects.remove(i);
+                    return Ok(json!({"ok": true}));
+                }
+            }
+            bail!("no effect {effect_id}")
+        }
+        Op::UpdateEffect {
+            effect_id,
+            bypass,
+            index,
+        } => {
+            let t = project
+                .tracks
+                .iter_mut()
+                .find(|t| t.effects.iter().any(|e| e.id == effect_id))
+                .ok_or_else(|| anyhow!("no effect {effect_id}"))?;
+            let mut i = t.effects.iter().position(|e| e.id == effect_id).unwrap();
+            if let Some(v) = bypass {
+                t.effects[i].bypass = v;
+            }
+            if let Some(to) = index {
+                let fx = t.effects.remove(i);
+                i = to.min(t.effects.len());
+                t.effects.insert(i, fx);
+            }
+            Ok(json!({"ok": true, "position": i + 1}))
+        }
+        Op::SetPluginParams {
+            track_id,
+            effect_id,
+            params,
+        } => {
+            let t = project
+                .track_mut(&track_id)
+                .ok_or_else(|| anyhow!("no track {track_id}"))?;
+            let plugin = match &effect_id {
+                Some(fx) => t
+                    .effects
+                    .iter_mut()
+                    .find(|e| &e.id == fx)
+                    .ok_or_else(|| anyhow!("track {track_id} has no effect {fx}"))?
+                    .plugin_mut(),
+                None => t
+                    .instrument
+                    .plugin_mut()
+                    .ok_or_else(|| anyhow!("track {track_id} does not play a plugin"))?,
+            };
+            let mut next = plugin.clone();
+            next.params.extend(params);
+            next.check()?;
+            let n = next.params.len();
+            *plugin = next;
+            Ok(json!({"ok": true, "params_set": n}))
         }
         Op::MoveTrack { track_id, index } => {
             let from = project

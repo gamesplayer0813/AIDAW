@@ -2,7 +2,7 @@
 
 <!-- Generated from crates/aidaw-mcp/src/tools.rs. Don't edit it here: change that file, then run `cargo run -p aidaw-mcp -- docs docs/TOOLS.md`. -->
 
-All 29 tools of `aidaw-mcp`, with every parameter. They are the same over MCP and on the command line (`aidaw-mcp tools --format ...`, `aidaw-mcp call`). How to connect a model and compose with them: [LLM_GUIDE.md](LLM_GUIDE.md).
+All 35 tools of `aidaw-mcp`, with every parameter. They are the same over MCP and on the command line (`aidaw-mcp tools --format ...`, `aidaw-mcp call`). How to connect a model and compose with them: [LLM_GUIDE.md](LLM_GUIDE.md).
 
 | Tool | What it does |
 |---|---|
@@ -12,8 +12,8 @@ All 29 tools of `aidaw-mcp`, with every parameter. They are the same over MCP an
 | [`get_project`](#get_project) | Show the current project. |
 | [`list_presets`](#list_presets) | List the instrument presets (ids like "e_piano", "bass_808", "strings", "drums_808") usable as `instrument` in add_track/update_track, grouped by category. |
 | [`update_project`](#update_project) | Change the project name, bpm (20-400), time signature, master_gain (0-2) or the shared reverb room every track can send to (reverb_size, reverb_tone). |
-| [`add_track`](#add_track) | Add a track with an instrument preset. |
-| [`update_track`](#update_track) | Change a track's name, instrument preset, drum kit, volume, pan, reverb, mute/solo, its row (position) and colour in the app, or tweak its synth sound. |
+| [`add_track`](#add_track) | Add a track with an instrument preset, or with an installed VST3 instrument plugin ("plugin"). |
+| [`update_track`](#update_track) | Change a track's name, instrument preset or plugin, drum kit, volume, pan, reverb, mute/solo, its row (position) and colour in the app, or tweak its synth sound. |
 | [`remove_track`](#remove_track) | Delete a track and all its clips. |
 | [`add_clip`](#add_clip) | Add a clip to a track at a bar or beat: a block of notes, or on an audio track a WAV file ("audio"). |
 | [`update_clip`](#update_clip) | Move, resize or rename a clip; for audio clips (recordings) also change the volume, the trim at the start and the fades. |
@@ -33,6 +33,12 @@ All 29 tools of `aidaw-mcp`, with every parameter. They are the same over MCP an
 | [`add_drum_pattern`](#add_drum_pattern) | Write a drum beat from step strings, 4 steps per beat (16 per bar in 4/4): x = hit, X = accent, o = soft, . = rest. |
 | [`add_melody`](#add_melody) | Write a melody or bass line from compact text: PITCH/BEATS tokens, r = rest, C4+E4/2 = chord. |
 | [`apply_ops`](#apply_ops) | Run many edits atomically (all or nothing). |
+| [`list_plugins`](#list_plugins) | List the VST3 plugins installed on this computer: instruments (play notes; add_track {"plugin": ...}) and effects (change a track's sound; add_effect). |
+| [`add_effect`](#add_effect) | Put an installed VST3 effect plugin (list_plugins) on a track. |
+| [`update_effect`](#update_effect) | Switch a track's effect off (bypass) or on again, or move it within the track's chain. |
+| [`remove_effect`](#remove_effect) | Take an effect off its track. |
+| [`plugin_params`](#plugin_params) | Show the knobs of a track's instrument plugin, or of one of its effects: id, name, position 0-1 and the value as the plugin shows it ("-6.0 dB"), with the options of switches. |
+| [`set_plugin_params`](#set_plugin_params) | Turn the knobs of a track's instrument plugin or effect. |
 | [`analyze`](#analyze) | Hear the mix as numbers: renders the song (nothing is written) and reports loudness in LUFS, peak, how hard the limiter works, the low/mid/high balance, each track's level alone, loudness along the song, and tips with calls that fix what stands out. |
 | [`render_wav`](#render_wav) | Render the song to a 16-bit stereo WAV file (defaults to &lt;project>.wav) so it can be heard. |
 
@@ -141,12 +147,13 @@ Example:
 
 ## `add_track`
 
-Add a track with an instrument preset. Returns its track_id. Without instrument, a preset matching the name is used ("Drums" -> drum_kit), else a saw synth.
+Add a track with an instrument preset, or with an installed VST3 instrument plugin ("plugin"). Returns its track_id. Without either, a preset matching the name is used ("Drums" -> drum_kit), else a saw synth.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `name` | string | yes | track name, e.g. "Bass" |
 | `instrument` | string | no | preset id (78 of them, see list_presets), e.g. soft_keys, e_piano, organ, bass, bass_808, acid_bass, bright_lead, supersaw, warm_pad, lush_pad, choir, pluck, nylon_guitar, rock_guitar, marimba, bell, strings, brass, flute, saxophone, chiptune, riser, drum_kit, drums_808, drums_909, drums_acoustic, drums_lofi, drums_trap. Loose names work too ("rhodes", "violin"). "audio" makes a track for recordings and WAV files instead of an instrument |
+| `plugin` | string | no | name of an installed VST3 instrument plugin (list_plugins), e.g. "Surge XT"; a unique part of the name or its uid works too. Instead of "instrument" |
 | `kit` | string | no | drum tracks only: standard \| 808 \| 909 \| acoustic \| lofi \| trap \| electro |
 | `gain` | number | no | volume 0-2 (default 0.8) |
 | `pan` | number | no | -1 left .. 1 right |
@@ -163,7 +170,7 @@ Also answers to `create_track`.
 
 ## `update_track`
 
-Change a track's name, instrument preset, drum kit, volume, pan, reverb, mute/solo, its row (position) and colour in the app, or tweak its synth sound.
+Change a track's name, instrument preset or plugin, drum kit, volume, pan, reverb, mute/solo, its row (position) and colour in the app, or tweak its synth sound.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -172,6 +179,7 @@ Change a track's name, instrument preset, drum kit, volume, pan, reverb, mute/so
 | `position` | integer | no | move the track to this row in the app, 1 = the top |
 | `color` | string | no | colour of the track in the app: blue, orange, green, purple, yellow, cyan, pink, violet, red, teal, white, gray, a hex code like "#ff8a3d", or "auto" for its own colour |
 | `instrument` | string | no | preset id (78 of them, see list_presets), e.g. soft_keys, e_piano, organ, bass, bass_808, acid_bass, bright_lead, supersaw, warm_pad, lush_pad, choir, pluck, nylon_guitar, rock_guitar, marimba, bell, strings, brass, flute, saxophone, chiptune, riser, drum_kit, drums_808, drums_909, drums_acoustic, drums_lofi, drums_trap. Loose names work too ("rhodes", "violin"). "audio" makes a track for recordings and WAV files instead of an instrument |
+| `plugin` | string | no | name of an installed VST3 instrument plugin (list_plugins), e.g. "Surge XT"; a unique part of the name or its uid works too. Instead of "instrument" |
 | `gain` | number | no | volume 0-2, 1 = unity |
 | `pan` | number | no | -1 left .. 1 right |
 | `reverb` | number | no | 0-1 how much of this track goes to the shared reverb: 0 dry, 0.2-0.35 typical for keys, pads and leads, 0.1 drums, 0 bass. New tracks start with their preset's usual amount |
@@ -571,6 +579,117 @@ Example:
 ```
 
 Also answers to `batch`.
+
+## `list_plugins`
+
+List the VST3 plugins installed on this computer: instruments (play notes; add_track {"plugin": ...}) and effects (change a track's sound; add_effect). Newly installed plugins are found each time.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `kind` | string | no | only instrument \| effect |
+| `search` | string | no | only plugins whose name, maker or category contains this |
+| `rescan` | boolean | no | look at every plugin file again, not only new and updated ones (slow) |
+
+Example:
+
+```json
+{"kind": "effect", "search": "reverb"}
+```
+
+Also answers to `plugins`, `list_vst`, `list_vst3`, `scan_plugins`.
+
+## `add_effect`
+
+Put an installed VST3 effect plugin (list_plugins) on a track. A track's sound runs through its effects in order, then its volume, pan and reverb send. Returns effect_id.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `track` | string | yes | track name or id, e.g. "Bass" or "t1" |
+| `plugin` | string | yes | effect plugin name (a unique part of it works) or uid |
+| `position` | integer | no | place in the chain, 1 = first (default: last) |
+| `bypass` | boolean | no | add it switched off |
+
+Example:
+
+```json
+{"track": "Keys", "plugin": "Supermassive"}
+```
+
+Also answers to `add_fx`, `add_plugin_effect`, `insert_effect`.
+
+## `update_effect`
+
+Switch a track's effect off (bypass) or on again, or move it within the track's chain.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `effect` | string | yes | effect id like "fx1" (get_project shows them) or the effect plugin's name |
+| `track` | string | no | the track it is on, if the name alone is ambiguous |
+| `bypass` | boolean | no | true = off (the sound passes unchanged), false = on |
+| `position` | integer | no | new place in the chain, 1 = first |
+
+Example:
+
+```json
+{"effect": "fx1", "bypass": true}
+```
+
+Also answers to `bypass_effect`, `move_effect`.
+
+## `remove_effect`
+
+Take an effect off its track.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `effect` | string | yes | effect id like "fx1" (get_project shows them) or the effect plugin's name |
+| `track` | string | no | the track it is on, if the name alone is ambiguous |
+
+Example:
+
+```json
+{"effect": "fx1"}
+```
+
+Also answers to `delete_effect`, `remove_fx`.
+
+## `plugin_params`
+
+Show the knobs of a track's instrument plugin, or of one of its effects: id, name, position 0-1 and the value as the plugin shows it ("-6.0 dB"), with the options of switches. Loads the plugin, so it takes a moment.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `track` | string | yes | the track whose plugin you mean (name or id): its instrument plugin, or with "effect" one of its effects |
+| `effect` | string | no | one of the track's effects instead of its instrument (id or name) |
+| `search` | string | no | only parameters whose name contains this |
+
+Example:
+
+```json
+{"track": "Keys", "search": "cutoff"}
+```
+
+Also answers to `get_plugin_params`, `list_plugin_params`, `list_params`.
+
+## `set_plugin_params`
+
+Turn the knobs of a track's instrument plugin or effect. Parameters by name or id (plugin_params lists them). Values: 0-1 = knob position, or text the way the plugin shows it ("-6 dB", "800 Hz", "30%"), or an option name ("Saw"). Saved in the song on top of the plugin's own settings.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `track` | string | yes | the track whose plugin you mean (name or id): its instrument plugin, or with "effect" one of its effects |
+| `effect` | string | no | one of the track's effects instead of its instrument (id or name) |
+| `param` | string | no | parameter name or id, e.g. "Cutoff" or "12" |
+| `value` | string | no | 0-1 knob position, or text like "-6 dB", "800 Hz", "30%", or an option name |
+| `params` | array | no | several at once instead of param/value |
+
+Example:
+
+```json
+{"track": "Keys", "param": "Cutoff", "value": "800 Hz"}
+```
+
+Also answers to `set_plugin_param`, `set_param`, `set_params`.
 
 ## `analyze`
 

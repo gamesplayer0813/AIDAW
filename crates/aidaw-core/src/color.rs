@@ -112,6 +112,7 @@ mod tests {
             mute: false,
             solo: false,
             reverb: 0.0,
+            effects: Vec::new(),
             color: None,
             input: Vec::new(),
             clips: Vec::new(),

@@ -9,6 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::automation::{self, Lane, Param};
 use crate::pitch;
+pub use crate::plugin::{Blob, Effect, EffectKind, PluginRef};
 use crate::transport::Transport;
 
 /// Version of the project file format this build writes. Files from newer
@@ -164,6 +165,10 @@ pub struct Track {
     /// How much of this track goes to the shared reverb, 0..1 (0 = dry).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub reverb: f32,
+    /// Effect plugins the sound runs through, in order, before the volume,
+    /// pan and reverb send.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<Effect>,
     /// Colour in the app, "#rrggbb". Unset: one that follows from the id
     /// (see [`Track::rgb`]), so it stays put when tracks come and go.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -399,6 +404,8 @@ pub enum Instrument {
         #[serde(default, skip_serializing_if = "DrumKit::is_standard")]
         kit: DrumKit,
     },
+    /// A VST3 instrument plugin installed on the computer.
+    Vst3(PluginRef),
     /// An audio track: it plays its audio clips (recordings and imported
     /// WAV files) and records from the sound card's inputs. It has no notes.
     Audio,
@@ -415,6 +422,21 @@ impl Instrument {
 
     pub fn is_audio(&self) -> bool {
         matches!(self, Instrument::Audio)
+    }
+
+    /// The plugin this instrument is, if it is one.
+    pub fn plugin(&self) -> Option<&PluginRef> {
+        match self {
+            Instrument::Vst3(p) => Some(p),
+            _ => None,
+        }
+    }
+
+    pub fn plugin_mut(&mut self) -> Option<&mut PluginRef> {
+        match self {
+            Instrument::Vst3(p) => Some(p),
+            _ => None,
+        }
     }
 }
 
@@ -647,7 +669,28 @@ impl Project {
             .find_map(|t| t.clips.iter().find(|c| c.id == id).map(|c| (t, c)))
     }
 
-    /// Generate an id with the given prefix that is not used by any track or clip.
+    /// The effect with this id and the track it is on.
+    pub fn effect(&self, id: &str) -> Option<(&Track, &Effect)> {
+        self.tracks
+            .iter()
+            .find_map(|t| t.effects.iter().find(|e| e.id == id).map(|e| (t, e)))
+    }
+
+    pub fn effect_mut(&mut self, id: &str) -> Option<&mut Effect> {
+        self.tracks
+            .iter_mut()
+            .flat_map(|t| t.effects.iter_mut())
+            .find(|e| e.id == id)
+    }
+
+    /// Whether any track plays or runs through a plugin.
+    pub fn uses_plugins(&self) -> bool {
+        self.tracks
+            .iter()
+            .any(|t| t.instrument.plugin().is_some() || !t.effects.is_empty())
+    }
+
+    /// Generate an id with the given prefix that is not used by any track, clip or effect.
     pub fn next_id(&self, prefix: &str) -> String {
         let max = self
             .tracks
@@ -657,6 +700,11 @@ impl Project {
                 self.tracks
                     .iter()
                     .flat_map(|t| t.clips.iter().map(|c| c.id.as_str())),
+            )
+            .chain(
+                self.tracks
+                    .iter()
+                    .flat_map(|t| t.effects.iter().map(|e| e.id.as_str())),
             )
             .filter_map(|id| id.strip_prefix(prefix)?.parse::<u64>().ok())
             .max()

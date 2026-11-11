@@ -1,14 +1,18 @@
 //! Application state, file sync with the AI, undo/redo and the top-level layout.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant, SystemTime};
 
 use aidaw_core::edit::{self, Op};
-use aidaw_core::{io as pio, render, AudioPool, Cue, LoopRegion, Note, Project};
+use aidaw_core::rack::Rack;
+use aidaw_core::{io as pio, render, AudioPool, Cue, LoopRegion, Note, PluginRef, Project};
 use aidaw_engine::Engine;
+use aidaw_plugin::rack::{self as plugin_rack, Capture, Key as PluginKey};
+use aidaw_plugin::scan::Store;
+use aidaw_plugin::worker::{Job, Worker};
 use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, Rect, RichText};
 
 use crate::editing::{self, Copied};
@@ -17,6 +21,7 @@ use crate::i18n::{self, tr, trf};
 use crate::icons::{self, Icon};
 use crate::lanes::LaneKey;
 use crate::onboarding::{self, Tutorial, WelcomeChoice};
+use crate::plugins::Plugins;
 use crate::record::{AudioLoad, PendingTake, Recording};
 use crate::scale::Scale;
 use crate::settings::Settings;
@@ -107,6 +112,8 @@ pub struct App {
     pub engine_error: Option<String>,
     pub show_sound: bool,
     pub device_names: Vec<String>,
+    /// Installed VST3 plugins and the song's running ones.
+    pub plugins: Plugins,
     /// Inputs (microphones, line inputs) of the driver, for the Sound window.
     pub input_names: Vec<String>,
     /// When Play was last pressed, to notice a device that never starts.
@@ -321,7 +328,47 @@ fn open_engine(project: &Project, settings: &Settings) -> Result<Engine, String>
 struct ExportJob {
     path: PathBuf,
     progress: Arc<AtomicU32>,
-    result: mpsc::Receiver<Result<f64, String>>,
+    /// Seconds rendered, and the plugins left out (not installed, failed).
+    result: mpsc::Receiver<Result<(f64, Vec<String>), String>>,
+}
+
+/// Plugins do not run at a sound card's own rate without one.
+const PLUGIN_RATE: f64 = 48_000.0;
+
+/// Longest a plugin export may go without a sign of life.
+const EXPORT_QUIET: Duration = Duration::from_secs(900);
+
+/// Render a song that uses plugins in a worker process (a plugin that
+/// crashes there takes only the export down). Each plugin's `path` says
+/// where it is installed; the worker reads the recordings from `base`, the
+/// song's folder (a file it can't read was already reported when the song
+/// loaded, and stays silent, as in an export without plugins).
+fn render_in_worker(
+    project: Project,
+    base: Option<&Path>,
+    path: &Path,
+    sample_rate: u32,
+    progress: &mut dyn FnMut(f64),
+) -> Result<(f64, Vec<String>), String> {
+    let worker = Worker::current_exe().map_err(|e| format!("{e:#}"))?;
+    let job = Job::Render {
+        project: Box::new(project),
+        out: path.display().to_string(),
+        sample_rate,
+        base: base.map(|b| b.display().to_string()),
+    };
+    let done = worker
+        .run(&job, EXPORT_QUIET, progress)
+        .map_err(|e| format!("{e:#}"))?;
+    let problems = done["problems"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| p.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok((done["seconds"].as_f64().unwrap_or(0.0), problems))
 }
 
 impl App {
@@ -331,7 +378,11 @@ impl App {
         let (project, path, status) = first_song(path);
         let opened = open_engine(&project, &settings);
         crate::sound::log_engine(&opened);
-        App::with(project, path, settings, opened, status)
+        let mut app = App::with(project, path, settings, opened, status);
+        app.plugins = Plugins::new(Store::load(), app.plugins.rack.sample_rate());
+        app.plugins.rescan(false);
+        app.send_project();
+        app
     }
 
     /// The app around a song, with whatever sound device could be opened.
@@ -347,6 +398,9 @@ impl App {
             Ok(e) => (Some(e), None),
             Err(e) => (None, Some(e)),
         };
+        let rate = engine
+            .as_ref()
+            .map_or(PLUGIN_RATE, |e: &Engine| f64::from(e.sample_rate()));
         let mut app = App {
             selected_track: project.tracks.first().map(|t| t.id.clone()),
             history: History::new(&project),
@@ -363,6 +417,7 @@ impl App {
             engine_error,
             show_sound: false,
             device_names: Vec::new(),
+            plugins: Plugins::new(Store::default(), rate),
             input_names: Vec::new(),
             play_pressed_at: None,
             queued_history: None,
@@ -424,6 +479,7 @@ impl App {
         app.engine_ready();
         app.select_first_clip();
         app.reveal_automation(&Project::new("", 120.0));
+        app.send_project();
         app
     }
 
@@ -475,6 +531,11 @@ impl App {
     pub fn load_project(&mut self, project: Project, path: Option<PathBuf>, status: &str) {
         self.stop_recording();
         self.settle();
+        if path != self.path || path.is_none() {
+            // Another song: its plugins start from its own settings.
+            self.plugins.close_editors();
+            self.plugins.rack.reset();
+        }
         let old = self.swap_in(Version::of(project));
         if path == self.path {
             self.history.push(old);
@@ -501,17 +562,16 @@ impl App {
     }
 
     /// Hear one note on a track's sound, even while stopped.
-    pub fn preview_note(&self, track_index: usize, pitch: u8) {
-        if let Some(e) = &self.engine {
-            e.set_project(&self.project);
-            e.preview(track_index, pitch);
-        }
+    pub fn preview_note(&mut self, track_index: usize, pitch: u8) {
+        self.preview_notes(track_index, &[pitch]);
     }
 
     /// Hear a few notes together, e.g. a chord that was just moved.
-    pub fn preview_notes(&self, track_index: usize, pitches: &[u8]) {
+    pub fn preview_notes(&mut self, track_index: usize, pitches: &[u8]) {
+        if self.engine.is_some() {
+            self.send_project();
+        }
         if let Some(e) = &self.engine {
-            e.set_project(&self.project);
             for &p in pitches {
                 e.preview(track_index, p);
             }
@@ -520,13 +580,69 @@ impl App {
 
     /// Start sounding a note until [`Self::release_note`] (holding a piano key).
     pub fn hold_note(&mut self, track_index: usize, pitch: u8) {
+        if self.engine.is_some() && self.held_key.is_none() {
+            self.send_project();
+        }
         if let Some(e) = &self.engine {
-            if self.held_key.is_none() {
-                e.set_project(&self.project);
-            }
             e.hold(track_index, pitch);
         }
         self.held_key = Some(pitch);
+    }
+
+    /// Hand the engine the song as it is now, with its plugins: the running
+    /// ones, and new ones started here.
+    pub fn send_project(&mut self) {
+        let Plugins { store, rack, .. } = &mut self.plugins;
+        let rack: Option<Box<dyn Rack>> =
+            if self.project.uses_plugins() || rack.slots().next().is_some() {
+                let built = rack.build(&self.project, &|p: &PluginRef| store.locate(p));
+                (!built.is_empty()).then(|| Box::new(built) as Box<dyn Rack>)
+            } else {
+                None
+            };
+        if let Some(e) = &self.engine {
+            e.set_project(&self.project, rack);
+        }
+    }
+
+    /// Every frame: the plugins' housekeeping, and what was changed in
+    /// their own windows read back into the song.
+    fn tend_plugins(&mut self) {
+        if self.plugins.tend(&self.project) {
+            self.send_project();
+        }
+        if self.plugins.rack.slots().next().is_none() {
+            return;
+        }
+        // Knobs turned in a plugin's window: an edit, undone with Ctrl+Z.
+        self.read_back_plugins(Capture::Edited);
+        // Knobs the AI set, now part of the plugins' own settings: the same
+        // sound, so not an edit to undo.
+        let folded = self.plugins.rack.capture(&self.project, Capture::Folded);
+        if plugin_rack::apply(&mut self.project, &folded) {
+            self.history.not_an_edit(|p| {
+                plugin_rack::apply(p, &folded);
+            });
+            if self.path.is_some() {
+                self.save_at = Some(Instant::now() + SAVE_DEBOUNCE);
+            }
+        }
+    }
+
+    /// Read plugin settings changed in their windows into the song, as an
+    /// edit.
+    fn read_back_plugins(&mut self, what: Capture) {
+        let changed = self.plugins.rack.capture(&self.project, what);
+        if plugin_rack::apply(&mut self.project, &changed) {
+            self.notice_edits();
+        }
+    }
+
+    /// Show the plugin's own window.
+    pub fn open_plugin_window(&mut self, key: &PluginKey) {
+        if let Err(e) = self.plugins.open_editor(&self.project, key) {
+            self.status = trf("Couldn't open the plugin's window: {}", &[&e]);
+        }
     }
 
     pub fn release_note(&mut self) {
@@ -608,11 +724,16 @@ impl App {
                 self.status = trf("Sound now plays through {}", &[&e.device_name()]);
                 e.test_tone();
                 e.seek(position);
+                // Plugins run at the device's rate: a new one restarts them.
+                self.plugins
+                    .rack
+                    .set_sample_rate(f64::from(e.sample_rate()));
                 self.engine = Some(e);
                 self.engine_error = None;
                 self.settings.driver = driver.map(String::from);
                 self.settings.output = output.map(String::from);
                 self.settings.save();
+                self.send_project();
             }
             Err(err) => {
                 self.status = tr("Couldn't open that sound device").into();
@@ -700,9 +821,7 @@ impl App {
 
     fn on_project_changed(&mut self) {
         self.check_names = true;
-        if let Some(e) = &self.engine {
-            e.set_project(&self.project);
-        }
+        self.send_project();
         if self.path.is_some() {
             self.save_at = Some(Instant::now() + SAVE_DEBOUNCE);
         }
@@ -878,6 +997,9 @@ impl App {
         let Some(path) = self.path.clone() else {
             return;
         };
+        // What was just changed in a plugin's window goes in too.
+        self.read_back_plugins(Capture::Pending);
+        self.save_at = None;
         // The AI may have written the file since we last read it (between two
         // polls). Never overwrite that silently: keep the human's version, but
         // put the AI's on the undo stack so nothing is lost.
@@ -1061,17 +1183,29 @@ impl App {
                 .as_ref()
                 .map(|e| e.sample_rate())
                 .unwrap_or(44_100);
-            let project = self.project.clone();
+            // What was just changed in a plugin's window is heard too.
+            self.read_back_plugins(Capture::Pending);
+            let mut project = self.project.clone();
             let audio = self.audio.clone();
+            let with_plugins = project.uses_plugins();
+            if with_plugins {
+                self.plugins.store.locate_all(&mut project);
+            }
+            // A worker reads the recordings itself, from the song's folder.
+            let base = self.folder().map(Path::to_path_buf);
             let progress = Arc::new(AtomicU32::new(0));
             let (tx, rx) = mpsc::channel();
             let (path, prog) = (p.clone(), progress.clone());
             // Rendering a long song takes seconds; keep the window responsive.
             std::thread::spawn(move || {
-                let r = render::render_to_wav_with_progress(&project, &audio, &path, sr, |x| {
-                    prog.store((x * 1000.0) as u32, Ordering::Relaxed);
-                })
-                .map_err(|e| format!("{e:#}"));
+                let mut report = |x: f64| prog.store((x * 1000.0) as u32, Ordering::Relaxed);
+                let r = if with_plugins {
+                    render_in_worker(project, base.as_deref(), &path, sr, &mut report)
+                } else {
+                    render::render_to_wav_with_progress(&project, &audio, &path, sr, report)
+                        .map(|secs| (secs, Vec::new()))
+                        .map_err(|e| format!("{e:#}"))
+                };
                 let _ = tx.send(r);
             });
             self.export = Some(ExportJob {
@@ -1087,9 +1221,17 @@ impl App {
     fn poll_export(&mut self) {
         let Some(job) = &self.export else { return };
         let outcome = match job.result.try_recv() {
-            Ok(Ok(secs)) => Some(trf(
+            Ok(Ok((secs, problems))) if problems.is_empty() => Some(trf(
                 "Exported {}s to {}",
                 &[&format!("{secs:.1}"), &job.path.display()],
+            )),
+            Ok(Ok((secs, problems))) => Some(trf(
+                "Exported {}s to {}, without these plugins: {}",
+                &[
+                    &format!("{secs:.1}"),
+                    &job.path.display(),
+                    &problems.join("; "),
+                ],
             )),
             Ok(Err(e)) => Some(trf("Export failed: {}", &[&e])),
             Err(mpsc::TryRecvError::Disconnected) => Some(trf(
@@ -1175,6 +1317,7 @@ impl App {
                         widths[2] = ui
                             .horizontal(|ui| {
                                 self.sound_button(ui);
+                                self.plugins_button(ui);
                                 crate::mode::lang_switch(ui, self);
                                 ui.add_space(4.0);
                                 let ai = theme::hero_button(
@@ -1556,6 +1699,19 @@ impl App {
             });
     }
 
+    fn plugins_button(&mut self, ui: &mut egui::Ui) {
+        let button = icons::button(Icon::Plug, tr("Plugins"));
+        if ui
+            .add(button)
+            .on_hover_text(tr(
+                "VST3 instruments and effects installed on this computer, and where AIDAW looks for them",
+            ))
+            .clicked()
+        {
+            self.plugins.show_window = true;
+        }
+    }
+
     /// Record, the metronome and (Pro) the count-in switch.
     fn record_buttons(&mut self, ui: &mut egui::Ui) {
         let recording = self.is_recording();
@@ -1678,6 +1834,15 @@ fn snap_label(s: f64) -> String {
 }
 
 impl eframe::App for App {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Whatever was changed in plugin windows since the last save.
+        self.read_back_plugins(Capture::All);
+        if self.save_at.is_some() {
+            self.save_now();
+        }
+        self.plugins.close_editors();
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Not in the middle of a drag, which holds note indexes into the song.
         if !ctx.input(|i| i.pointer.any_down()) {
@@ -1690,6 +1855,7 @@ impl eframe::App for App {
             e.maintain();
             self.playhead = e.position();
         }
+        self.tend_plugins();
         self.record_frame();
 
         self.edit_shortcuts(ctx);
@@ -1775,6 +1941,9 @@ impl eframe::App for App {
         {
             // Progress, a take being saved, recordings loading, input meters.
             ctx.request_repaint_after(Duration::from_millis(50));
+        } else if self.plugins.editors_open() {
+            // A plugin window shows what its plugin does: keep in touch.
+            ctx.request_repaint_after(Duration::from_millis(60));
         } else {
             ctx.request_repaint_after(POLL_INTERVAL);
         }
@@ -1837,6 +2006,12 @@ impl App {
             crate::sound::show_window(ctx, self, &mut open);
             self.show_sound &= open;
             ctx.request_repaint_after(Duration::from_millis(100));
+        }
+        if self.plugins.show_window {
+            crate::plugins::show_window(ctx, self);
+            if self.plugins.scanning().is_some() {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
         }
     }
 
@@ -2656,6 +2831,178 @@ mod tests {
     fn poll_now(a: &mut App) {
         a.last_poll = Instant::now().checked_sub(POLL_INTERVAL).unwrap();
         a.poll_disk();
+    }
+
+    /// aidaw-plugin's test plugin as a VST3 bundle in `dir`, when the
+    /// workspace's tests built it (`cargo test --workspace` does).
+    fn test_plugin(dir: &std::path::Path) -> Option<PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        let examples = exe.parent()?.parent()?.join("examples");
+        let (lib, arch, ext) = if cfg!(windows) {
+            ("test_plugin.dll", "x86_64-win", "vst3")
+        } else {
+            ("libtest_plugin.so", "x86_64-linux", "so")
+        };
+        let lib = examples.join(lib);
+        if !lib.exists() {
+            eprintln!(
+                "the test plugin is not built yet (cargo test --workspace builds it); skipped"
+            );
+            return None;
+        }
+        let bundle = dir.join("AIDAW Test.vst3");
+        let code = bundle.join("Contents").join(arch);
+        fs::create_dir_all(&code).unwrap();
+        fs::copy(&lib, code.join(format!("AIDAW Test.{ext}"))).unwrap();
+        Some(bundle)
+    }
+
+    /// A song whose piano track plays the test synth and runs the test
+    /// effect plus one that is not installed, and whose audio track runs
+    /// the test effect too.
+    fn plugin_song(bundle: &std::path::Path) -> Project {
+        let classes = aidaw_plugin::module::Module::load(bundle)
+            .unwrap()
+            .classes();
+        let plugin = |instrument: bool| {
+            let c = classes
+                .iter()
+                .find(|c| c.is_instrument() == instrument)
+                .unwrap();
+            let mut p = PluginRef::new(c.name.clone(), c.uid.clone());
+            p.path = bundle.display().to_string();
+            p
+        };
+        let mut p = song(&[(60, 0.0)]);
+        p.tracks[0].instrument = aidaw_core::Instrument::Vst3(plugin(true));
+        let ops = vec![
+            Op::AddEffect {
+                track_id: "t1".into(),
+                plugin: plugin(false),
+                index: None,
+                bypass: false,
+            },
+            Op::AddEffect {
+                track_id: "t1".into(),
+                plugin: PluginRef::new("Not Installed", "0123456789ABCDEF0123456789ABCDEF"),
+                index: None,
+                bypass: false,
+            },
+        ];
+        edit::apply_all(&mut p, ops).unwrap();
+        let vocals = edit::apply(
+            &mut p,
+            Op::AddTrack {
+                name: "Vocals".into(),
+                instrument: Some(aidaw_core::Instrument::Audio),
+                gain: None,
+                pan: None,
+                reverb: None,
+            },
+        )
+        .unwrap()["track_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let effect = Op::AddEffect {
+            track_id: vocals,
+            plugin: plugin(false),
+            index: None,
+            bypass: false,
+        };
+        edit::apply(&mut p, effect).unwrap();
+        p
+    }
+
+    /// The audio track of [`plugin_song`] and its effect's id.
+    fn vocals(p: &Project) -> (String, String) {
+        let t = p.tracks.iter().find(|t| t.instrument.is_audio()).unwrap();
+        (t.id.clone(), t.effects[0].id.clone())
+    }
+
+    #[test]
+    fn plugin_settings_go_with_the_song_and_its_undo_steps() {
+        let tmp = TempDir::new("plugins");
+        let Some(bundle) = test_plugin(&tmp.0) else {
+            return;
+        };
+        let mut a = app(plugin_song(&bundle), None);
+        let synth = PluginKey::instrument("t1");
+        let first = a.plugins.rack.slot(&synth).expect("the synth runs").id;
+        assert!(a
+            .plugins
+            .rack
+            .slot(&PluginKey::effect("t1", "fx1"))
+            .is_some());
+        let missing = a.plugins.rack.failure(&PluginKey::effect("t1", "fx2"));
+        assert!(missing.is_some(), "not installed: it says why");
+        let (vocals, vocal_fx) = vocals(&a.project);
+        assert!(
+            a.plugins
+                .rack
+                .slot(&PluginKey::effect(&vocals, &vocal_fx))
+                .is_some(),
+            "recordings run through effects too"
+        );
+
+        // The plugins' settings go into the song as an edit (all of them,
+        // as when the editor closes).
+        a.read_back_plugins(Capture::All);
+        a.settle();
+        let has_state = |a: &App| {
+            a.project.tracks[0]
+                .instrument
+                .plugin()
+                .unwrap()
+                .state
+                .is_some()
+        };
+        assert!(has_state(&a));
+        assert!(a.history.can_undo());
+        assert!(
+            a.plugins.rack.capture(&a.project, Capture::All).is_empty(),
+            "nothing new to read back"
+        );
+
+        // Undo goes back to before the synth had settings of its own: it
+        // starts afresh. Redo gives the running one its settings back.
+        a.undo();
+        assert!(!has_state(&a));
+        let fresh = a.plugins.rack.slot(&synth).unwrap().id;
+        assert_ne!(fresh, first);
+        a.redo();
+        assert!(has_state(&a));
+        assert_eq!(
+            a.plugins.rack.slot(&synth).unwrap().id,
+            fresh,
+            "kept running"
+        );
+
+        // Every panel shows plugins without trouble, in both modes.
+        let ctx = egui::Context::default();
+        theme::install(&ctx);
+        egui_extras::install_image_loaders(&ctx);
+        let _ = ctx.run(Default::default(), |_| {});
+        a.plugins.show_window = true;
+        for (pro, track) in [
+            (false, "t1"),
+            (true, "t1"),
+            (false, &vocals),
+            (true, &vocals),
+        ] {
+            a.settings.pro = pro;
+            a.selected_track = Some(track.to_string());
+            frame(&mut a, &ctx, vec![], |a, ctx| {
+                egui::SidePanel::left("inspector").show(ctx, |ui| crate::inspector::show(ui, a));
+                egui::CentralPanel::default().show(ctx, |ui| crate::arrange::show(ui, a));
+                crate::plugins::show_window(ctx, a);
+            });
+        }
+
+        // A song from another file starts its own plugins.
+        let other = a.project.clone();
+        a.load_project(other, Some(tmp.0.join("other.aidaw.json")), "");
+        assert_ne!(a.plugins.rack.slot(&synth).unwrap().id, fresh);
     }
 
     #[test]

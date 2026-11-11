@@ -367,8 +367,8 @@ impl App {
         }
         let bar = self.project.beats_per_bar.max(1) as f64;
         let count_in = self.settings.count_in;
+        self.send_project();
         let engine = self.engine.as_mut().expect("checked above");
-        engine.set_project(&self.project);
         engine.set_recording(true);
         if !engine.is_playing() {
             if count_in {
@@ -955,8 +955,8 @@ impl App {
             }
             if let Some(e) = &self.engine {
                 e.set_audio(self.audio.clone());
-                e.set_project(&self.project);
             }
+            self.send_project();
         }
         if let Some((file, why)) = problem {
             self.status = trf(

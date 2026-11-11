@@ -97,7 +97,7 @@ impl LaneKey {
         let t = p.track(id)?;
         let synth = match &t.instrument {
             Instrument::Synth(s) => Some(s),
-            Instrument::Drums { .. } | Instrument::Audio => None,
+            Instrument::Drums { .. } | Instrument::Vst3(_) | Instrument::Audio => None,
         };
         Some(match self.param {
             Param::Volume => t.gain,

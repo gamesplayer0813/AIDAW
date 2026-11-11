@@ -39,6 +39,9 @@ still write notes for you: see [4. Plain chat](#4-plain-chat-paste-the-answer).
 | `set_playhead` | Put the app's playhead at a bar, and start or stop playback there |
 | `undo` | Take back your own last edit(s); never what the human changed in the app |
 | `automate` | Make a setting move over time: fades, filter sweeps, pan moves, reverb swells, a song fade-out; repeat, scale or clear the points |
+| `list_plugins` | The VST®3 instruments and effects installed on this computer |
+| `add_effect`, `update_effect`, `remove_effect` | A track's effect plugins: add, switch off or on, reorder, remove |
+| `plugin_params`, `set_plugin_params` | Read and turn a plugin's knobs by name, with values like `"800 Hz"` or `"-6 dB"` |
 | `analyze` | Listen to the mix: loudness, limiter, low/mid/high balance, each track alone, and tips |
 | `render_wav` | Render the song to a WAV file |
 
@@ -198,6 +201,59 @@ Auto-pan:           automate {"track": "Keys", "param": "pan", "points": "1:-0.7
 In the AIDAW app the lanes open under their tracks, so the human sees what you wrote and can
 drag the points.
 
+## Plugins
+
+AIDAW hosts VST3 instruments and effects that are installed on the computer (VST is a
+registered trademark of Steinberg Media Technologies GmbH). Nothing is installed with AIDAW, so
+start with `list_plugins`: it lists instruments (they play notes) and effects (they change a
+track's sound), with each one's vendor. `{"kind": "effect"}` lists effects only, `"search"`
+filters by name, and plugins installed since the last call are found by themselves
+(`"rescan": true` looks at every plugin again).
+
+**An instrument plugin plays a track.** `add_track {"name": "Keys", "plugin": "Surge XT"}` adds
+a track played by Surge XT; `update_track {"track": "Keys", "plugin": "Vital"}` switches an
+existing track to another plugin, and `"instrument": "e_piano"` back to a preset. The musical
+tools work on plugin tracks like on any other.
+
+**Effects run on any track**, built-in sounds and recordings included. `add_effect {"track": "Keys", "plugin":
+"Supermassive"}` puts an effect at the end of the track's chain and returns its id (`fx1`);
+`"position": 1` puts it first. The sound runs through the effects in order, then the track's
+volume, pan and reverb send. `update_effect {"effect": "fx1", "bypass": true}` switches it off
+(`false` on again, `"position"` moves it), `remove_effect {"effect": "fx1"}` takes it off. Effect
+ids are unique in the song; names work too when they are.
+
+**Knobs.** `plugin_params {"track": "Keys"}` loads the plugin and lists its parameters, each as id,
+name, position (0-1) and the value the plugin shows, plus the options of stepped ones:
+
+```
+- 0 "Level" = 0.5 (50 %)
+- 1 "Octave" = 0.5 (Middle) options: Low | Middle | High
+```
+
+`"search": "cutoff"` narrows the list, `"effect": "fx1"` shows an effect's knobs instead of the
+instrument's. `set_plugin_params {"track": "Keys", "param": "Cutoff", "value": "800 Hz"}` turns
+one; `"params": [{"param": "Octave", "value": "High"}, {"param": 2, "value": 0.75}]` sets several
+at once. A parameter is named by its id, its name or a unique part of it. A value is a knob
+position from 0 to 1, an option name, or text the way the plugin shows it (`"-6 dB"`, `"30%"`,
+`"1.2 kHz"`); for text the plugin cannot read itself, the server searches for the position that
+shows the nearest value. The reply says what each knob shows now, so you can check.
+
+**Where the settings live.** The project file keeps each plugin's name, id and its own saved
+settings, never the plugin itself. Knobs you set are stored as overrides on top of those
+settings; when the human opens the plugin's window in the app and changes something, the app
+saves the plugin's settings again. `get_project` shows plugin tracks and effect chains;
+`detail: "json"` leaves the settings out (they are binary).
+
+**Automation.** `automate` moves a plugin track's `volume`, `pan` and `reverb` like any track's.
+The synth settings (`cutoff`, `drive` ...) belong to the built-in synth, and a plugin's own knobs
+can't be automated yet.
+
+**When a plugin is missing.** A song made on another computer can name plugins that are not
+installed here. Their tracks are silent (a missing effect is skipped), and `render_wav` and
+`analyze` say which ones were left out. Plugins run in a separate process for `plugin_params`,
+`set_plugin_params`, `render_wav` and `analyze`, so a plugin that crashes or hangs makes that
+one call fail and nothing else.
+
 ## Recordings
 
 The human records vocals, guitar or a MIDI keyboard in the AIDAW app. The takes are WAV files in
@@ -227,6 +283,8 @@ update_clip {"clip": "Vocals 1", "gain": 0.7, "fade_in": 0.05, "fade_out": 1.5}
 - Automate an audio track's `volume`, `pan` and `reverb` like any other track's (a vocal ride, a
   fade); the synth settings don't exist there.
 - A track can't switch between audio and an instrument while it has clips.
+- Effect plugins work on audio tracks too, e.g. a compressor or reverb on a vocal:
+  `add_effect {"track": "Vocals", "plugin": "<an effect list_plugins found>"}` (see Plugins).
 
 ## Sounds
 

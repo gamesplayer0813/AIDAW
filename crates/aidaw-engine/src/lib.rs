@@ -11,9 +11,11 @@
 //!   come through a second queue of the same kind.
 //! - The playhead comes back through atomics, and the song clock (which
 //!   beat is heard when, see [`clock`]) through a seqlock.
-//! - Projects and sound files travel as `Arc` snapshots. The callback hands
-//!   every snapshot it replaces back to the UI thread, which frees it, so
-//!   the callback never frees (or allocates) memory.
+//! - Projects and sound files travel as `Arc` snapshots, each project with
+//!   the plugin rack built for it (see [`aidaw_core::rack`]). The callback
+//!   hands every snapshot and rack it replaces back to the UI thread, which
+//!   frees them, so the callback never frees (or allocates) memory, and
+//!   plugins are always torn down on the UI thread.
 
 mod clock;
 mod devices;
@@ -29,6 +31,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use aidaw_core::rack::Rack;
 use aidaw_core::render::{track_gains_at, Sequencer};
 use aidaw_core::{AudioPool, Param, Project};
 use anyhow::{anyhow, bail, Context, Result};
@@ -63,6 +66,8 @@ enum Command {
         project: Arc<Project>,
         /// [`Project::playback_loop`], worked out on the UI thread.
         looping: Option<(f64, f64)>,
+        /// The project's plugins, if it has any.
+        rack: Option<Box<dyn Rack>>,
     },
     /// The sound files the audio clips play.
     SetAudio(Arc<AudioPool>),
@@ -130,7 +135,11 @@ struct Monitor {
 
 /// What the callback hands back to the UI thread to be freed there.
 enum Retired {
-    Project(#[allow(dead_code)] Arc<Project>),
+    /// A song and the plugins built for it.
+    Project(
+        #[allow(dead_code)] Arc<Project>,
+        #[allow(dead_code)] Option<Box<dyn Rack>>,
+    ),
     Audio(#[allow(dead_code)] Arc<AudioPool>),
     Monitor(#[allow(dead_code)] Monitor),
 }
@@ -157,6 +166,7 @@ struct Player {
     transport: Arc<Transport>,
     clock: Arc<Clock>,
     project: Arc<Project>,
+    rack: Option<Box<dyn Rack>>,
     /// What playback repeats: the loop region, or else the whole song.
     looping: Option<(f64, f64)>,
     seq: Sequencer,
@@ -191,7 +201,8 @@ impl Player {
             let n = left.min(out.len() / 2);
             let (counting, rest) = out.split_at_mut(n * 2);
             if n > 0 {
-                self.seq.count_in(&self.project, beat, counting);
+                let rack = self.rack.as_deref_mut().map(|r| r as &mut dyn Rack);
+                self.seq.count_in_with(&self.project, rack, beat, counting);
             }
             if n == left {
                 self.count_in = None;
@@ -202,9 +213,11 @@ impl Player {
             }
         } else if self.playing {
             self.play(out);
-        } else if self.seq.is_sounding() {
-            // Stopped, but note previews or the reverb tail are still ringing.
-            self.seq.process_voices(&self.project, out);
+        } else if self.rack.is_some() || self.seq.is_sounding() {
+            // Stopped, but note previews or the reverb tail are still
+            // ringing; plugins keep running (their tails, their meters).
+            let rack = self.rack.as_deref_mut().map(|r| r as &mut dyn Rack);
+            self.seq.process_voices_with(&self.project, rack, out);
         } else {
             out.fill(0.0);
         }
@@ -225,7 +238,9 @@ impl Player {
             return;
         }
         let looping = if self.linear { None } else { self.looping };
-        self.seq.process_looping(&self.project, out, looping);
+        let rack = self.rack.as_deref_mut().map(|r| r as &mut dyn Rack);
+        self.seq
+            .process_looping_with(&self.project, rack, out, looping);
     }
 
     /// Add the monitored input at its track's volume and pan.
@@ -293,10 +308,15 @@ impl Player {
         }
         while let Ok(cmd) = self.commands.try_recv() {
             match cmd {
-                Command::SetProject { project, looping } => {
+                Command::SetProject {
+                    project,
+                    looping,
+                    rack,
+                } => {
                     let old = std::mem::replace(&mut self.project, project);
+                    let old_rack = std::mem::replace(&mut self.rack, rack);
                     self.looping = looping;
-                    self.retire(Retired::Project(old));
+                    self.retire(Retired::Project(old, old_rack));
                 }
                 Command::SetAudio(pool) => {
                     let old = self.seq.set_audio(pool);
@@ -441,6 +461,7 @@ fn connect(project: &Project, sample_rate: u32, clock: Arc<Clock>) -> (Remote, P
         transport,
         clock,
         project: snapshot(project),
+        rack: None,
         looping: project.playback_loop(),
         seq: Sequencer::new(sample_rate),
         sample_rate,
@@ -491,10 +512,11 @@ impl Remote {
         while self.retired.try_recv().is_ok() {}
     }
 
-    fn set_project(&self, project: &Project) {
+    fn set_project(&self, project: &Project, rack: Option<Box<dyn Rack>>) {
         self.send(Command::SetProject {
             project: snapshot(project),
             looping: project.playback_loop(),
+            rack,
         });
     }
 
@@ -738,9 +760,12 @@ impl Engine {
         }
     }
 
-    /// Hand the audio thread a copy of `project` (made here, on the UI thread).
-    pub fn set_project(&self, project: &Project) {
-        self.remote.set_project(project);
+    /// Hand the audio thread a copy of `project` (made here, on the UI
+    /// thread) and the rack of plugins built for it, if it uses any. The
+    /// previous project and rack come back to this thread to be freed (see
+    /// [`Self::maintain`]).
+    pub fn set_project(&self, project: &Project, rack: Option<Box<dyn Rack>>) {
+        self.remote.set_project(project, rack);
     }
 
     /// Hand the audio thread the sound files the audio clips play.
@@ -1045,9 +1070,68 @@ where
 mod tests {
     use super::*;
     use aidaw_core::edit::{apply_all, Op};
-    use aidaw_core::{presets, AudioData, Note};
+    use aidaw_core::rack::{NoteEvent, Transport as SongTime, MAX_BLOCK};
+    use aidaw_core::{presets, AudioData, Instrument, Note, PluginRef};
+    use std::sync::atomic::AtomicUsize;
 
     const SR: u32 = 22_050;
+
+    /// A stand-in for real plugins on track 0: 0.25 per held note. It never
+    /// allocates while processing, like a well-behaved plugin.
+    struct TestRack {
+        bus: [Vec<f32>; 2],
+        held: Vec<i32>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl TestRack {
+        fn boxed(calls: &Arc<AtomicUsize>) -> Option<Box<dyn Rack>> {
+            Some(Box::new(TestRack {
+                bus: [vec![0.0; MAX_BLOCK], vec![0.0; MAX_BLOCK]],
+                held: Vec::with_capacity(64),
+                calls: calls.clone(),
+            }))
+        }
+    }
+
+    impl Rack for TestRack {
+        fn instrument(&self, track: usize) -> Option<u64> {
+            (track == 0).then_some(1)
+        }
+        fn routes(&self, track: usize) -> bool {
+            track == 0
+        }
+        fn bus(&mut self, track: usize) -> Option<[&mut [f32]; 2]> {
+            let [l, r] = &mut self.bus;
+            (track == 0).then_some([l.as_mut_slice(), r.as_mut_slice()])
+        }
+        fn process(&mut self, _track: usize, frames: usize, events: &[NoteEvent], _t: &SongTime) {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let mut next = events.iter().peekable();
+            for f in 0..frames {
+                while let Some(e) = next.next_if(|e| e.offset as usize == f) {
+                    if e.on {
+                        if self.held.len() < self.held.capacity() {
+                            self.held.push(e.id);
+                        }
+                    } else {
+                        self.held.retain(|id| *id != e.id);
+                    }
+                }
+                let v = 0.25 * self.held.len() as f32;
+                self.bus[0][f] += v;
+                self.bus[1][f] += v;
+            }
+        }
+    }
+
+    /// [`song`] with the pad played by a plugin.
+    fn plugin_song() -> Project {
+        let mut p = song();
+        p.tracks[0].instrument =
+            Instrument::Vst3(PluginRef::new("Test", "00112233445566778899AABBCCDDEEFF"));
+        p
+    }
 
     /// Counts heap allocations and frees made by the current thread while armed.
     mod counting {
@@ -1229,7 +1313,7 @@ mod tests {
         p.tracks[1].clips[0].notes.reverse();
         assert!(!p.notes_sorted());
         let (remote, mut player) = pair(&p);
-        remote.set_project(&p);
+        remote.set_project(&p, None);
         remote.play();
         let mut buf = block();
         player.render(&mut buf, 0);
@@ -1272,7 +1356,7 @@ mod tests {
         // Switched off, the loop no longer holds playback.
         let mut off = p.clone();
         off.transport.loop_region.as_mut().unwrap().on = false;
-        remote.set_project(&off);
+        remote.set_project(&off, None);
         remote.seek(6.5);
         player.render(&mut buf, 0);
         assert!(remote.position() > 6.5, "{}", remote.position());
@@ -1303,16 +1387,79 @@ mod tests {
         let mut buf = block();
         let mut renamed = p.clone();
         renamed.name = "renamed".into();
-        remote.set_project(&renamed);
+        remote.set_project(&renamed, None);
         player.render(&mut buf, 0);
         assert_eq!(player.project.name, "renamed");
         // The old snapshot came back to the UI side...
-        let Ok(Retired::Project(old)) = remote.retired.try_recv() else {
+        let Ok(Retired::Project(old, _)) = remote.retired.try_recv() else {
             panic!("old snapshot not returned");
         };
         assert_eq!(old.name, "song");
         // ...and the audio side kept no reference to it.
         assert_eq!(Arc::strong_count(&old), 1);
+    }
+
+    #[test]
+    fn plugins_play_and_keep_running_while_stopped() {
+        let p = plugin_song();
+        let (remote, mut player) = pair(&p);
+        let calls = Arc::new(AtomicUsize::new(0));
+        remote.set_project(&p, TestRack::boxed(&calls));
+        let mut buf = block();
+        player.render(&mut buf, 0);
+        assert!(
+            calls.load(Ordering::Relaxed) > 0,
+            "plugins run while stopped"
+        );
+        assert_eq!(peak(&buf), 0.0, "but play nothing");
+
+        remote.play();
+        player.render(&mut buf, 0);
+        assert!(
+            peak(&buf) > 0.1,
+            "the plugin plays the chord: {}",
+            peak(&buf)
+        );
+
+        // A new snapshot brings a new rack; the old one goes back to the UI.
+        remote.set_project(&p, TestRack::boxed(&calls));
+        player.render(&mut buf, 0);
+        let Ok(Retired::Project(_, old_rack)) = remote.retired.try_recv() else {
+            panic!("old snapshot not returned");
+        };
+        assert!(old_rack.is_some());
+
+        // A key on a MIDI keyboard plays the plugin too, while stopped.
+        remote.pause();
+        player.render(&mut buf, 0);
+        remote.send(Command::LiveTrack(Some(0)));
+        remote
+            .live
+            .try_send(Live::On {
+                pitch: 72,
+                velocity: 100,
+            })
+            .unwrap();
+        for _ in 0..4 {
+            player.render(&mut buf, 0);
+        }
+        assert_eq!(player.seq.live_notes(), 1);
+        assert!(peak(&buf) > 0.1, "the key sounds: {}", peak(&buf));
+        remote.live.try_send(Live::Off { pitch: 72 }).unwrap();
+        for _ in 0..4 {
+            player.render(&mut buf, 0);
+        }
+        assert_eq!(player.seq.live_notes(), 0);
+        while remote.retired.try_recv().is_ok() {}
+
+        // A project without plugins drops the rack (back to the UI too).
+        remote.set_project(&song(), None);
+        player.render(&mut buf, 0);
+        assert!(player.rack.is_none());
+        let Ok(Retired::Project(_, old_rack)) = remote.retired.try_recv() else {
+            panic!("old snapshot not returned");
+        };
+        assert!(old_rack.is_some());
     }
 
     #[test]
@@ -1324,7 +1471,7 @@ mod tests {
         for i in 0..2 * QUEUE_LEN {
             let mut q = p.clone();
             q.name = format!("v{i}");
-            remote.set_project(&q);
+            remote.set_project(&q, None);
             remote.preview(0, 60);
         }
         let backlog = remote.backlog.borrow();
@@ -1534,7 +1681,7 @@ mod tests {
         // A new project arrives while playing; the old one goes back.
         let mut q = p.clone();
         q.tracks[0].gain = 0.5;
-        remote.set_project(&q);
+        remote.set_project(&q, None);
         assert_eq!(render(&mut player), 0);
         assert!(remote.retired.try_recv().is_ok());
 
@@ -1566,7 +1713,7 @@ mod tests {
             ],
         )
         .unwrap();
-        remote.set_project(&q);
+        remote.set_project(&q, None);
         remote.send(Command::SetAudio(Arc::new(pool)));
         remote.seek(0.0);
         for _ in 0..20 {
@@ -1616,6 +1763,7 @@ mod tests {
                 .try_send(Command::SetProject {
                     project: Arc::new(q.clone()),
                     looping: q.playback_loop(),
+                    rack: None,
                 })
                 .ok();
             assert_eq!(render(&mut player), 0);
@@ -1629,6 +1777,22 @@ mod tests {
         for _ in 0..20 {
             assert_eq!(render(&mut player), 0);
         }
+
+        // With plugins: playing, stopped, and swapping racks.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let with_plugins = plugin_song();
+        remote.set_project(&with_plugins, TestRack::boxed(&calls));
+        remote.play();
+        for _ in 0..100 {
+            assert_eq!(render(&mut player), 0);
+        }
+        remote.set_project(&with_plugins, TestRack::boxed(&calls));
+        remote.pause();
+        for _ in 0..20 {
+            assert_eq!(render(&mut player), 0);
+        }
+        assert!(calls.load(Ordering::Relaxed) >= 120);
+        while remote.retired.try_recv().is_ok() {}
     }
 
     #[test]

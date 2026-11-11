@@ -662,6 +662,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 );
                 let sound = if track.instrument.is_audio() {
                     tr("Audio track")
+                } else if let Some(p) = track.instrument.plugin() {
+                    p.name.as_str()
                 } else {
                     presets::name_of(&track.instrument)
                         .map(|n| presets::plain_name(tr(n)))

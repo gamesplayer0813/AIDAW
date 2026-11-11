@@ -15,6 +15,8 @@ Easiest workflow: new_project -> add_track with a preset (list_presets) -> add_c
 add_drum_pattern (they create clips for you) -> copy_bars to repeat parts -> automate for fades and \
 filter sweeps -> get_project to check -> analyze to check the mix -> render_wav to listen. To show the \
 human what you changed, set_loop or set_playhead points the app at it; undo takes back your last edit.
+VST3 plugins installed on the computer work too: list_plugins, then add_track with \"plugin\" for an \
+instrument, add_effect for an effect, plugin_params / set_plugin_params for their knobs.
 Every error message says what was wrong and shows a valid example; read it and retry. Call help for the \
 full cheat sheet.";
 
@@ -140,6 +142,22 @@ AUTOMATION (settings that move over time)
   Fade the song out:  automate {"param": "master_volume", "points": "29:1 33:0"}
   Build-up riser:     automate {"track": "Lead", "param": "cutoff", "points": "13:400 17:12000", "shape": "smooth"}
   Side-chain pump:    automate {"track": "Pad", "param": "volume", "points": "1:0.2 1.1:0.8 1.25:0.8 1.25:0.2", "every_bars": 0.25}
+PLUGINS (VST3 instruments and effects installed on this computer)
+  list_plugins {}                                        what is installed ({"kind": "effect"} for effects only)
+  add_track    {"name": "Keys", "plugin": "Surge XT"}    a track played by an instrument plugin
+  add_effect   {"track": "Keys", "plugin": "Supermassive"}   run a track through an effect (any track,
+                                                         built-in instruments too); returns an id like fx1
+  plugin_params {"track": "Keys", "search": "cutoff"}   a plugin's knobs: id, name, position 0-1, shown value
+                                                         (add "effect": "fx1" for an effect's knobs)
+  set_plugin_params {"track": "Keys", "param": "Cutoff", "value": "800 Hz"}
+           value: 0-1 = knob position, or text as the plugin shows it ("-6 dB", "30%", "1.2 kHz"),
+           or an option name ("Saw"). Several at once: "params": [{"param": ..., "value": ...}, ...]
+  update_effect {"effect": "fx1", "bypass": true}   off (true) / on (false), or "position": 1 to move it first
+  remove_effect {"effect": "fx1"}
+  Effects run in order before the track's volume, pan and reverb send. Plugins load in a separate
+  process, so a broken one cannot crash anything; render_wav and analyze name plugins that are missing
+  on this computer (their tracks stay silent). A human can open a plugin's own window in the app.
+  automate moves a plugin track's volume, pan and reverb; the plugin's own knobs can't be automated yet.
 
 CHECK YOUR WORK
   get_project {}                    compact overview (tracks, clips, bars, automation)
@@ -161,6 +179,8 @@ pub enum Ty {
     Drums,
     /// Array of operation objects for `apply_ops`.
     Ops,
+    /// Array of {param, value} for `set_plugin_params`.
+    ParamList,
     /// Automation points: array of {bar, value, shape} (text is also accepted).
     Points,
 }
@@ -211,6 +231,10 @@ const AUDIO: &str = "audio tracks only: a WAV file to play, relative to the proj
 const KIT: &str = "drum tracks only: standard | 808 | 909 | acoustic | lofi | trap | electro";
 const REVERB: &str = "0-1 how much of this track goes to the shared reverb: 0 dry, 0.2-0.35 typical for keys, \
                       pads and leads, 0.1 drums, 0 bass. New tracks start with their preset's usual amount";
+const PLUGIN_INSTRUMENT: &str = "name of an installed VST3 instrument plugin (list_plugins), e.g. \"Surge XT\"; \
+                                 a unique part of the name or its uid works too. Instead of \"instrument\"";
+const EFFECT: &str = "effect id like \"fx1\" (get_project shows them) or the effect plugin's name";
+const PLUGIN_TRACK: &str = "the track whose plugin you mean (name or id): its instrument plugin, or with \"effect\" one of its effects";
 const COLOR: &str = "colour of the track in the app: blue, orange, green, purple, yellow, cyan, pink, violet, \
                      red, teal, white, gray, a hex code like \"#ff8a3d\", or \"auto\" for its own colour";
 const POINTS: &str = "where the setting is what, e.g. [{\"bar\": 1, \"value\": 0}, {\"bar\": 5, \"value\": 0.8}]: \
@@ -282,11 +306,12 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "add_track",
-        description: "Add a track with an instrument preset. Returns its track_id. Without instrument, a preset matching the name is used (\"Drums\" -> drum_kit), else a saw synth.",
+        description: "Add a track with an instrument preset, or with an installed VST3 instrument plugin (\"plugin\"). Returns its track_id. Without either, a preset matching the name is used (\"Drums\" -> drum_kit), else a saw synth.",
         example: r#"{"name": "Bass", "instrument": "bass"}"#,
         params: &[
             req("name", Str, "track name, e.g. \"Bass\""),
             p("instrument", Str, INSTRUMENT),
+            p("plugin", Str, PLUGIN_INSTRUMENT),
             p("kit", Str, KIT),
             p("gain", Num, "volume 0-2 (default 0.8)"),
             p("pan", Num, "-1 left .. 1 right"),
@@ -296,7 +321,7 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "update_track",
-        description: "Change a track's name, instrument preset, drum kit, volume, pan, reverb, mute/solo, its row (position) and colour in the app, or tweak its synth sound.",
+        description: "Change a track's name, instrument preset or plugin, drum kit, volume, pan, reverb, mute/solo, its row (position) and colour in the app, or tweak its synth sound.",
         example: r#"{"track": "Bass", "instrument": "pluck", "gain": 0.6, "cutoff": 1200}"#,
         params: &[
             req("track", Str, TRACK),
@@ -304,6 +329,7 @@ pub const TOOLS: &[Tool] = &[
             p("position", Int, "move the track to this row in the app, 1 = the top"),
             p("color", Str, COLOR),
             p("instrument", Str, INSTRUMENT),
+            p("plugin", Str, PLUGIN_INSTRUMENT),
             p("gain", Num, "volume 0-2, 1 = unity"),
             p("pan", Num, "-1 left .. 1 right"),
             p("reverb", Num, REVERB),
@@ -547,6 +573,69 @@ pub const TOOLS: &[Tool] = &[
         params: &[req("ops", Ops, "list of {\"op\": tool name, ...arguments}")],
     },
     Tool {
+        name: "list_plugins",
+        description: "List the VST3 plugins installed on this computer: instruments (play notes; add_track {\"plugin\": ...}) and effects (change a track's sound; add_effect). Newly installed plugins are found each time.",
+        example: r#"{"kind": "effect", "search": "reverb"}"#,
+        params: &[
+            p("kind", Str, "only instrument | effect"),
+            p("search", Str, "only plugins whose name, maker or category contains this"),
+            p("rescan", Bool, "look at every plugin file again, not only new and updated ones (slow)"),
+        ],
+    },
+    Tool {
+        name: "add_effect",
+        description: "Put an installed VST3 effect plugin (list_plugins) on a track. A track's sound runs through its effects in order, then its volume, pan and reverb send. Returns effect_id.",
+        example: r#"{"track": "Keys", "plugin": "Supermassive"}"#,
+        params: &[
+            req("track", Str, TRACK),
+            req("plugin", Str, "effect plugin name (a unique part of it works) or uid"),
+            p("position", Int, "place in the chain, 1 = first (default: last)"),
+            p("bypass", Bool, "add it switched off"),
+        ],
+    },
+    Tool {
+        name: "update_effect",
+        description: "Switch a track's effect off (bypass) or on again, or move it within the track's chain.",
+        example: r#"{"effect": "fx1", "bypass": true}"#,
+        params: &[
+            req("effect", Str, EFFECT),
+            p("track", Str, "the track it is on, if the name alone is ambiguous"),
+            p("bypass", Bool, "true = off (the sound passes unchanged), false = on"),
+            p("position", Int, "new place in the chain, 1 = first"),
+        ],
+    },
+    Tool {
+        name: "remove_effect",
+        description: "Take an effect off its track.",
+        example: r#"{"effect": "fx1"}"#,
+        params: &[
+            req("effect", Str, EFFECT),
+            p("track", Str, "the track it is on, if the name alone is ambiguous"),
+        ],
+    },
+    Tool {
+        name: "plugin_params",
+        description: "Show the knobs of a track's instrument plugin, or of one of its effects: id, name, position 0-1 and the value as the plugin shows it (\"-6.0 dB\"), with the options of switches. Loads the plugin, so it takes a moment.",
+        example: r#"{"track": "Keys", "search": "cutoff"}"#,
+        params: &[
+            req("track", Str, PLUGIN_TRACK),
+            p("effect", Str, "one of the track's effects instead of its instrument (id or name)"),
+            p("search", Str, "only parameters whose name contains this"),
+        ],
+    },
+    Tool {
+        name: "set_plugin_params",
+        description: "Turn the knobs of a track's instrument plugin or effect. Parameters by name or id (plugin_params lists them). Values: 0-1 = knob position, or text the way the plugin shows it (\"-6 dB\", \"800 Hz\", \"30%\"), or an option name (\"Saw\"). Saved in the song on top of the plugin's own settings.",
+        example: r#"{"track": "Keys", "param": "Cutoff", "value": "800 Hz"}"#,
+        params: &[
+            req("track", Str, PLUGIN_TRACK),
+            p("effect", Str, "one of the track's effects instead of its instrument (id or name)"),
+            p("param", Str, "parameter name or id, e.g. \"Cutoff\" or \"12\""),
+            p("value", Str, "0-1 knob position, or text like \"-6 dB\", \"800 Hz\", \"30%\", or an option name"),
+            p("params", ParamList, "several at once instead of param/value"),
+        ],
+    },
+    Tool {
         name: "analyze",
         description: "Hear the mix as numbers: renders the song (nothing is written) and reports loudness in LUFS, peak, how hard the limiter works, the low/mid/high balance, each track's level alone, loudness along the song, and tips with calls that fix what stands out. Use it after big changes.",
         example: "{}",
@@ -594,6 +683,23 @@ pub const ALIASES: &[(&str, &str)] = &[
     ("analyze_mix", "analyze"),
     ("check_mix", "analyze"),
     ("listen", "analyze"),
+    ("plugins", "list_plugins"),
+    ("list_vst", "list_plugins"),
+    ("list_vst3", "list_plugins"),
+    ("scan_plugins", "list_plugins"),
+    ("add_fx", "add_effect"),
+    ("add_plugin_effect", "add_effect"),
+    ("insert_effect", "add_effect"),
+    ("bypass_effect", "update_effect"),
+    ("move_effect", "update_effect"),
+    ("delete_effect", "remove_effect"),
+    ("remove_fx", "remove_effect"),
+    ("get_plugin_params", "plugin_params"),
+    ("list_plugin_params", "plugin_params"),
+    ("list_params", "plugin_params"),
+    ("set_plugin_param", "set_plugin_params"),
+    ("set_param", "set_plugin_params"),
+    ("set_params", "set_plugin_params"),
     ("split", "split_clip"),
     ("split_clips", "split_clip"),
     ("cut_clip", "split_clip"),
@@ -705,6 +811,14 @@ fn param_schema(p: &Param) -> Value {
                 "op": {"type": "string", "description": "tool name, e.g. add_track"}
             }, "required": ["op"]}
         }),
+        ParamList => json!({
+            "type": "array",
+            "description": p.desc,
+            "items": {"type": "object", "properties": {
+                "param": {"type": "string", "description": "parameter name or id"},
+                "value": {"type": "string", "description": "0-1 knob position, or text like \"-6 dB\" or an option name"}
+            }, "required": ["param", "value"]}
+        }),
     }
 }
 
@@ -813,6 +927,7 @@ fn type_name(ty: Ty) -> &'static str {
         Notes => "string or array",
         Drums => "object",
         Ops => "array",
+        ParamList => "array",
         Points => "string or array",
     }
 }

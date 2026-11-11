@@ -787,6 +787,60 @@ fn zh(en: &str) -> Option<&'static str> {
         "Minor pentatonic" => "小调五声音阶",
         "Blues" => "布鲁斯",
 
+        // ---- plugins ----
+        "Plugins" => "插件",
+        "VST3 instruments and effects installed on this computer, and where AIDAW looks for them" => {
+            "这台电脑上装的 VST3 乐器和效果器，以及 AIDAW 去哪儿找它们"
+        }
+        "Couldn't open the plugin's window: {}" => "无法打开插件窗口：{}",
+        "Exported {}s to {}, without these plugins: {}" => "已导出 {} 秒音频到 {}，但这些插件没出声：{}",
+        "VST3 instruments installed on this computer" => "这台电脑上装的 VST3 乐器",
+        "No VST3 instruments found on this computer." => "这台电脑上没找到 VST3 乐器。",
+        "Plugins…" => "插件…",
+        "Installed it in another folder? Add that folder in the Plugins window." => {
+            "装在别的文件夹了？在「插件」窗口里把那个文件夹加进来。"
+        }
+        "Window is open" => "窗口已打开",
+        "Open window" => "打开窗口",
+        "Plugin windows open on Windows only" => "插件窗口只能在 Windows 上打开",
+        "Show the plugin's own controls in a window of its own" => "在单独的窗口里显示插件自己的界面",
+        "Effects" => "效果器",
+        "Effects change this track's sound: echo, reverb, distortion, EQ…" => {
+            "效果器会改变这条音轨的声音：回声、混响、失真、均衡……"
+        }
+        "On: click to switch this effect off" => "开着：点一下关掉这个效果器",
+        "Off: click to switch this effect on" => "关着：点一下打开这个效果器",
+        "Remove this effect (Ctrl+Z brings it back)" => "移除这个效果器（Ctrl+Z 可恢复）",
+        "Later in the chain" => "在效果链里往后挪",
+        "Earlier in the chain" => "在效果链里往前挪",
+        "Add effect" => "添加效果器",
+        "No VST3 effects found on this computer." => "这台电脑上没找到 VST3 效果器。",
+        "Run this track's sound through an effect plugin" => "让这条音轨的声音经过一个效果器插件",
+        "Effect removed. Ctrl+Z brings it back." => "已移除效果器。Ctrl+Z 可恢复。",
+        "⚠ Not playing: {}" => "⚠ 没在发声：{}",
+        "⚠ Not installed on this computer, so it is silent" => "⚠ 这台电脑上没装这个插件，所以没声音",
+        "Added {}" => "已添加 {}",
+        "the plugin is not running" => "插件没有在运行",
+        "VST3 plugins" => "VST3 插件",
+        "Pick an instrument plugin under Sound, or add effects to any track below its sound." => {
+            "在「音色」里挑插件乐器；任何音轨都可以在音色下面添加效果器。"
+        }
+        "Looking for plugins…" => "正在找插件…",
+        "Look again" => "重新扫描",
+        "Find plugins installed or updated since the last look" => "找出上次扫描之后新装或更新过的插件",
+        "Check every plugin" => "全部重新检查",
+        "Load every plugin again to see what it is, not only new ones (slower)" => {
+            "把每个插件都重新加载一遍看看是什么，不只看新的（比较慢）"
+        }
+        "Where AIDAW looks" => "AIDAW 会去这些地方找",
+        "Stop looking in this folder" => "不再在这个文件夹里找",
+        "Add a folder…" => "添加文件夹…",
+        "Plugins installed somewhere else? Pick the folder they are in." => "插件装在别处？选它们所在的文件夹。",
+        "None found" => "一个也没找到",
+        "{} instruments and {} effects installed" => "已装 {} 个乐器、{} 个效果器",
+        "Looking at plugins… {} of {}" => "正在检查插件… {} / {}",
+        "{} plugin files could not be used" => "{} 个插件文件用不了",
+
         // ---- sound window ----
         "Playing through: {}" => "正在通过以下设备播放：{}",
         "⚠ The sound device is not running (it never asked for audio). Try another device below." => {

@@ -16,7 +16,7 @@
 | 🔁 循环播放 | 默认播到最后一个音符所在小节的结尾就绕回开头，杂鱼不用手忙脚乱按停止。想死磕某几小节？在小节号上方那条细条里拖一下就是循环区（A/B 循环）：拖中间挪位置、拖两头改长短、点一下开关，`L` 键或顶栏 🔁 按钮也行。AI 也能用 `set_loop` 帮你圈好，你只管竖起耳朵听♡ |
 | ▶️ 从哪儿播都有声 | 从长音、和弦中间开始播放也马上能听到（20 ms 淡入，不会「啪」一声），不用傻等下一个音符 |
 | ⚡ 不卡音的引擎 | 音频回调里不加锁、不分配内存，界面再忙也卡不出爆音。哼，本小姐写的引擎才不会掉链子 |
-| 🤖 任何 LLM 都能用 | `aidaw-mcp.exe`：29 个 MCP 工具，外加 CLI（`call` / `tools --format openai` / `guide`），Claude、GPT、Gemini、Ollama 都行 |
+| 🤖 任何 LLM 都能用 | `aidaw-mcp.exe`：35 个 MCP 工具，外加 CLI（`call` / `tools --format openai` / `guide`），Claude、GPT、Gemini、Ollama 都行 |
 | 🛡️ AI 不会乱来 | MCP 的相对路径一律相对工程目录，只允许写 `*.aidaw.json` 和 `*.wav`；GUI 和 AI 同时改也不会丢改动 |
 | ✨ 好看的界面 | 深色主题、LCD 风格走带、会发光的按钮，内置 Inter 字体 |
 | 📐 自适应布局 | 两行顶栏、钢琴卷帘按窗口比例缩放，小窗口（900×600）也不挤 |
@@ -31,6 +31,7 @@
 | 🔌 ASIO（可选） | 有专业声卡（音频接口）想要更低延迟，可以自己编一个带 ASIO 驱动的版本。默认包里故意没带，为什么看「构建」里的 ASIO 一节 |
 | 📈 自动化包络 | 音量、声像、混响、滤波亮度、共振、失真、FM、颤音、Sub、噪声，还有整首歌的总音量和混响房间，都能画成随时间变化的线：淡入淡出、滤波扫频、侧链「泵」感统统安排。AI 用 `automate` 写，你在轨道下面的包络道上点一点、拖一拖就能改。被包络接管的滑块会变灰、跟着播放头动，可不是坏了哦，笨蛋♡ |
 | 💬 聊天 AI 直接粘贴 | 什么都不用装：让随便哪个聊天 AI（ChatGPT、Gemini、DeepSeek…）用 JSON 列出音符，复制它的整段回答，点一个片段按 `Ctrl+V`，音符就进来了。现成的提示词在「问 AI」里 |
+| 🔌 VST®3 插件 | 电脑里装的 VST3 乐器和效果器都能用。「音色」面板的「插件」页挑乐器；效果器每条轨想挂几个挂几个（内置音色的轨、录音的音频轨也行），开关、换顺序、删掉随你；点「打开窗口」就是插件自己的界面，拧过的旋钮跟着 `.aidaw.json` 一起存。AI 也能挑插件、挂效果器、按名字拧旋钮（`"800 Hz"`、`"-6 dB"` 这种它也看得懂）。扫描插件和 AI 那边的渲染都在单独的进程里跑，坏插件崩了也拖不垮 AIDAW♡ |
 | 🔊 主总线限幅器 | 峰值限幅 + 软削波，杂鱼把音量推爆也不会炸耳朵 |
 | ↩ 撤销一切 | AI 的改动、你的改动，全都能 `Ctrl+Z`。AI 自己也能用 `undo` 撤回它写砸的东西，而且你在 GUI 里改过的话它会乖乖收手，绝不顺手把你的改动一起扔掉 |
 
@@ -166,7 +167,7 @@ Claude Code / Cursor / Windsurf / Cline 等 MCP 客户端配置方式同理。
 
 完整说明见 [docs/LLM_GUIDE.md](docs/LLM_GUIDE.md)；每个工具的每个参数见 [docs/TOOLS.md](docs/TOOLS.md)，它是 `aidaw-mcp docs` 从代码直接生成的，永远不会过时。
 
-### 29 个 MCP 工具
+### 35 个 MCP 工具
 
 - **音乐级**（模型不用自己算音符，对小模型很友好）：
   - `add_chords`：`"Am F C G"`
@@ -186,6 +187,11 @@ Claude Code / Cursor / Windsurf / Cline 等 MCP 客户端配置方式同理。
   - `{"track": "Pad", "param": "volume", "points": "1:0.2 1.1:0.8 1.25:0.8 1.25:0.2", "every_bars": 0.25}`：4/4 里每拍「泵」一下的侧链感
   - 还有 `shape`（`linear` / `smooth` / `hold`）、`scale` 整条缩放、`clear` 清掉；`get_project` 会把每条包络列出来，AI 不会忘了自己写过什么
 - **听**：`analyze` 报响度、峰值、限幅器、高中低频、每条轨单独的响度和整首歌的响度走向，外加修正建议（比如「鼓太大声，把别的都盖住了」）
+- **VST3 插件**（电脑里装了才有）：
+  - `list_plugins`：看装了哪些插件乐器和效果器，新装的会自己找到
+  - `add_track` `{"name": "Keys", "plugin": "Surge XT"}`：用插件乐器建一条轨（`update_track` 换成插件也行）
+  - `add_effect` `{"track": "Keys", "plugin": "Supermassive"}`：给轨道挂效果器（录音的音频轨也能挂），返回 `fx1` 这样的 id；`update_effect` `{"effect": "fx1", "bypass": true}` 关掉 / `position` 换顺序；`remove_effect` 删掉
+  - `plugin_params` `{"track": "Keys", "search": "cutoff"}` 列出插件的旋钮；`set_plugin_params` `{"track": "Keys", "param": "Cutoff", "value": "800 Hz"}` 拧旋钮。数值写 0-1 是旋钮位置，也可以照插件自己显示的写（`"-6 dB"`、`"30%"`），或者直接写选项名（`"Saw"`）
 - **录音 / 音频**（AI 没法替你唱，但能摆 WAV）：
   - `add_track` `{"name": "Vocals", "instrument": "audio"}` 建一条音频轨
   - `add_clip` `{"track": "Vocals", "bar": 5, "audio": "vocals.wav"}` 把 WAV 放到第 5 小节（路径相对工程文件夹；`offset` 跳过文件开头几秒，`gain` 调音量，不写长度就放整个文件）
@@ -216,6 +222,7 @@ Claude Code / Cursor / Windsurf / Cline 等 MCP 客户端配置方式同理。
 | `aidaw-engine` | 实时播放和录音：cpal → Windows 上走 WASAPI（自己编的话还有 ASIO），音频回调里跑同一个音序器；回调不加锁、不分配内存，和界面之间只走无锁命令队列和原子变量。录音从输入回调经无锁环形缓冲交给写盘线程存成 24-bit WAV，按声卡延迟对齐；MIDI 键盘走 midir |
 | `aidaw-gui` | 桌面编辑器（`aidaw.exe`）：编排时间线、钢琴卷帘、轨道/混音、乐器参数、撤销重做、主题（`theme.rs`）、中英文（`i18n.rs`） |
 | `aidaw-mcp` | MCP 服务器 + CLI（`aidaw-mcp.exe`）：让 AI 新建/打开工程、加轨、写音符、批量编辑、渲染 |
+| `aidaw-plugin` | VST3 宿主：扫描插件文件夹（结果缓存在 `plugins.json`）、加载插件、实时 / 离线跑插件、读写插件的设置、插件窗口。扫描和 AI 那边的渲染都在单独的 worker 进程里跑（就是 exe 自己带上 `--aidaw-plugin-worker` 再启动一次） |
 
 **协作模型**：工程就是一个 `.aidaw.json` 文件。
 
@@ -223,6 +230,8 @@ Claude Code / Cursor / Windsurf / Cline 等 MCP 客户端配置方式同理。
 - GUI 轮询文件，发现外部修改就热重载，并把重载前的版本压进撤销栈，所以 AI 的任何改动按 `Ctrl+Z` 就能撤回。
 - GUI 里的修改 300ms 后自动保存，AI 下次调用就能读到；若保存时发现 AI 刚写过，保留你的版本并把 AI 的版本放进撤销栈。谁的改动都不会悄悄丢，放心啦。
 - 工程文件带格式版本号（`version`）。更新版的 AIDAW 存出来的文件，旧版本只会拒绝打开、绝不覆盖，免得把它看不懂的东西弄丢；旧格式的文件则会自动升级。
+
+**插件**：AIDAW 会在 `C:\Program Files\Common Files\VST3`、`%LOCALAPPDATA%\Programs\Common\VST3`、「插件」窗口里加的文件夹，以及环境变量 `AIDAW_VST3_PATH` 列出的文件夹里找 `.vst3`，找到的东西记在 `%APPDATA%\AIDAW\plugins.json`，只有新装或者更新过的插件才会重新扫。工程文件里存的是插件的名字、id 和它自己的设置（base64），不存插件本身：换台电脑只要装了同一个插件就能原样打开，没装的话那条轨不出声，别的照常，AI 渲染的时候也会告诉你缺了哪个。插件在 GUI 里播放时就跑在 `aidaw.exe` 里面（不然延迟太大）；扫描、AI 的 `render_wav` / `analyze` / `plugin_params` / `set_plugin_params`，还有 GUI 导出用了插件的歌，都在单独的进程里，坏插件最多让那一次失败。插件窗口里拧的旋钮停手 0.7 秒左右就记进歌里，算一步撤销，`Ctrl+Z` 能拧回去。
 
 **安全**：MCP 收到的相对路径一律相对于工程所在目录（没打开工程时是 Music 目录），且只会写 `*.aidaw.json` 和 `*.wav`。AI 写错路径也覆盖不了别的文件，哼，本小姐可是考虑周全的。
 
@@ -272,12 +281,14 @@ CI（GitHub Actions）每个 PR 跑两个 job：`ubuntu-latest` 跑上面三条�
 
 ## 路线图（本小姐接下来要做的事）
 
-- [ ] 插件宿主：VST3 / CLAP 乐器与效果器
+- [x] 插件宿主：VST3 乐器与效果器（扫描、加载、插件自己的窗口、设置存进工程、AI 工具）
 - [x] 音频轨与录音：麦克风 / 吉他 / MIDI 键盘、预备拍、节拍器、监听、延迟补偿、导入 WAV
+- [ ] CLAP 插件
 - [ ] 采样器
 - [x] 混响：每轨发送量 + 共用房间（大小 / 音色）
 - [x] 自动化包络：音量 / 声像 / 混响 / 合成器参数 / 总音量 / 混响房间，GUI 里画线，AI 用 `automate` 写
-- [ ] 效果器链（EQ / 压缩）
+- [x] 效果器链：每条轨挂任意个 VST3 效果器，开关、换顺序随你
+- [ ] 自带的 EQ / 压缩（不用装插件就有的那种）
 - [x] ASIO 低延迟驱动（可选编译，见上面的 ASIO 一节）
 - [ ] 导出 MIDI
 - [x] 多选、复制粘贴、重复、量化、人性化，还能直接粘贴聊天 AI 写的音符
@@ -295,6 +306,7 @@ AIDAW 用 [MIT 许可证](LICENSE)，随便用、随便改、拿去卖钱都行�
 - Inter：[`crates/aidaw-gui/assets/Inter-LICENSE.txt`](crates/aidaw-gui/assets/Inter-LICENSE.txt)
 - Noto Sans SC（子集）：[`crates/aidaw-gui/assets/NotoSansSC-LICENSE.txt`](crates/aidaw-gui/assets/NotoSansSC-LICENSE.txt)
 
+插件宿主用的是 [`vst3`](https://crates.io/crates/vst3) crate（MIT 和 Apache-2.0 双许可），它的接口定义是从 Steinberg 的 VST 3 SDK 头文件生成的，SDK 从 3.8 起也是 MIT。VST is a registered trademark of Steinberg Media Technologies GmbH.
 自己编的 ASIO 版另当别论：里面有 Steinberg ASIO SDK，分发时按 GPLv3（或者 Steinberg 的专有协议）来，详见上面的 ASIO 一节。
 
 ---
