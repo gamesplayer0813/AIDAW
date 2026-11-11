@@ -113,6 +113,7 @@ mod tests {
             solo: false,
             reverb: 0.0,
             color: None,
+            input: Vec::new(),
             clips: Vec::new(),
             automation: Vec::new(),
         }

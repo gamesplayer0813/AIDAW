@@ -375,6 +375,7 @@ mod tests {
             start: 0.0,
             length: 4.0,
             notes: vec![note(60, 0.0, 1.0), note(64, 1.0, 1.0), note(67, 2.0, 1.5)],
+            audio: None,
         }
     }
 

@@ -167,6 +167,7 @@ pub fn copy_bars(
                     start: g0,
                     length: g1 - g0,
                     notes,
+                    audio: None,
                 });
                 next_clip += 1;
             }
@@ -410,6 +411,7 @@ mod tests {
             start: 8.0,
             length: 8.0,
             notes: vec![note(49, 0.0, 1.0), note(49, 4.0, 1.0)],
+            audio: None,
         });
         // Bar 1 copied to the middle of bar 2: half lands in the empty
         // stretch before the fill, half in the fill, replacing its crash.
@@ -528,6 +530,7 @@ mod tests {
             start: 0.0,
             length: 32.0,
             notes: line(),
+            audio: None,
         };
         assert_eq!(clip_seed(1, &clip("c1")), clip_seed(1, &clip("c1")));
         assert_ne!(clip_seed(1, &clip("c1")), clip_seed(1, &clip("c2")));

@@ -2,6 +2,7 @@
 
 mod app;
 mod arrange;
+mod audio_view;
 mod editing;
 mod history;
 mod i18n;
@@ -11,6 +12,7 @@ mod lanes;
 mod mode;
 mod onboarding;
 mod piano_roll;
+mod record;
 mod scale;
 mod settings;
 mod sound;

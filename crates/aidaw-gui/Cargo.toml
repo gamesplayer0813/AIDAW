@@ -9,6 +9,12 @@ license.workspace = true
 name = "aidaw"
 path = "src/main.rs"
 
+[features]
+# ASIO drivers on Windows (`cargo build --release -p aidaw-gui --features asio`).
+# Needs LLVM and the Steinberg ASIO SDK, whose licence then covers the exe:
+# read the README's ASIO section first.
+asio = ["aidaw-engine/asio"]
+
 [dependencies]
 aidaw-core.workspace = true
 aidaw-engine.workspace = true

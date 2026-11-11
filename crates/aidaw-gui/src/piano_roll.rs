@@ -37,13 +37,17 @@ enum Hit {
 pub fn show(ui: &mut egui::Ui, app: &mut App) {
     let Some(clip_id) = app.selected_clip.clone() else {
         app.ui_rects.insert("piano", ui.max_rect());
-        ui.centered_and_justified(|ui| {
-            ui.label(
-                RichText::new(tr("👆 Click a coloured clip above to see and edit its notes here.\nNo clips yet? Double-click an empty spot in a track row."))
-                    .size(15.0)
-                    .weak(),
-            )
-        });
+        let audio_track = app
+            .selected_track
+            .as_deref()
+            .and_then(|id| app.project.track(id))
+            .is_some_and(|t| t.instrument.is_audio());
+        let text = if audio_track {
+            tr("This audio track holds recordings. Press ● Record (R) to sing or play into it, or File › Import audio to bring in a WAV.")
+        } else {
+            tr("👆 Click a coloured clip above to see and edit its notes here.\nNo clips yet? Double-click an empty spot in a track row.")
+        };
+        ui.centered_and_justified(|ui| ui.label(RichText::new(text).size(15.0).weak()));
         return;
     };
     let Some((track_index, is_drums)) = app
@@ -55,6 +59,14 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
     else {
         return;
     };
+    if app
+        .project
+        .clip(&clip_id)
+        .is_some_and(|(_, c)| c.is_audio())
+    {
+        crate::audio_view::show(ui, app, &clip_id, track_index);
+        return;
+    }
 
     toolbar(ui, app, &clip_id, track_index);
     ui.separator();

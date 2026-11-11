@@ -15,6 +15,18 @@ pub struct Settings {
     pub pro: bool,
     /// Interface language; `None` follows the system language.
     pub lang: Option<Lang>,
+    /// Sound driver ("WASAPI", "ASIO"); `None` = the system's default.
+    pub driver: Option<String>,
+    /// Speakers / headphones by name; `None` = the system default.
+    pub output: Option<String>,
+    /// Microphone / line input for recording; `None` = the system default.
+    pub input: Option<String>,
+    /// Click on every beat while playing.
+    pub metronome: bool,
+    /// One bar of clicks before recording starts.
+    pub count_in: bool,
+    /// Hear the input through the speakers while a track is armed.
+    pub monitor: bool,
 }
 
 impl Default for Settings {
@@ -24,6 +36,12 @@ impl Default for Settings {
             tutorial_done: false,
             pro: false,
             lang: None,
+            driver: None,
+            output: None,
+            input: None,
+            metronome: false,
+            count_in: true,
+            monitor: false,
         }
     }
 }
