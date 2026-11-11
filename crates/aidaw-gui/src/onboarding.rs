@@ -14,7 +14,7 @@ use crate::icons::{self, Icon};
 pub const DEMO_SONG: &str = include_str!("../../../examples/demo.aidaw.json");
 
 pub fn demo_project() -> Project {
-    serde_json::from_str(DEMO_SONG).expect("embedded demo song is valid")
+    aidaw_core::io::from_json(DEMO_SONG).expect("embedded demo song is valid")
 }
 
 // ---- tutorial --------------------------------------------------------------

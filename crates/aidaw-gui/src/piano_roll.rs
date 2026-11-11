@@ -62,20 +62,20 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
     // Easy mode uses taller rows so notes are easy to hit.
     let kh = if app.pro() { app.roll_key_height } else { 18.0 };
     let bw = app.roll_zoom;
-    let clip = app
-        .project
-        .clip(&clip_id)
-        .map(|(_, c)| c.clone())
-        .expect("clip exists");
-    let view_beats = (clip.length + app.project.beats_per_bar as f64 * 2.0).max(8.0);
+    // The clip is borrowed, never copied: drawing reads it, and each edit
+    // below looks it up again (a long clip used to be cloned every frame).
+    let Some((_, clip)) = app.project.clip(&clip_id) else {
+        return;
+    };
+    let (clip_start, clip_len) = (clip.start, clip.length);
+    let view_beats = (clip_len + app.project.beats_per_bar as f64 * 2.0).max(8.0);
     let size = vec2(KEYS_W + view_beats as f32 * bw, RULER_H + 128.0 * kh);
 
     let mut area = egui::ScrollArea::both()
         .id_salt("piano_roll")
         .auto_shrink([false, false]);
     if std::mem::take(&mut app.roll_scroll_to_notes) {
-        let top = clip
-            .notes
+        let top = notes_of(app, &clip_id)
             .iter()
             .map(|n| n.pitch)
             .max()
@@ -89,12 +89,16 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
     // notes into view if they ended up outside it. Offsets are measured from
     // the corner of the note grid, under the sticky ruler and keyboard.
     if std::mem::take(&mut app.roll_reveal) {
+        let notes = notes_of(app, &clip_id);
         let pitches = app
             .selected_notes
             .iter()
-            .filter_map(|&i| clip.notes.get(i).map(|n| n.pitch));
+            .filter_map(|&i| notes.get(i).map(|n| n.pitch));
         let (lo, hi) = (pitches.clone().min(), pitches.max());
-        let beats = editing::span(&clip, &app.selected_notes);
+        let beats = app
+            .project
+            .clip(&clip_id)
+            .and_then(|(_, c)| editing::span(c, &app.selected_notes));
         if let (Some((offset, view)), Some((start, end)), Some(lo), Some(hi)) =
             (app.roll_view, beats, lo, hi)
         {
@@ -115,6 +119,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         let origin = resp.rect.min;
         let visible = ui.clip_rect();
         app.ui_rects.insert("piano", visible.intersect(resp.rect));
+        let notes = notes_of(app, &clip_id);
         let in_key = |p: u8| !app.scale_active(track_index) || app.scale.contains(app.scale_root, p);
         let scale_on = app.scale_active(track_index);
         let keys_left = visible.left().max(origin.x);
@@ -179,7 +184,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             b = i as f64 * snap;
         }
         // Shade beyond the clip end.
-        let end_x = x_of(clip.length);
+        let end_x = x_of(clip_len);
         painter.rect_filled(
             Rect::from_min_max(pos2(end_x, origin.y), resp.rect.right_bottom()),
             0.0,
@@ -193,7 +198,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         // Notes: rounded, brighter the harder they are played, with a light top edge.
         // Selected notes glow; their outline is white while the editing keys act on them.
         let focused = app.edit_focus == EditFocus::Notes;
-        for (idx, n) in clip.notes.iter().enumerate() {
+        for (idx, n) in notes.iter().enumerate() {
             let r = Rect::from_min_max(
                 pos2(x_of(n.start) + 0.5, y_of(n.pitch) + 1.0),
                 pos2(
@@ -205,7 +210,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 continue;
             }
             let selected = app.selected_notes.contains(&idx);
-            let fill = if n.start >= clip.length {
+            let fill = if n.start >= clip_len {
                 theme::SURFACE_HI
             } else {
                 theme::mix(theme::CANVAS, color, 0.45 + 0.55 * n.velocity as f32 / 127.0)
@@ -235,7 +240,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         }
 
         // Playhead (relative to the clip).
-        let ph = app.playhead - clip.start;
+        let ph = app.playhead - clip_start;
         if ph >= 0.0 && ph <= view_beats {
             let x = x_of(ph);
             painter.line_segment(
@@ -349,7 +354,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             theme::PANEL,
         );
 
-        if clip.notes.is_empty() {
+        if notes.is_empty() {
             let hint = if is_drums {
                 tr("Click in the grid to add drum hits.\nTry Kick on beats 1 and 3, Snare on 2 and 4, Hi-hat everywhere!")
             } else {
@@ -398,7 +403,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         };
 
         if let Some(p) = resp.hover_pos() {
-            if matches!(hit(&clip.notes, p), Hit::NoteEdge { .. }) {
+            if matches!(hit(notes, p), Hit::NoteEdge { .. }) {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
             }
         }
@@ -406,13 +411,14 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         let (shift, ctrl) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
         if resp.drag_started() {
             if let Some(p) = ui.input(|i| i.pointer.press_origin()) {
-                match hit(&clip.notes, p) {
+                match hit(notes_of(app, &clip_id), p) {
                     Hit::NoteBody { index, offset } => {
                         grab(app, index, shift || ctrl);
+                        let notes = notes_of(app, &clip_id);
                         let from = app
                             .selected_notes
                             .iter()
-                            .filter_map(|&i| clip.notes.get(i).map(|n| (i, n.start, n.pitch)))
+                            .filter_map(|&i| notes.get(i).map(|n| (i, n.start, n.pitch)))
                             .collect();
                         app.drag = Some(Drag::MoveNotes {
                             anchor: index,
@@ -422,10 +428,11 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     }
                     Hit::NoteEdge { index } => {
                         grab(app, index, shift || ctrl);
+                        let notes = notes_of(app, &clip_id);
                         let from = app
                             .selected_notes
                             .iter()
-                            .filter_map(|&i| clip.notes.get(i).map(|n| (i, n.duration)))
+                            .filter_map(|&i| notes.get(i).map(|n| (i, n.duration)))
                             .collect();
                         app.drag = Some(Drag::ResizeNotes { anchor: index, from });
                     }
@@ -454,7 +461,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                             })
                         });
                     }
-                    Hit::Ruler(b) => app.seek(clip.start + b),
+                    Hit::Ruler(b) => app.seek(clip_start + b),
                     Hit::Keys => {}
                 }
             }
@@ -513,12 +520,16 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     }
                     Some(Drag::SelectNotes { beat: b0, row, keep }) => {
                         let mut sel = keep;
-                        sel.extend(editing::in_box(&clip.notes, (b0, beat), (row, row_of(p.y))));
+                        sel.extend(editing::in_box(
+                            notes_of(app, &clip_id),
+                            (b0, beat),
+                            (row, row_of(p.y)),
+                        ));
                         app.selected_notes = sel;
                     }
                     _ => {
                         if p.y < ruler_top + RULER_H {
-                            app.seek(clip.start + beat.max(0.0));
+                            app.seek(clip_start + beat.max(0.0));
                         }
                     }
                 }
@@ -581,7 +592,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
 
         if resp.clicked() {
             if let Some(p) = resp.interact_pointer_pos() {
-                match hit(&clip.notes, p) {
+                match hit(notes_of(app, &clip_id), p) {
                     Hit::NoteBody { index, .. } | Hit::NoteEdge { index } => {
                         app.edit_focus = EditFocus::Notes;
                         if shift || ctrl {
@@ -592,7 +603,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                         } else {
                             app.selected_notes = BTreeSet::from([index]);
                         }
-                        if let Some(n) = clip.notes.get(index) {
+                        if let Some(n) = notes_of(app, &clip_id).get(index) {
                             app.last_note_length = n.duration;
                         }
                     }
@@ -603,14 +614,16 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     Hit::Grid { beat, pitch: p } => {
                         add_note(app, &clip_id, track_index, app.snap_floor(beat).max(0.0), p);
                     }
-                    Hit::Ruler(b) => app.seek(clip.start + b),
+                    Hit::Ruler(b) => app.seek(clip_start + b),
                     Hit::Keys => {}
                 }
             }
         }
         if resp.secondary_clicked() {
             if let Some(p) = resp.interact_pointer_pos() {
-                if let Hit::NoteBody { index, .. } | Hit::NoteEdge { index } = hit(&clip.notes, p) {
+                if let Hit::NoteBody { index, .. } | Hit::NoteEdge { index } =
+                    hit(notes_of(app, &clip_id), p)
+                {
                     remove_note(app, &clip_id, index);
                 }
             }
@@ -624,6 +637,11 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         }
     });
     app.roll_view = Some((shown.state.offset, shown.inner_rect.size()));
+}
+
+/// The notes of clip `clip_id` (none if it went away).
+fn notes_of<'a>(app: &'a App, clip_id: &str) -> &'a [Note] {
+    crate::app::clip_notes(&app.project, clip_id)
 }
 
 fn add_note(

@@ -28,11 +28,17 @@ impl Default for Settings {
     }
 }
 
-fn path() -> Option<PathBuf> {
+/// AIDAW's own folder for settings and the log: `%APPDATA%\AIDAW` on
+/// Windows, `~/.config/AIDAW` elsewhere.
+pub fn dir() -> Option<PathBuf> {
     let base = std::env::var_os("APPDATA")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("AIDAW").join("settings.json"))
+    Some(base.join("AIDAW"))
+}
+
+fn path() -> Option<PathBuf> {
+    Some(dir()?.join("settings.json"))
 }
 
 impl Settings {

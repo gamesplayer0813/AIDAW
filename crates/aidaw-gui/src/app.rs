@@ -7,11 +7,12 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant, SystemTime};
 
 use aidaw_core::edit::{self, Op};
-use aidaw_core::{io as pio, render, Project};
+use aidaw_core::{io as pio, render, Note, Project};
 use aidaw_engine::Engine;
 use eframe::egui::{self, Color32, Key, KeyboardShortcut, Modifiers, Rect, RichText};
 
 use crate::editing::{self, Copied};
+use crate::history::{History, Selection, Version};
 use crate::i18n::{self, tr, trf};
 use crate::icons::{self, Icon};
 use crate::onboarding::{self, Tutorial, WelcomeChoice};
@@ -27,7 +28,8 @@ fn newer_file() -> &'static str {
 
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(400);
-const UNDO_LIMIT: usize = 200;
+/// How often a frame without input (playback) still looks for edits.
+const CHECK_INTERVAL: Duration = Duration::from_millis(250);
 
 pub use crate::theme::track_color;
 
@@ -81,11 +83,10 @@ pub struct App {
     /// When Play was last pressed, to notice a device that never starts.
     play_pressed_at: Option<Instant>,
 
-    undo: Vec<Project>,
-    redo: Vec<Project>,
-    /// Snapshot taken when an edit gesture began; pushed to `undo` when the mouse is released.
-    pending_undo: Option<Project>,
-    /// Undo (false) / redo (true) requested from a menu; applied before the next frame's snapshot.
+    history: History,
+    /// When the song was last looked at for edits (see `commit_edits`).
+    last_check: Instant,
+    /// Undo (false) / redo (true) requested from a menu; applied at the start of the next frame.
     queued_history: Option<bool>,
 
     pub selected_track: Option<String>,
@@ -120,6 +121,10 @@ pub struct App {
     pub status: String,
     /// A WAV export running on a background thread.
     export: Option<ExportJob>,
+    /// Read when a name needs characters the bundled fonts lack.
+    system_font: theme::SystemFont,
+    /// The song changed, so its names are looked at for such characters.
+    check_names: bool,
 
     // ---- beginner help ----
     pub settings: Settings,
@@ -186,6 +191,23 @@ fn starter_project() -> Project {
     p
 }
 
+/// Every name in the song: its own, its tracks' and its clips'.
+fn song_names(p: &Project) -> impl Iterator<Item = &str> {
+    let tracks = p.tracks.iter().flat_map(|t| {
+        std::iter::once(t.name.as_str()).chain(t.clips.iter().map(|c| c.name.as_str()))
+    });
+    std::iter::once(p.name.as_str()).chain(tracks)
+}
+
+fn selection_of(clip: &Option<String>, notes: &BTreeSet<usize>) -> Selection {
+    clip.clone().map(|clip| (clip, notes.clone()))
+}
+
+/// The notes of clip `clip_id` (none if the song has no such clip).
+pub fn clip_notes<'a>(project: &'a Project, clip_id: &str) -> &'a [Note] {
+    project.clip(clip_id).map_or(&[], |(_, c)| &c.notes)
+}
+
 fn mtime(path: &std::path::Path) -> Option<SystemTime> {
     pio::modified(path)
 }
@@ -232,6 +254,8 @@ impl App {
         };
         let mut app = App {
             selected_track: project.tracks.first().map(|t| t.id.clone()),
+            history: History::new(&project),
+            last_check: Instant::now(),
             project,
             disk_mtime: path.as_deref().and_then(mtime),
             newer_on_disk: None,
@@ -245,9 +269,6 @@ impl App {
             show_sound: false,
             device_names: Vec::new(),
             play_pressed_at: None,
-            undo: Vec::new(),
-            redo: Vec::new(),
-            pending_undo: None,
             queued_history: None,
             selected_clip: None,
             selected_notes: BTreeSet::new(),
@@ -268,6 +289,8 @@ impl App {
             last_poll: Instant::now(),
             status,
             export: None,
+            system_font: theme::SystemFont::default(),
+            check_names: true,
             settings,
             show_welcome,
             show_ai_help: false,
@@ -301,10 +324,17 @@ impl App {
         }
     }
 
-    /// Replace the current song (the old one stays on the undo stack).
+    /// Replace the current song. The old one stays on the undo stack unless
+    /// the file changes too: undoing into another file's song would
+    /// autosave that song over the file just opened.
     pub fn load_project(&mut self, project: Project, path: Option<PathBuf>, status: &str) {
-        let old = std::mem::replace(&mut self.project, project);
-        self.push_undo(old);
+        self.settle();
+        let old = self.swap_in(Version::of(project));
+        if path == self.path {
+            self.history.push(old);
+        } else {
+            self.history.clear();
+        }
         self.disk_mtime = path.as_deref().and_then(mtime);
         self.newer_on_disk = None;
         self.path = path;
@@ -312,7 +342,6 @@ impl App {
         self.selected_notes.clear();
         self.edit_focus = EditFocus::Notes;
         self.stop();
-        self.on_project_changed();
         self.save_at = None;
         self.select_first_clip();
         self.status = status.into();
@@ -504,6 +533,7 @@ impl App {
     }
 
     fn on_project_changed(&mut self) {
+        self.check_names = true;
         if let Some(e) = &self.engine {
             e.set_project(&self.project);
         }
@@ -535,46 +565,120 @@ impl App {
         }
     }
 
-    /// After the whole song was swapped (undo, redo, a reload), note indexes
-    /// may point at other notes: keep the selection only if the open clip
-    /// still has as many notes as before.
-    fn keep_selection_if_same(&mut self, before: &Project) {
-        let count = |p: &Project| {
-            self.selected_clip
-                .as_deref()
-                .and_then(|id| p.clip(id))
-                .map(|(_, c)| c.notes.len())
-        };
-        if count(before) != count(&self.project) {
-            self.selected_notes.clear();
+    // ---- undo history --------------------------------------------------
+
+    /// The open clip and its selected notes, to keep with a version.
+    fn selection(&self) -> Selection {
+        selection_of(&self.selected_clip, &self.selected_notes)
+    }
+
+    /// Look at what this frame changed in the song. Only clicks, keys and
+    /// drags edit it, so frames without them (playback, the mouse merely
+    /// passing over) look just every [`CHECK_INTERVAL`].
+    fn commit_edits(&mut self, ctx: &egui::Context) {
+        let (input, held) = ctx.input(|i| {
+            let held = i.pointer.any_down();
+            let moved = |e: &egui::Event| {
+                matches!(e, egui::Event::PointerMoved(_) | egui::Event::MouseMoved(_))
+            };
+            let input =
+                held || i.raw.events.iter().any(|e| !moved(e)) || !i.raw.dropped_files.is_empty();
+            (input, held)
+        });
+        if input || self.last_check.elapsed() >= CHECK_INTERVAL {
+            self.last_check = Instant::now();
+            self.notice_edits();
+        }
+        if !held {
+            self.drag = None; // no drag outlives the mouse button
+            if self.history.in_gesture() {
+                // Notes go back in playing order once the gesture is over
+                // (a drag holds note indexes).
+                self.sort_notes_keeping_selection();
+                self.notice_edits();
+                self.history.end_gesture(&self.project);
+            }
+        }
+        self.history
+            .select(self.selected_clip.as_deref(), &self.selected_notes);
+    }
+
+    /// Keep every clip's notes in playing order, the order the file and the
+    /// AI use, so that an index means the same note everywhere. The
+    /// selection follows its notes.
+    fn sort_notes_keeping_selection(&mut self) {
+        let open = self.selected_clip.as_deref();
+        for clip in self.project.tracks.iter_mut().flat_map(|t| &mut t.clips) {
+            if Some(clip.id.as_str()) == open && !clip.notes_sorted() {
+                let moved = editing::sort_notes(&mut clip.notes);
+                self.selected_notes = editing::moved_selection(&self.selected_notes, &moved);
+            } else {
+                clip.sort_notes();
+            }
         }
     }
 
-    fn push_undo(&mut self, snapshot: Project) {
-        self.undo.push(snapshot);
-        if self.undo.len() > UNDO_LIMIT {
-            self.undo.remove(0);
+    /// Start an undo step if the song changed, and tell the engine and the
+    /// autosave.
+    fn notice_edits(&mut self) {
+        let (clip, notes) = (&self.selected_clip, &self.selected_notes);
+        if self
+            .history
+            .notice(&self.project, || selection_of(clip, notes))
+        {
+            self.on_project_changed();
         }
-        self.redo.clear();
+    }
+
+    /// Make what was edited so far its own undo step, before undo, redo or
+    /// a reload replaces the song.
+    fn settle(&mut self) {
+        self.notice_edits();
+        self.history.end_gesture(&self.project);
+    }
+
+    /// Put `version` in place of the song (undo, redo, a reload) and return
+    /// the version it replaced. Its selection comes back with it when it was
+    /// stored for the open clip; otherwise the selected notes stay selected
+    /// if the new version still has them.
+    fn swap_in(&mut self, version: Version) -> Version {
+        let Version { project, selection } = version;
+        let old = Version {
+            project: std::mem::replace(&mut self.project, project),
+            selection: self.selection(),
+        };
+        if let Some(open) = &self.selected_clip {
+            self.selected_notes = match selection {
+                Some((clip, notes)) if clip == *open => notes,
+                _ => editing::follow_notes(
+                    clip_notes(&old.project, open),
+                    clip_notes(&self.project, open),
+                    &self.selected_notes,
+                ),
+            };
+        }
+        self.drag = None; // it held indexes into the old song
+        self.sort_notes_keeping_selection();
+        self.on_project_changed();
+        self.history.replaced(&self.project, self.selection());
+        old
     }
 
     fn undo(&mut self) {
-        if let Some(prev) = self.undo.pop() {
-            let before = std::mem::replace(&mut self.project, prev);
-            self.keep_selection_if_same(&before);
-            self.redo.push(before);
-            self.on_project_changed();
+        self.settle();
+        if let Some(prev) = self.history.take_undo() {
+            let current = self.swap_in(prev);
+            self.history.undone(current);
             self.ev_undos += 1;
             self.status = tr("Undone (Ctrl+Y to redo)").into();
         }
     }
 
     fn redo(&mut self) {
-        if let Some(next) = self.redo.pop() {
-            let before = std::mem::replace(&mut self.project, next);
-            self.keep_selection_if_same(&before);
-            self.undo.push(before);
-            self.on_project_changed();
+        self.settle();
+        if let Some(next) = self.history.take_redo() {
+            let current = self.swap_in(next);
+            self.history.redone(current);
             self.status = tr("Redone").into();
         }
     }
@@ -594,7 +698,7 @@ impl App {
             match pio::load(&path) {
                 Ok(theirs) => {
                     if theirs != self.project {
-                        self.push_undo(theirs);
+                        self.history.push(Version::of(theirs));
                         self.status = tr(
                             "The AI changed the song while you were editing; kept your version (Ctrl+Z shows the AI's)",
                         )
@@ -640,10 +744,9 @@ impl App {
             self.disk_mtime = Some(m);
             if p != self.project {
                 // Keep the local version on the undo stack so AI edits can be reverted.
-                let local = std::mem::replace(&mut self.project, p);
-                self.keep_selection_if_same(&local);
-                self.push_undo(local);
-                self.on_project_changed();
+                self.settle();
+                let local = self.swap_in(Version::of(p));
+                self.history.push(local);
                 // The file already holds this version; don't write it back.
                 self.save_at = None;
                 if self.selected_clip.is_none() {
@@ -970,7 +1073,10 @@ impl App {
         self.ui_rects.insert("help", help.response.rect);
         // Undo is the beginner's safety net, so it is a real button, not hidden in a menu.
         if ui
-            .add_enabled(!self.undo.is_empty(), icons::button(Icon::Undo, tr("Undo")))
+            .add_enabled(
+                self.history.can_undo(),
+                icons::button(Icon::Undo, tr("Undo")),
+            )
             .on_hover_text(tr(
                 "Take back the last change (Ctrl+Z). Works for AI changes too.",
             ))
@@ -979,7 +1085,10 @@ impl App {
             self.queued_history = Some(false);
         }
         if ui
-            .add_enabled(!self.redo.is_empty(), icons::button(Icon::Redo, tr("Redo")))
+            .add_enabled(
+                self.history.can_redo(),
+                icons::button(Icon::Redo, tr("Redo")),
+            )
             .on_hover_text(tr("Redo (Ctrl+Y)"))
             .clicked()
         {
@@ -1191,7 +1300,10 @@ fn snap_label(s: f64) -> String {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        self.poll_disk();
+        // Not in the middle of a drag, which holds note indexes into the song.
+        if !ctx.input(|i| i.pointer.any_down()) {
+            self.poll_disk();
+        }
         self.poll_export();
         self.check_audio_alive();
         self.shortcuts(ctx);
@@ -1200,7 +1312,6 @@ impl eframe::App for App {
             self.playhead = e.position();
         }
 
-        let frame_start = self.project.clone();
         self.edit_shortcuts(ctx);
 
         self.top_bar(ctx);
@@ -1242,19 +1353,17 @@ impl eframe::App for App {
 
         self.overlays(ctx);
 
-        if self.project != frame_start {
-            if self.pending_undo.is_none() {
-                self.pending_undo = Some(frame_start);
-            }
-            self.on_project_changed();
-        }
-        // Coalesce a whole drag / slider gesture into one undo step.
-        if self.pending_undo.is_some() && !ctx.input(|i| i.pointer.any_down()) {
-            let snap = self.pending_undo.take().unwrap();
-            if snap != self.project {
-                self.push_undo(snap);
-            }
-        }
+        // A whole drag or slider gesture is one undo step.
+        self.commit_edits(ctx);
+        self.system_font.poll(ctx);
+        let names = std::mem::take(&mut self.check_names)
+            .then(|| song_names(&self.project))
+            .into_iter()
+            .flatten();
+        let devices = self.show_sound.then_some(&self.device_names);
+        let devices = devices.into_iter().flatten().map(String::as_str);
+        self.system_font
+            .want_for(ctx, names.chain(devices).chain([self.status.as_str()]));
         // Safety net: never leave a held note ringing after the mouse is released.
         if self.held_key.is_some() && !ctx.input(|i| i.pointer.any_down()) {
             self.release_note();
@@ -1449,7 +1558,7 @@ impl App {
     }
 
     /// Copy, paste, duplicate, delete, nudge and quantize from the keyboard.
-    /// Runs after the frame's undo snapshot, so each of these can be undone.
+    /// Each is one undo step (see `commit_edits`).
     fn edit_shortcuts(&mut self, ctx: &egui::Context) {
         if ctx.wants_keyboard_input() {
             return; // typing in a text box: the keys are its own
