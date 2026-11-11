@@ -516,8 +516,16 @@ impl IEditControllerTrait for SynthController {
     unsafe fn setComponentHandler(&self, _handler: *mut IComponentHandler) -> tresult {
         kResultOk
     }
-    unsafe fn createView(&self, _name: FIDString) -> *mut IPlugView {
-        ptr::null_mut()
+    unsafe fn createView(&self, name: FIDString) -> *mut IPlugView {
+        if name.is_null() || unsafe { CStr::from_ptr(name) } != c"editor" {
+            return ptr::null_mut();
+        }
+        let view = ComWrapper::new(View {
+            size: Mutex::new((300, 200)),
+            frame: Mutex::new(None),
+        });
+        view.to_com_ptr::<IPlugView>()
+            .map_or(ptr::null_mut(), |v| v.into_raw())
     }
 }
 
@@ -550,6 +558,99 @@ impl IConnectionPointTrait for SynthController {
         kResultOk
     }
     unsafe fn notify(&self, _message: *mut IMessage) -> tresult {
+        kResultOk
+    }
+}
+
+// ---- the synth's window -----------------------------------------------------
+
+/// An empty window that, like many plugins, asks for another size once it
+/// is shown (on Windows only).
+struct View {
+    size: Mutex<(i32, i32)>,
+    frame: Mutex<Option<ComPtr<IPlugFrame>>>,
+}
+
+impl Class for View {
+    type Interfaces = (IPlugView,);
+}
+
+impl View {
+    fn rect(&self) -> ViewRect {
+        let (w, h) = self.size.lock().map(|s| *s).unwrap_or((300, 200));
+        ViewRect {
+            left: 0,
+            top: 0,
+            right: w,
+            bottom: h,
+        }
+    }
+}
+
+impl IPlugViewTrait for View {
+    unsafe fn isPlatformTypeSupported(&self, ty: FIDString) -> tresult {
+        if cfg!(windows) && !ty.is_null() && unsafe { CStr::from_ptr(ty) } == c"HWND" {
+            kResultTrue
+        } else {
+            kResultFalse
+        }
+    }
+    unsafe fn attached(&self, parent: *mut c_void, _ty: FIDString) -> tresult {
+        if parent.is_null() {
+            return kInvalidArgument;
+        }
+        if let Ok(mut s) = self.size.lock() {
+            *s = (400, 250);
+        }
+        let frame = self.frame.lock().ok().and_then(|f| f.clone());
+        if let Some(f) = frame {
+            let mut r = self.rect();
+            unsafe { f.resizeView(ptr::null_mut(), &mut r) };
+        }
+        kResultOk
+    }
+    unsafe fn removed(&self) -> tresult {
+        kResultOk
+    }
+    unsafe fn onWheel(&self, _distance: f32) -> tresult {
+        kResultFalse
+    }
+    unsafe fn onKeyDown(&self, _key: char16, _code: int16, _modifiers: int16) -> tresult {
+        kResultFalse
+    }
+    unsafe fn onKeyUp(&self, _key: char16, _code: int16, _modifiers: int16) -> tresult {
+        kResultFalse
+    }
+    unsafe fn getSize(&self, size: *mut ViewRect) -> tresult {
+        if size.is_null() {
+            return kInvalidArgument;
+        }
+        unsafe { *size = self.rect() };
+        kResultOk
+    }
+    unsafe fn onSize(&self, size: *mut ViewRect) -> tresult {
+        if size.is_null() {
+            return kInvalidArgument;
+        }
+        let r = unsafe { *size };
+        if let Ok(mut s) = self.size.lock() {
+            *s = (r.right - r.left, r.bottom - r.top);
+        }
+        kResultOk
+    }
+    unsafe fn onFocus(&self, _state: TBool) -> tresult {
+        kResultOk
+    }
+    unsafe fn setFrame(&self, frame: *mut IPlugFrame) -> tresult {
+        if let Ok(mut f) = self.frame.lock() {
+            *f = unsafe { ComRef::from_raw(frame) }.map(|f| f.to_com_ptr());
+        }
+        kResultOk
+    }
+    unsafe fn canResize(&self) -> tresult {
+        kResultTrue
+    }
+    unsafe fn checkSizeConstraint(&self, _rect: *mut ViewRect) -> tresult {
         kResultOk
     }
 }

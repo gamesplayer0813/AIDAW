@@ -52,6 +52,18 @@ impl Editor {
         #[cfg(windows)]
         self.win.focus();
     }
+
+    /// The size of the window's inside in pixels, while it is open.
+    pub fn size(&self) -> Option<(i32, i32)> {
+        #[cfg(windows)]
+        {
+            self.win.size()
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
 }
 
 /// Whether plugin windows can be shown on this platform.
@@ -370,6 +382,17 @@ mod win {
                     SetForegroundWindow(self.hwnd);
                 }
             }
+        }
+
+        pub fn size(&self) -> Option<(i32, i32)> {
+            let mut r = RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            };
+            (self.is_open() && unsafe { GetClientRect(self.hwnd, &mut r) } != 0)
+                .then(|| (r.right - r.left, r.bottom - r.top))
         }
     }
 

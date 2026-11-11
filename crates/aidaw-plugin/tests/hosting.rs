@@ -399,6 +399,31 @@ fn the_live_rack_keeps_plugins_running_across_edits() {
     assert_eq!(live.slots().count(), 0);
 }
 
+/// The synth's own window opens in a window of AIDAW's, takes the size it
+/// asks for, and goes away again; the effect has no window.
+#[cfg(windows)]
+#[test]
+fn plugin_windows_open_resize_and_close() {
+    use aidaw_plugin::editor::Editor;
+    let locate = |p: &PluginRef| Ok(PathBuf::from(&p.path));
+    let song = song(&bundle());
+    let mut live = LiveRack::new(SR);
+    let _rack = live.build(&song, &locate);
+    let synth = live.slot(&Key::instrument("t1")).unwrap().clone();
+    let editor = Editor::open(synth.clone(), "Keys: AIDAW Test Synth").unwrap();
+    assert!(editor.is_open());
+    assert!(synth.plugin.editor_open.load(Ordering::Acquire));
+    assert_eq!(editor.size(), Some((400, 250)), "the size it asked for");
+    drop(editor);
+    assert!(!synth.plugin.editor_open.load(Ordering::Acquire));
+    let gain = live.slot(&Key::effect("t1", "fx1")).unwrap().clone();
+    let err = Editor::open(gain, "Keys: AIDAW Test Gain").err().unwrap();
+    assert!(
+        format!("{err:#}").contains("no window of its own"),
+        "{err:#}"
+    );
+}
+
 #[test]
 fn plugins_that_fail_are_not_retried_every_edit() {
     let mut song = song(&bundle());
