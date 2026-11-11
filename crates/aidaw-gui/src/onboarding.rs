@@ -593,6 +593,16 @@ pub fn show_shortcuts(ctx: &egui::Context, open: &mut bool) {
                         ("Q", tr("Snap the selected notes (or all) to the grid")),
                         ("Esc", tr("Select nothing")),
                         (tr("Ctrl+mouse wheel"), tr("Zoom the piano roll")),
+                        (tr("Click an automation lane"), tr("Add a point there")),
+                        (
+                            tr("Drag a point"),
+                            tr("Move it (Shift: only up and down, Alt: off the grid)"),
+                        ),
+                        (tr("Right-click a point"), tr("Delete it")),
+                        (
+                            tr("Right-click the line"),
+                            tr("Straight, smooth or steps; clear or remove the lane"),
+                        ),
                     ] {
                         ui.label(RichText::new(keys).monospace().strong());
                         ui.label(what);

@@ -991,6 +991,60 @@ fn zh(en: &str) -> Option<&'static str> {
         "Ctrl+mouse wheel" => "Ctrl + 鼠标滚轮",
         "Zoom the piano roll" => "缩放钢琴卷帘",
 
+        // ---- automation lanes ----
+        "Master" => "总线",
+        "Unknown" => "未知",
+        "The whole song's automation is hidden: click the line icon" => {
+            "整首歌的自动化包络藏起来了，点左边的折线图标就能看到哦～"
+        }
+        "Automate the whole song: master volume, reverb room" => {
+            "给整首歌做自动化：总音量、混响房间（点左边的折线图标）"
+        }
+        "Remove this lane (Ctrl+Z brings it back)" => "删掉这条包络道（Ctrl+Z 能找回来）",
+        "Automate…" => "自动化…",
+        "Make a setting move over time:" => "让哪个参数随时间变化？",
+        "Add a lane: a line that moves volume, pan or the sound over time" => {
+            "添加包络道：用一条线让音量、声像或音色随时间变化"
+        }
+        "Hide the automation lanes" => "收起自动化包络道",
+        "Show the automation lanes (this has some)" => "展开自动化包络道（这里面有东西哦）",
+        "Show automation: lines that move volume, pan or the sound over time" => {
+            "显示自动化：让音量、声像或音色随时间变化的折线"
+        }
+        "Deleted the point (Ctrl+Z brings it back)" => "删掉了这个点（Ctrl+Z 能找回来）",
+        "Automated: this follows its line in the song view. Clear or remove the lane to set it here." => {
+            "这个参数已经被自动化包络接管啦，它跟着歌曲视图里的那条线走。想在这里手动调？先把那条包络清空或删掉嘛，笨蛋～"
+        }
+        "Fade in and out, or make parts louder and softer" => "淡入淡出，或者让某些段落更响、更轻",
+        "Move the sound between the left and right speaker" => "让声音在左右扬声器之间移动",
+        "More or less echo as the song goes on" => "随着歌曲推进，回声变多或变少",
+        "The classic filter sweep: dark and muffled to bright and open" => {
+            "经典的滤波扫频：从又闷又暗一路扫到明亮通透"
+        }
+        "Volume of the whole song: fade it in or out" => "整首歌的音量：全曲淡入或淡出",
+        "Click to add points; the line moves this setting over time" => {
+            "点一下就能加点，这条线会带着参数随时间走～这么简单，杂鱼也会吧？"
+        }
+        "not used by drums" => "鼓组用不上这个",
+        "From this point to the next:" => "从这个点到下一个点：",
+        "Straight line" => "直线",
+        "Smooth curve" => "平滑曲线",
+        "Steps: stay, then jump" => "阶梯：先保持不动，到下一个点再跳",
+        "Clear the points" => "清空所有点",
+        "The setting goes back to its slider value" => "参数会回到滑块上的值",
+        "Remove this lane" => "删除这条包络道",
+        "Click an automation lane" => "点击自动化包络道",
+        "Add a point there" => "在那里加一个点",
+        "Drag a point" => "拖动一个点",
+        "Move it (Shift: only up and down, Alt: off the grid)" => {
+            "移动它（Shift：只上下移动，Alt：不吸附网格）"
+        }
+        "Right-click a point" => "右键点击一个点",
+        "Right-click the line" => "右键点击折线",
+        "Straight, smooth or steps; clear or remove the lane" => {
+            "改成直线、平滑或阶梯；清空或删除包络道"
+        }
+
         _ => return None,
     })
 }
@@ -1052,6 +1106,9 @@ mod tests {
         }
         for w in aidaw_core::Waveform::ALL {
             texts.push(w.label().to_string());
+        }
+        for p in aidaw_core::Param::ALL {
+            texts.push(p.info().label.to_string());
         }
         for p in aidaw_core::presets::all() {
             texts.push(p.name.to_string());

@@ -2,6 +2,7 @@
 //! instruments and the renderer shared by real-time playback and export.
 
 pub mod analysis;
+pub mod automation;
 pub mod color;
 pub mod edit;
 pub mod io;
@@ -13,6 +14,7 @@ pub mod render;
 pub mod transform;
 pub mod transport;
 
+pub use automation::{Lane, Param, Point, Shape};
 pub use model::{
     Clip, DrumKit, Instrument, Note, Project, Reverb, Synth, TimeSignature, Track, Waveform,
 };
@@ -293,6 +295,93 @@ mod tests {
             }
         )
         .is_err());
+    }
+
+    #[test]
+    fn automation_ops_write_clear_and_refuse_what_cannot_work() {
+        let mut p = demo();
+        apply_all(
+            &mut p,
+            ops(json!([
+                {"op": "set_automation", "track_id": "t1", "param": "cutoff",
+                 "points": [{"beat": 4, "value": 8000}, {"beat": 0, "value": 300, "shape": "smooth"}]},
+                {"op": "set_automation", "track_id": "t2", "param": "volume",
+                 "points": [{"beat": 0, "value": 5.0}]},
+                {"op": "set_automation", "param": "master_volume",
+                 "points": [{"beat": 0, "value": 0}, {"beat": 8, "value": 1}]}
+            ])),
+        )
+        .unwrap();
+        let cutoff = p.tracks[0].lane(Param::Cutoff).unwrap();
+        assert_eq!(cutoff.points.len(), 2);
+        assert_eq!(cutoff.points[0].shape, Shape::Smooth);
+        assert_eq!(
+            p.tracks[1].automated(Param::Volume, 1.0),
+            Some(2.0),
+            "clamped"
+        );
+        assert_eq!(p.automated(Param::MasterVolume, 8.0), Some(1.0));
+
+        // Writing over a span replaces only what was there.
+        edit::apply(
+            &mut p,
+            Op::SetAutomation {
+                track_id: Some("t1".into()),
+                param: Param::Cutoff,
+                points: vec![Point::new(2.0, 1000.0)],
+            },
+        )
+        .unwrap();
+        assert_eq!(p.tracks[0].lane(Param::Cutoff).unwrap().points.len(), 3);
+
+        // Things that cannot work change nothing.
+        let before = p.clone();
+        for bad in [
+            json!({"op": "set_automation", "track_id": "t2", "param": "cutoff", "points": [{"beat": 0, "value": 1}]}),
+            json!({"op": "set_automation", "track_id": "t1", "param": "reverb_size", "points": [{"beat": 0, "value": 1}]}),
+            json!({"op": "set_automation", "param": "pan", "points": [{"beat": 0, "value": 1}]}),
+            json!({"op": "set_automation", "track_id": "t1", "param": "pan", "points": [{"beat": -1, "value": 1}]}),
+            json!({"op": "set_automation", "track_id": "t1", "param": "pan", "points": []}),
+            json!({"op": "set_automation", "track_id": "t9", "param": "pan", "points": [{"beat": 0, "value": 1}]}),
+        ] {
+            assert!(
+                edit::apply(&mut p, serde_json::from_value(bad.clone()).unwrap()).is_err(),
+                "{bad}"
+            );
+            assert_eq!(p, before, "{bad}");
+        }
+        let nan = edit::apply(
+            &mut p,
+            Op::SetAutomation {
+                track_id: Some("t1".into()),
+                param: Param::Pan,
+                points: vec![Point::new(0.0, f32::NAN)],
+            },
+        );
+        assert!(nan.is_err());
+        assert_eq!(p, before);
+
+        // Clearing a stretch, a lane, everything.
+        let r = apply_all(
+            &mut p,
+            ops(json!([{"op": "clear_automation", "track_id": "t1", "param": "cutoff", "from": 1, "to": 3}])),
+        )
+        .unwrap();
+        assert_eq!(r[0]["removed"], 1);
+        assert_eq!(p.tracks[0].lane(Param::Cutoff).unwrap().points.len(), 2);
+        apply_all(
+            &mut p,
+            ops(json!([{"op": "clear_automation", "track_id": "t1"}])),
+        )
+        .unwrap();
+        assert!(p.tracks[0].automation.is_empty());
+        apply_all(
+            &mut p,
+            ops(json!([{"op": "clear_automation", "param": "master_volume"}])),
+        )
+        .unwrap();
+        assert!(p.automation.is_empty());
+        assert_eq!(p.tracks[1].automation.len(), 1, "other tracks keep theirs");
     }
 
     #[test]

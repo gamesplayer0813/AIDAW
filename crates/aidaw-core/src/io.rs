@@ -44,8 +44,8 @@ pub fn load(path: &Path) -> Result<Project> {
 }
 
 /// Parse a project from JSON in any format version this build knows,
-/// upgrading older ones to [`FORMAT_VERSION`]. Notes come out in playing
-/// order (see [`crate::Clip::sort_notes`]).
+/// upgrading older ones to [`FORMAT_VERSION`]. Notes and automation points
+/// come out in playing order (see [`crate::Clip::sort_notes`]).
 pub fn from_json(text: &str) -> Result<Project> {
     /// Just the version; every other field is skipped unparsed.
     #[derive(Deserialize)]
@@ -76,6 +76,7 @@ pub fn from_json(text: &str) -> Result<Project> {
 fn normalized(mut project: Project) -> Project {
     project.version = FORMAT_VERSION;
     project.sort_notes();
+    project.sort_automation();
     project
 }
 
@@ -202,6 +203,26 @@ mod tests {
             .map(|n: &Note| (n.start, n.pitch))
             .collect();
         assert_eq!(notes, vec![(0.0, 36), (0.0, 38), (2.0, 42)]);
+    }
+
+    #[test]
+    fn automation_points_load_in_time_order() {
+        let text = r#"{"name": "x", "bpm": 100,
+            "tracks": [{"id": "t1", "name": "A", "instrument": {"type": "drums"},
+                "automation": [{"param": "pan", "points": [{"beat": 8, "value": 1},
+                    {"beat": 0, "value": -1}, {"beat": 4, "value": 0.5}, {"beat": 4, "value": -0.5}]}]}],
+            "automation": [{"param": "master_volume", "points": [{"beat": 16, "value": 0},
+                {"beat": 12, "value": 1}]}]}"#;
+        let p = from_json(text).unwrap();
+        let points = |l: &crate::Lane| -> Vec<(f64, f32)> {
+            l.points.iter().map(|pt| (pt.beat, pt.value)).collect()
+        };
+        // Two points on beat 4 are a jump: their order is kept.
+        assert_eq!(
+            points(&p.tracks[0].automation[0]),
+            vec![(0.0, -1.0), (4.0, 0.5), (4.0, -0.5), (8.0, 1.0)]
+        );
+        assert_eq!(points(&p.automation[0]), vec![(12.0, 1.0), (16.0, 0.0)]);
     }
 
     #[test]

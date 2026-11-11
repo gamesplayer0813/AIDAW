@@ -2,8 +2,8 @@
 //! track's sound, chosen from friendly presets with the raw knobs tucked away.
 
 use aidaw_core::edit::Op;
-use aidaw_core::{DrumKit, Instrument, Waveform};
-use eframe::egui::{self, RichText};
+use aidaw_core::{DrumKit, Instrument, Param, Waveform};
+use eframe::egui::{self, RichText, SliderClamping};
 
 use crate::app::{track_color, App};
 use crate::i18n::{tr, trf};
@@ -11,8 +11,31 @@ use crate::icons::{self, Icon};
 use crate::theme;
 use aidaw_core::presets::{self, Category, Preset};
 
+/// A slider for a setting automation can move. While the setting has
+/// points it shows the value at the playhead and can't be dragged (the lane
+/// in the song view decides). Values outside the slider's range that the AI
+/// set are kept as they are until the slider is moved.
+fn knob(
+    ui: &mut egui::Ui,
+    value: &mut f32,
+    automated: Option<f32>,
+    make: impl for<'a> FnOnce(&'a mut f32) -> egui::Slider<'a>,
+) -> egui::Response {
+    match automated {
+        None => ui.add(make(value).clamping(SliderClamping::Edits)),
+        Some(v) => {
+            let mut shown = v;
+            ui.add_enabled(false, make(&mut shown).clamping(SliderClamping::Edits))
+                .on_disabled_hover_text(tr(
+                    "Automated: this follows its line in the song view. Clear or remove the lane to set it here.",
+                ))
+        }
+    }
+}
+
 pub fn show(ui: &mut egui::Ui, app: &mut App) {
     app.ui_rects.insert("inspector", ui.max_rect());
+    let playhead = app.playhead;
     let pro = app.pro();
     ui.horizontal(|ui| {
         theme::section(ui, if pro { tr("Tracks") } else { tr("Instruments") });
@@ -49,6 +72,8 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             let mut remove = None;
             let mut preview = None;
             for (i, track) in app.project.tracks.iter_mut().enumerate() {
+                let auto_gain = track.automated(Param::Volume, playhead);
+                let auto_pan = track.automated(Param::Pan, playhead);
                 let selected = app.selected_track.as_deref() == Some(track.id.as_str());
                 let color = track_color(track);
                 let (fill, stroke) = if selected {
@@ -106,20 +131,23 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                         let volume = |ui: &mut egui::Ui, gain: &mut f32| {
                             icons::label(ui, Icon::Volume).on_hover_text(tr("Volume"));
                             ui.spacing_mut().slider_width = slider;
-                            ui.add(egui::Slider::new(gain, 0.0..=1.5).show_value(true))
-                                .on_hover_text(tr(
-                                    "Volume: how loud this track is (1.0 = unchanged)",
-                                ));
+                            knob(ui, gain, auto_gain, |v| {
+                                egui::Slider::new(v, 0.0..=1.5).show_value(true)
+                            })
+                            .on_hover_text(tr("Volume: how loud this track is (1.0 = unchanged)"));
                         };
                         let pan = |ui: &mut egui::Ui, pan: &mut f32| {
                             ui.label(tr("L/R")).on_hover_text(tr("Pan"));
                             ui.spacing_mut().slider_width = slider;
-                            ui.add(egui::Slider::new(pan, -1.0..=1.0).show_value(true))
-                                .on_hover_text(tr(
-                                    "Pan: move the sound to the left or right speaker",
-                                ));
+                            knob(ui, pan, auto_pan, |v| {
+                                egui::Slider::new(v, -1.0..=1.0).show_value(true)
+                            })
+                            .on_hover_text(tr("Pan: move the sound to the left or right speaker"));
                             if ui
-                                .small_button(tr("mid"))
+                                .add_enabled(
+                                    auto_pan.is_none(),
+                                    egui::Button::new(tr("mid")).small(),
+                                )
                                 .on_hover_text(tr("Centre the pan"))
                                 .clicked()
                             {
@@ -139,8 +167,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                         ui.horizontal(|ui| {
                             icons::label(ui, Icon::Volume).on_hover_text(tr("Volume"));
                             ui.spacing_mut().slider_width = ui.available_width() - 8.0;
-                            ui.add(egui::Slider::new(&mut track.gain, 0.0..=1.5).show_value(false))
-                                .on_hover_text(tr("How loud this instrument is"));
+                            knob(ui, &mut track.gain, auto_gain, |v| {
+                                egui::Slider::new(v, 0.0..=1.5).show_value(false)
+                            })
+                            .on_hover_text(tr("How loud this instrument is"));
                         });
                     }
                 });
@@ -165,23 +195,35 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
 
     ui.separator();
     if pro {
+        let auto = |p: Param| app.project.automated(p, playhead);
+        let (auto_master, auto_size, auto_tone) = (
+            auto(Param::MasterVolume),
+            auto(Param::ReverbSize),
+            auto(Param::ReverbTone),
+        );
         ui.horizontal(|ui| {
             ui.label(tr("Master volume"))
                 .on_hover_text(tr("Volume of the whole song"));
             ui.spacing_mut().slider_width = (ui.available_width() - 70.0).clamp(40.0, 140.0);
-            ui.add(egui::Slider::new(&mut app.project.master_gain, 0.0..=1.5).show_value(true));
+            knob(ui, &mut app.project.master_gain, auto_master, |v| {
+                egui::Slider::new(v, 0.0..=1.5).show_value(true)
+            });
         });
         ui.horizontal(|ui| {
             ui.label(tr("Reverb room"))
                 .on_hover_text(tr("Size of the shared reverb: small room .. big hall"));
             ui.spacing_mut().slider_width = (ui.available_width() - 70.0).clamp(40.0, 140.0);
-            ui.add(egui::Slider::new(&mut app.project.reverb.size, 0.0..=1.0).fixed_decimals(2));
+            knob(ui, &mut app.project.reverb.size, auto_size, |v| {
+                egui::Slider::new(v, 0.0..=1.0).fixed_decimals(2)
+            });
         });
         ui.horizontal(|ui| {
             ui.label(tr("Reverb tone"))
                 .on_hover_text(tr("Dark, soft echoes .. bright, airy ones"));
             ui.spacing_mut().slider_width = (ui.available_width() - 70.0).clamp(40.0, 140.0);
-            ui.add(egui::Slider::new(&mut app.project.reverb.tone, 0.0..=1.0).fixed_decimals(2));
+            knob(ui, &mut app.project.reverb.tone, auto_tone, |v| {
+                egui::Slider::new(v, 0.0..=1.0).fixed_decimals(2)
+            });
         });
         ui.separator();
     }
@@ -204,6 +246,19 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
         return;
     };
 
+    let playhead = app.playhead;
+    let auto = |p: Param| app.project.tracks[index].automated(p, playhead);
+    let auto_reverb = auto(Param::Reverb);
+    let [a_cutoff, a_resonance, a_drive, a_fm, a_vibrato, a_sub, a_noise] = [
+        Param::Cutoff,
+        Param::Resonance,
+        Param::Drive,
+        Param::Fm,
+        Param::Vibrato,
+        Param::Sub,
+        Param::Noise,
+    ]
+    .map(auto);
     let sound = ui.scope(|ui| {
         theme::section(ui, tr("Sound"));
         let track = &mut app.project.tracks[index];
@@ -222,11 +277,11 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
             ));
             ui.spacing_mut().slider_width =
                 (ui.available_width() - if pro { 70.0 } else { 8.0 }).clamp(40.0, 200.0);
-            ui.add(
-                egui::Slider::new(&mut track.reverb, 0.0..=1.0)
+            knob(ui, &mut track.reverb, auto_reverb, |v| {
+                egui::Slider::new(v, 0.0..=1.0)
                     .show_value(pro)
-                    .fixed_decimals(2),
-            );
+                    .fixed_decimals(2)
+            });
         });
         let current = presets::name_of(&track.instrument).map_or(tr("⚙ Custom"), tr);
         let mut picked = false;
@@ -325,10 +380,22 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
                 return;
             }
             let slider = |ui: &mut egui::Ui, v: &mut f32, r: std::ops::RangeInclusive<f32>| {
-                ui.add(egui::Slider::new(v, r));
+                ui.add(egui::Slider::new(v, r).clamping(SliderClamping::Edits));
+            };
+            // The same for a setting automation can move.
+            let moving = |ui: &mut egui::Ui,
+                          v: &mut f32,
+                          r: std::ops::RangeInclusive<f32>,
+                          auto: Option<f32>| {
+                knob(ui, v, auto, |v| egui::Slider::new(v, r));
             };
             let seconds = |ui: &mut egui::Ui, v: &mut f32, r: std::ops::RangeInclusive<f32>| {
-                ui.add(egui::Slider::new(v, r).logarithmic(true).suffix(" s"));
+                ui.add(
+                    egui::Slider::new(v, r)
+                        .logarithmic(true)
+                        .suffix(" s")
+                        .clamping(SliderClamping::Edits),
+                );
             };
             egui::CollapsingHeader::new(tr("⚙ Fine-tune the sound"))
                 .default_open(true)
@@ -366,11 +433,11 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
                         ui.end_row();
                         ui.label(tr("Brightness"))
                             .on_hover_text(tr("Filter cutoff: lower = darker, softer"));
-                        ui.add(
-                            egui::Slider::new(&mut synth.cutoff, 40.0..=20_000.0)
+                        knob(ui, &mut synth.cutoff, a_cutoff, |v| {
+                            egui::Slider::new(v, 40.0..=20_000.0)
                                 .logarithmic(true)
-                                .suffix(" Hz"),
-                        );
+                                .suffix(" Hz")
+                        });
                         ui.end_row();
                     });
                 });
@@ -383,7 +450,7 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
                         ui.label(tr("Resonance")).on_hover_text(tr(
                             "A whistling peak at the brightness point (acid, wah)",
                         ));
-                        slider(ui, &mut synth.resonance, 0.0..=1.0);
+                        moving(ui, &mut synth.resonance, 0.0..=1.0, a_resonance);
                         ui.end_row();
                         ui.label(tr("Filter sweep")).on_hover_text(tr(
                             "How much brighter each note starts, in octaves (plucks, brass)",
@@ -417,16 +484,16 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
                         ui.end_row();
                         ui.label(tr("Sub"))
                             .on_hover_text(tr("Add a sine one octave lower: more weight"));
-                        slider(ui, &mut synth.sub, 0.0..=1.0);
+                        moving(ui, &mut synth.sub, 0.0..=1.0, a_sub);
                         ui.end_row();
                         ui.label(tr("Noise"))
                             .on_hover_text(tr("Mix in hiss: breath, air, grit"));
-                        slider(ui, &mut synth.noise, 0.0..=1.0);
+                        moving(ui, &mut synth.noise, 0.0..=1.0, a_noise);
                         ui.end_row();
                         ui.label(tr("FM")).on_hover_text(tr(
                             "Bell / electric-piano tone (sine and triangle waves)",
                         ));
-                        slider(ui, &mut synth.fm, 0.0..=10.0);
+                        moving(ui, &mut synth.fm, 0.0..=10.0, a_fm);
                         ui.end_row();
                         ui.label(tr("FM ratio"))
                             .on_hover_text(tr("1 = warm, 2 = hollow, 3.5+ = metallic bell"));
@@ -438,11 +505,13 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
                         ui.end_row();
                         ui.label(tr("Vibrato"))
                             .on_hover_text(tr("Wobble in the pitch, in cents"));
-                        slider(ui, &mut synth.vibrato, 0.0..=100.0);
+                        moving(ui, &mut synth.vibrato, 0.0..=100.0, a_vibrato);
                         ui.end_row();
                         ui.label(tr("Vibrato speed"));
                         ui.add(
-                            egui::Slider::new(&mut synth.vibrato_rate, 0.1..=12.0).suffix(" Hz"),
+                            egui::Slider::new(&mut synth.vibrato_rate, 0.1..=12.0)
+                                .suffix(" Hz")
+                                .clamping(SliderClamping::Edits),
                         );
                         ui.end_row();
                         ui.label(tr("Pitch drop")).on_hover_text(tr(
@@ -455,7 +524,7 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
                         ui.end_row();
                         ui.label(tr("Drive"))
                             .on_hover_text(tr("Warmth at low values, distortion at high ones"));
-                        slider(ui, &mut synth.drive, 0.0..=1.0);
+                        moving(ui, &mut synth.drive, 0.0..=1.0, a_drive);
                         ui.end_row();
                     });
                 });

@@ -7,6 +7,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::automation::{self, Lane, Param};
 use crate::pitch;
 use crate::transport::Transport;
 
@@ -41,6 +42,10 @@ pub struct Project {
     pub transport: Transport,
     #[serde(default)]
     pub tracks: Vec<Track>,
+    /// Automation of the whole song: master volume and the reverb room
+    /// (see [`automation`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub automation: Vec<Lane>,
 }
 
 /// Settings of the shared reverb: one "room" every track can send to.
@@ -165,6 +170,26 @@ pub struct Track {
     pub color: Option<String>,
     #[serde(default)]
     pub clips: Vec<Clip>,
+    /// Settings of this track that move over time: volume, pan, reverb and,
+    /// on synths, the sound (see [`automation`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub automation: Vec<Lane>,
+}
+
+impl Track {
+    /// The lane for `param`, even if it has no points yet.
+    pub fn lane(&self, param: Param) -> Option<&Lane> {
+        self.automation.iter().find(|l| l.param == param)
+    }
+
+    pub fn lane_mut(&mut self, param: Param) -> Option<&mut Lane> {
+        self.automation.iter_mut().find(|l| l.param == param)
+    }
+
+    /// The value automation gives `param` at `beat`, if it has points.
+    pub fn automated(&self, param: Param, beat: f64) -> Option<f32> {
+        automation::value(&self.automation, param, beat)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -446,6 +471,7 @@ impl Project {
             reverb: Reverb::default(),
             transport: Transport::default(),
             tracks: Vec::new(),
+            automation: Vec::new(),
         }
     }
 
@@ -480,12 +506,35 @@ impl Project {
         }
     }
 
+    /// Put every automation lane's points in time order (a file edited by
+    /// hand may not have them so); points on the same beat keep their order.
+    pub fn sort_automation(&mut self) {
+        let tracks = self.tracks.iter_mut().flat_map(|t| t.automation.iter_mut());
+        for lane in self.automation.iter_mut().chain(tracks) {
+            automation::sort(&mut lane.points);
+        }
+    }
+
     /// Whether every clip's notes are in playing order.
     pub fn notes_sorted(&self) -> bool {
         self.tracks
             .iter()
             .flat_map(|t| t.clips.iter())
             .all(Clip::notes_sorted)
+    }
+
+    /// The master lane for `param`, even if it has no points yet.
+    pub fn lane(&self, param: Param) -> Option<&Lane> {
+        self.automation.iter().find(|l| l.param == param)
+    }
+
+    pub fn lane_mut(&mut self, param: Param) -> Option<&mut Lane> {
+        self.automation.iter_mut().find(|l| l.param == param)
+    }
+
+    /// The value master automation gives `param` at `beat`, if it has points.
+    pub fn automated(&self, param: Param, beat: f64) -> Option<f32> {
+        automation::value(&self.automation, param, beat)
     }
 
     pub fn seconds_per_beat(&self) -> f64 {
@@ -706,6 +755,39 @@ mod tests {
         assert!(
             serde_json::from_str::<Project>(r#"{"name":"x","bpm":90,"time_signature":"7/8"}"#)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn automation_is_left_out_until_there_is_some() {
+        let json = r#"{"version":1,"name":"x","bpm":120.0,"beats_per_bar":4,"master_gain":0.8,"tracks":[{"id":"t1","name":"A","instrument":{"type":"drums"},"gain":0.8,"pan":0.0,"mute":false,"solo":false,"clips":[]}]}"#;
+        let mut p: Project = serde_json::from_str(json).unwrap();
+        assert!(p.automation.is_empty() && p.tracks[0].automation.is_empty());
+        assert_eq!(serde_json::to_string(&p).unwrap(), json);
+
+        p.tracks[0].automation.push(Lane {
+            param: Param::Pan,
+            points: vec![automation::Point::new(0.0, -1.0)],
+        });
+        p.automation.push(Lane::new(Param::MasterVolume));
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(
+            s.contains(
+                r#""clips":[],"automation":[{"param":"pan","points":[{"beat":0.0,"value":-1.0}]}]"#
+            ),
+            "{s}"
+        );
+        assert!(
+            s.ends_with(r#""automation":[{"param":"master_volume","points":[]}]}"#),
+            "{s}"
+        );
+        let q: Project = serde_json::from_str(&s).unwrap();
+        assert_eq!(q, p);
+        assert_eq!(q.tracks[0].automated(Param::Pan, 3.0), Some(-1.0));
+        assert_eq!(
+            q.automated(Param::MasterVolume, 0.0),
+            None,
+            "an empty lane does nothing"
         );
     }
 
