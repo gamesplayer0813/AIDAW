@@ -21,7 +21,22 @@ use serde_json::{json, Map, Value};
 
 use session::Session;
 
-const PROTOCOL_VERSION: &str = "2025-06-18";
+/// MCP protocol versions this server speaks, newest first. They all share
+/// the `initialize` handshake and the tool methods served here; a client
+/// that also knows the handshake-free versions (2026-07-28 on) falls back
+/// to `initialize` when `server/discover` is answered "method not found".
+const PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// The version to answer `initialize` with: the one the client asked for
+/// when we speak it, else our newest, and the client decides whether to go
+/// on (the MCP lifecycle rule). Echoing an unknown version would claim
+/// support we don't have.
+fn negotiate(requested: Option<&str>) -> &'static str {
+    PROTOCOL_VERSIONS
+        .iter()
+        .find(|v| Some(**v) == requested)
+        .unwrap_or(&PROTOCOL_VERSIONS[0])
+}
 
 const USAGE: &str = "\
 usage:
@@ -146,6 +161,20 @@ fn serve(mut session: Session) -> Result<()> {
             continue;
         }
         let response = match serde_json::from_str::<Value>(&line) {
+            Ok(Value::Array(batch)) if batch.is_empty() => Some(error_response(
+                Value::Null,
+                -32600,
+                "invalid request: empty batch",
+            )),
+            // A JSON-RPC batch (MCP 2025-03-26): one array with the answers
+            // to its requests, nothing when it held only notifications.
+            Ok(Value::Array(batch)) => {
+                let replies: Vec<Value> = batch
+                    .into_iter()
+                    .filter_map(|msg| handle(&mut session, msg))
+                    .collect();
+                (!replies.is_empty()).then_some(Value::Array(replies))
+            }
             Ok(msg) => handle(&mut session, msg),
             Err(e) => Some(error_response(
                 Value::Null,
@@ -183,17 +212,20 @@ fn error_response(id: Value, code: i64, message: &str) -> Value {
 }
 
 fn handle(session: &mut Session, msg: Value) -> Option<Value> {
+    if !msg.is_object() {
+        return Some(error_response(
+            Value::Null,
+            -32600,
+            "invalid request: expected a JSON-RPC object",
+        ));
+    }
     // Notifications (no id) never get a response.
     let id = msg.get("id")?.clone();
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
     let result = match method {
         "initialize" => {
-            let version = params
-                .get("protocolVersion")
-                .and_then(Value::as_str)
-                .unwrap_or(PROTOCOL_VERSION)
-                .to_string();
+            let version = negotiate(params.get("protocolVersion").and_then(Value::as_str));
             json!({
                 "protocolVersion": version,
                 "capabilities": {"tools": {}},
@@ -228,4 +260,19 @@ fn handle(session: &mut Session, msg: Value) -> Option<Value> {
         }
     };
     Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_versions_are_echoed_and_unknown_ones_get_the_newest() {
+        for v in PROTOCOL_VERSIONS {
+            assert_eq!(negotiate(Some(v)), *v);
+        }
+        assert_eq!(negotiate(Some("2099-01-01")), PROTOCOL_VERSIONS[0]);
+        assert_eq!(negotiate(Some("")), PROTOCOL_VERSIONS[0]);
+        assert_eq!(negotiate(None), PROTOCOL_VERSIONS[0]);
+    }
 }

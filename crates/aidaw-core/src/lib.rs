@@ -11,7 +11,9 @@ pub mod presets;
 pub mod render;
 pub mod transform;
 
-pub use model::{Clip, DrumKit, Instrument, Note, Project, Reverb, Synth, Track, Waveform};
+pub use model::{
+    Clip, DrumKit, Instrument, Note, Project, Reverb, Synth, TimeSignature, Track, Waveform,
+};
 
 #[cfg(test)]
 mod tests {

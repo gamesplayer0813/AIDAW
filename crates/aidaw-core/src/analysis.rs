@@ -127,6 +127,7 @@ struct Measured {
 /// Render `project` block by block and measure it; `detail` adds the band
 /// balance and the sections.
 fn measure(project: &Project, detail: bool) -> Measured {
+    let project = &*render::playable(project);
     let sr = SAMPLE_RATE as f64;
     let song_seconds = project.length_beats() * project.seconds_per_beat();
     let total = ((song_seconds + render::tail_seconds(project)) * sr) as usize;

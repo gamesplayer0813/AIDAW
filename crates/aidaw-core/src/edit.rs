@@ -6,7 +6,7 @@ use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::model::{Clip, Instrument, Note, Project, Track};
+use crate::model::{Clip, Instrument, Note, Project, TimeSignature, Track};
 use crate::transform;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -15,7 +15,10 @@ pub enum Op {
     UpdateProject {
         name: Option<String>,
         bpm: Option<f64>,
+        /// Bar length in beats (quarter notes).
         beats_per_bar: Option<u32>,
+        /// Meter such as "6/8"; sets `beats_per_bar` to match (6/8 -> 3).
+        time_signature: Option<TimeSignature>,
         master_gain: Option<f32>,
         /// Shared reverb room size 0..1 (small room .. big hall).
         reverb_size: Option<f32>,
@@ -178,8 +181,7 @@ fn clips_mut<'a>(project: &'a mut Project, ids: &[String]) -> Result<Vec<&'a mut
 }
 
 fn sort_notes(clip: &mut Clip) {
-    clip.notes
-        .sort_by(|a, b| a.start.total_cmp(&b.start).then(a.pitch.cmp(&b.pitch)));
+    clip.sort_notes();
 }
 
 /// Apply one operation. Returns a small JSON result (e.g. the id of a created object).
@@ -189,6 +191,7 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
             name,
             bpm,
             beats_per_bar,
+            time_signature,
             master_gain,
             reverb_size,
             reverb_tone,
@@ -204,8 +207,25 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
                 }
                 project.bpm = v;
             }
-            if let Some(v) = beats_per_bar {
+            if let Some(ts) = time_signature {
+                let beats = ts.beats_per_bar();
+                if beats.is_none() || beats_per_bar.is_some_and(|b| Some(b) != beats) {
+                    bail!(
+                        "time_signature {ts} makes bars {} beats long; give either time_signature or a matching beats_per_bar",
+                        f64::from(ts.num) * 4.0 / f64::from(ts.den)
+                    );
+                }
+                project.set_time_signature(ts);
+            } else if let Some(v) = beats_per_bar {
                 project.beats_per_bar = v.clamp(1, 32);
+                // A meter that no longer fits the bar length is dropped.
+                if project
+                    .time_signature
+                    .and_then(TimeSignature::beats_per_bar)
+                    != Some(project.beats_per_bar)
+                {
+                    project.time_signature = None;
+                }
             }
             if let Some(v) = master_gain {
                 project.master_gain = v.clamp(0.0, 2.0);

@@ -21,6 +21,8 @@ full cheat sheet.";
 pub const GUIDE: &str = r#"AIDAW cheat sheet
 =================
 TIME   Beats (1 = quarter note). 4/4 => 4 beats per bar. bar 1 = beat 0, bar 2 = beat 4, bar 5 = beat 16.
+       Other meters: update_project {"time_signature": "3/4"} (3 beats), "6/8" (3 beats = six eighths),
+       "12/8" (6 beats). Bars must last a whole number of beats, so 7/8 and 5/8 are not possible.
        Clip positions are absolute; note starts are relative to their clip.
 PITCH  "C4" = 60 = middle C. Sharps "F#3", flats "Bb2". Bass lives around C2, chords around C4, melody C4-C6.
 NAMES  Tracks/clips can be given by name or id: {"track": "Bass"} or {"track": "t1"}.
@@ -61,7 +63,8 @@ NOTATIONS
            style: block (held), arpeggio (eighth notes), pulse (every beat). octave: 4 = around middle C.
   melody   "PITCH/BEATS" tokens: "C4/1 D4/0.5 E4/0.5 r/1 G4/2". r = rest. "C4+E4+G4/2" = chord.
            Duration may be omitted (repeats the previous one). "@80" sets velocity: "C4/1@80".
-  drums    16 steps per bar (sixteenth notes): x = hit, X = accent, o = soft, . = rest.
+  drums    4 steps per beat (sixteenth notes; 16 per bar in 4/4, 12 in 3/4 and 6/8): x = hit,
+           X = accent, o = soft, . = rest.
            A shorter pattern repeats: "x." = every eighth note. bars = how many bars to fill.
 
 PLACEMENT (add_chords, add_melody, add_drum_pattern)
@@ -175,6 +178,7 @@ pub const TOOLS: &[Tool] = &[
             req("path", Str, "file path ending in .aidaw.json (relative = next to the current project, else the Music folder)"),
             p("name", Str, "song title"),
             p("bpm", Num, "tempo, 20-400 (default 120)"),
+            p("time_signature", Str, "meter, default \"4/4\"; e.g. \"3/4\", \"6/8\", \"12/8\""),
             p("overwrite", Bool, "replace the file if it exists"),
         ],
     },
@@ -205,12 +209,13 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "update_project",
-        description: "Change the project name, bpm (20-400), beats_per_bar, master_gain (0-2) or the shared reverb room every track can send to (reverb_size, reverb_tone).",
-        example: r#"{"bpm": 92, "reverb_size": 0.7}"#,
+        description: "Change the project name, bpm (20-400), time signature, master_gain (0-2) or the shared reverb room every track can send to (reverb_size, reverb_tone).",
+        example: r#"{"bpm": 92, "time_signature": "6/8", "reverb_size": 0.7}"#,
         params: &[
             p("name", Str, "song title"),
             p("bpm", Num, "tempo, 20-400"),
-            p("beats_per_bar", Int, "time signature numerator, e.g. 4 or 3"),
+            p("time_signature", Str, "meter such as \"4/4\", \"3/4\", \"6/8\" or \"12/8\"; sets the bar length (6/8 = 3 beats)"),
+            p("beats_per_bar", Int, "bar length in beats (quarter notes), 1-32: 4 for 4/4, 3 for 3/4. Prefer time_signature"),
             p("master_gain", Num, "0-2, 1 = unity"),
             p("reverb_size", Num, "0-1 shared reverb room: 0 small room (short tail) .. 1 big hall (long tail); default 0.5"),
             p("reverb_tone", Num, "0-1 shared reverb tone: 0 dark .. 1 bright; default 0.5"),
@@ -385,7 +390,7 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "add_drum_pattern",
-        description: "Write a drum beat from step strings, 16 steps per bar: x = hit, X = accent, o = soft, . = rest. Shorter strings repeat. Creates the clip (and a drum track) if needed.",
+        description: "Write a drum beat from step strings, 4 steps per beat (16 per bar in 4/4): x = hit, X = accent, o = soft, . = rest. Shorter strings repeat. Creates the clip (and a drum track) if needed.",
         example: r#"{"track": "Drums", "bars": 4, "pattern": {"kick": "x...x...x...x...", "snare": "....x.......x...", "hat": "x.x.x.x.x.x.x.x."}}"#,
         params: &[
             p("track", Str, "drum track name or id (default \"Drums\", created if missing)"),
@@ -503,7 +508,7 @@ fn param_schema(p: &Param) -> Value {
             let lane = |d: &str| json!({"type": "string", "description": d});
             json!({
                 "type": "object",
-                "description": "drum name -> step string, 16 steps per bar. x = hit, X = accent, o = soft, . = rest",
+                "description": "drum name -> step string, 4 steps per beat (16 per bar in 4/4). x = hit, X = accent, o = soft, . = rest",
                 "properties": {
                     "kick": lane("e.g. \"x...x...x...x...\" (four on the floor)"),
                     "snare": lane("e.g. \"....x.......x...\" (beats 2 and 4)"),

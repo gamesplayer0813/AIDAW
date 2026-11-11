@@ -25,7 +25,11 @@
 //!   is always strictly inside ±1.0.
 //! - [`Sequencer::process`] does not allocate (state buffers are reserved up
 //!   front), so it is safe to call from a real-time audio callback.
+//! - Each block looks up the notes that start in it with a binary search
+//!   (clips keep their notes sorted by start, see [`playable`]), so a big
+//!   song costs no more per block than a small one.
 
+use std::borrow::Cow;
 use std::f32::consts::{PI, TAU};
 use std::path::Path;
 
@@ -602,6 +606,9 @@ pub struct Sequencer {
     /// What the tracks send to the reverb in the current block (mono).
     send: Box<[f32]>,
     room: Room,
+    /// Clip notes started so far (tests check that none is missed).
+    #[cfg(test)]
+    notes_started: usize,
 }
 
 impl Sequencer {
@@ -619,6 +626,8 @@ impl Sequencer {
             chase: false,
             send: vec![0.0; MAX_BLOCK].into_boxed_slice(),
             room: Room::new(sample_rate),
+            #[cfg(test)]
+            notes_started: 0,
         }
     }
 
@@ -665,6 +674,9 @@ impl Sequencer {
     }
 
     /// Render `out.len() / 2` stereo frames (interleaved L/R) and advance the playhead.
+    ///
+    /// The notes of every clip must be sorted by start ([`playable`] makes
+    /// sure of it): notes out of order may be skipped.
     pub fn process(&mut self, project: &Project, out: &mut [f32]) {
         self.render_block(project, out, true);
     }
@@ -871,13 +883,17 @@ impl Sequencer {
                     continue;
                 }
                 for note in &clip.notes {
-                    if note.start < 0.0 || note.start >= clip.length || note.duration <= 0.0 {
+                    let at = clip.start + note.start;
+                    // Notes starting at or after `beat` are spawn_notes' job,
+                    // and in start order every later note does too.
+                    if at >= beat {
+                        break;
+                    }
+                    if !(0.0..clip.length).contains(&note.start) || note.duration <= 0.0 {
                         continue;
                     }
-                    let at = clip.start + note.start;
                     let held = note.duration.min(clip.length - note.start);
-                    // Notes starting at or after `beat` are spawn_notes' job.
-                    if at >= beat || at + held <= beat {
+                    if at + held <= beat {
                         continue;
                     }
                     let gate = (held * frames_per_beat).max(1.0) as u64;
@@ -897,13 +913,21 @@ impl Sequencer {
                 if clip.end() <= b0 || clip.start >= b1 {
                     continue;
                 }
-                for note in &clip.notes {
-                    if note.start < 0.0 || note.start >= clip.length || note.duration <= 0.0 {
+                debug_assert!(clip.notes_sorted(), "notes of {} are not sorted", clip.id);
+                // The notes are in start order: jump to the first one that
+                // starts in this block and stop after the last one.
+                let first = clip.notes.partition_point(|n| clip.start + n.start < b0);
+                for note in &clip.notes[first..] {
+                    let at = clip.start + note.start;
+                    if at >= b1 {
+                        break;
+                    }
+                    if !(0.0..clip.length).contains(&note.start) || note.duration <= 0.0 {
                         continue;
                     }
-                    let at = clip.start + note.start;
-                    if at < b0 || at >= b1 {
-                        continue;
+                    #[cfg(test)]
+                    {
+                        self.notes_started += 1;
                     }
                     let held = note.duration.min(clip.length - note.start);
                     let delay = ((at - b0) * frames_per_beat) as u32;
@@ -1600,8 +1624,22 @@ pub fn tail_seconds(project: &Project) -> f64 {
     }
 }
 
+/// `project` ready for the [`Sequencer`]: every clip's notes sorted by
+/// start. Borrowed as it is when they already are (the usual case: loading
+/// and editing keep them sorted), sorted in a copy otherwise.
+pub fn playable(project: &Project) -> Cow<'_, Project> {
+    if project.notes_sorted() {
+        Cow::Borrowed(project)
+    } else {
+        let mut p = project.clone();
+        p.sort_notes();
+        Cow::Owned(p)
+    }
+}
+
 /// Render the whole project (plus a tail for releases) to interleaved stereo.
 pub fn render(project: &Project, sample_rate: u32) -> Vec<f32> {
+    let project = &*playable(project);
     let total_seconds = project.length_beats() * project.seconds_per_beat() + tail_seconds(project);
     let total_frames = (total_seconds * sample_rate as f64) as usize;
     let mut seq = Sequencer::new(sample_rate);
@@ -1668,6 +1706,7 @@ pub fn render_to_wav_with_progress(
     mut progress: impl FnMut(f64),
 ) -> Result<f64> {
     check_render_args(project, sample_rate)?;
+    let project = &*playable(project);
     let total_seconds = project.length_beats() * project.seconds_per_beat() + tail_seconds(project);
     let total_frames = (total_seconds * sample_rate as f64) as usize;
     let spec = hound::WavSpec {
@@ -1712,6 +1751,60 @@ mod tests {
 
     fn peak(buf: &[f32]) -> f32 {
         buf.iter().fold(0.0f32, |m, s| m.max(s.abs()))
+    }
+
+    /// One drum track whose single clip holds `count` hits a sixteenth apart.
+    fn busy_song(count: usize) -> Project {
+        let mut p = Project::new("busy", 133.0);
+        p.tracks = demo_project().tracks;
+        p.tracks.truncate(1);
+        p.tracks[0].instrument = Instrument::Drums {
+            kit: DrumKit::Standard,
+        };
+        p.tracks[0].clips = vec![crate::Clip {
+            id: "c1".into(),
+            name: String::new(),
+            start: 1.0,
+            length: count as f64 * 0.25,
+            notes: (0..count)
+                .map(|i| crate::Note {
+                    pitch: [36, 38, 42, 46, 49][i % 5],
+                    start: i as f64 * 0.25,
+                    duration: 0.1,
+                    velocity: 100,
+                })
+                .collect(),
+        }];
+        p
+    }
+
+    #[test]
+    fn every_note_starts_exactly_once_whatever_the_block_size() {
+        let p = busy_song(400);
+        let end = p.length_beats();
+        // Odd sizes put note starts right next to block edges; 1500 is more
+        // than one chunk.
+        for frames in [7, 37, 512, 1500] {
+            let mut seq = Sequencer::new(22_050);
+            let mut buf = vec![0.0; frames * 2];
+            while seq.position() < end {
+                seq.process(&p, &mut buf);
+            }
+            assert_eq!(seq.notes_started, 400, "blocks of {frames} frames");
+        }
+    }
+
+    #[test]
+    fn notes_out_of_order_play_the_same_once_made_playable() {
+        let sorted = busy_song(64);
+        let mut shuffled = sorted.clone();
+        let notes = &mut shuffled.tracks[0].clips[0].notes;
+        notes.reverse();
+        notes.swap(3, 40);
+        assert!(!shuffled.notes_sorted());
+        assert!(matches!(playable(&sorted), Cow::Borrowed(_)));
+        assert_eq!(*playable(&shuffled), sorted);
+        assert_eq!(render(&shuffled, 22_050), render(&sorted, 22_050));
     }
 
     #[test]

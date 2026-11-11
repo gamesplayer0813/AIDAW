@@ -135,6 +135,9 @@ fn zh(en: &str) -> Option<&'static str> {
             "你编辑时 AI 也改了歌曲；已保留你的版本（按 Ctrl+Z 查看 AI 的版本）"
         }
         "Save failed: {}" => "保存失败：{}",
+        "A newer AIDAW saved this song, so this version won't overwrite it. Update AIDAW, or use Save As to keep your changes in another file." => {
+            "这首歌是新版 AIDAW 保存的，这个版本不会覆盖它。请更新 AIDAW，或者用「另存为」把你的修改存到另一个文件。"
+        }
         "Reloaded external change (Ctrl+Z to revert)" => "已载入外部修改（Ctrl+Z 撤回）",
         "Open failed: {}" => "打开失败：{}",
         "Saving to {} (AI tools can now use this file)" => {

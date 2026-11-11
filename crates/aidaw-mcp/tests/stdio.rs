@@ -841,3 +841,96 @@ fn arranging_and_listening_tools() {
     assert_eq!(load(&path), before);
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn protocol_versions_are_negotiated_and_batches_answered() {
+    let mut c = Client::start();
+    for (asked, answered) in [
+        ("2025-06-18", "2025-06-18"),
+        ("2025-03-26", "2025-03-26"),
+        ("2024-11-05", "2024-11-05"),
+        ("2025-11-25", "2025-11-25"),
+        // A version we don't speak gets our newest instead of an echo.
+        ("2030-01-01", "2025-11-25"),
+    ] {
+        let init = c.rpc("initialize", json!({"protocolVersion": asked}));
+        assert_eq!(init["protocolVersion"], answered, "asked for {asked}");
+    }
+
+    // A batch: two requests and a notification in, two answers out, in order.
+    let batch = json!([
+        {"jsonrpc": "2.0", "id": "a", "method": "ping"},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": "b", "method": "tools/list"}
+    ]);
+    writeln!(c.stdin, "{batch}").unwrap();
+    let mut line = String::new();
+    c.stdout.read_line(&mut line).unwrap();
+    let replies: Value = serde_json::from_str(&line).unwrap();
+    let replies = replies.as_array().expect("an array of answers");
+    assert_eq!(replies.len(), 2, "{replies:?}");
+    assert_eq!(
+        (&replies[0]["id"], &replies[1]["id"]),
+        (&json!("a"), &json!("b"))
+    );
+    assert!(replies[1]["result"]["tools"].as_array().unwrap().len() > 10);
+
+    for (bad, code) in [("[]", -32600), ("[1]", -32600), ("{oops", -32700)] {
+        writeln!(c.stdin, "{bad}").unwrap();
+        let mut line = String::new();
+        c.stdout.read_line(&mut line).unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        let err = if reply.is_array() { &reply[0] } else { &reply };
+        assert_eq!(err["error"]["code"], code, "{bad} -> {reply}");
+    }
+    // Still serving.
+    assert_eq!(c.rpc("ping", json!({})), json!({}));
+}
+
+#[test]
+fn time_signatures_set_the_bar_length_and_are_shown() {
+    let dir = temp_dir("meter");
+    let path = dir.join("waltz.aidaw.json");
+    let mut c = Client::start();
+    let out = c.call(
+        "new_project",
+        json!({"path": path, "bpm": 90, "time_signature": "6/8", "overwrite": true}),
+    );
+    assert!(out.contains("6/8 (bars of 3 beats)"), "{out}");
+    let p = load(&path);
+    assert_eq!(p.beats_per_bar, 3);
+    assert_eq!(p.time_signature().to_string(), "6/8");
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(raw.contains(r#""time_signature": "6/8""#), "{raw}");
+
+    // Bars follow the meter: bar 2 starts at beat 3.
+    c.call(
+        "add_melody",
+        json!({"track": "Lead", "bar": 2, "notes": "C5/1.5 G4/1.5"}),
+    );
+    let p = load(&path);
+    assert_eq!(p.tracks[0].clips[0].start, 3.0);
+
+    let out = c.call("update_project", json!({"time_signature": [12, 8]}));
+    assert!(out.contains("12/8 (bars of 6 beats)"), "{out}");
+    let out = c.call("update_project", json!({"time_signature": "3/4"}));
+    assert!(out.contains(", 3/4,"), "{out}");
+    assert_eq!(load(&path).time_signature, None, "x/4 needs no extra field");
+
+    let err = c.call_err("update_project", json!({"time_signature": "7/8"}));
+    assert!(err.contains("3.5 beats") && err.contains("7/4"), "{err}");
+    let err = c.call_err("update_project", json!({"time_signature": "waltz"}));
+    assert!(err.contains("6/8"), "{err}");
+    let err = c.call_err(
+        "update_project",
+        json!({"time_signature": "6/8", "beats_per_bar": 4}),
+    );
+    assert!(err.contains("matching beats_per_bar"), "{err}");
+
+    // Setting the bar length directly drops a meter that no longer fits.
+    c.call("update_project", json!({"time_signature": "6/8"}));
+    let out = c.call("update_project", json!({"beats_per_bar": 4}));
+    assert!(out.contains(", 4/4,"), "{out}");
+    assert_eq!(load(&path).time_signature, None);
+    std::fs::remove_dir_all(&dir).ok();
+}

@@ -9,7 +9,8 @@ use aidaw_core::analysis::{self, Analysis, Levels};
 use aidaw_core::edit::{self, Op};
 use aidaw_core::music::{self, ChordStyle};
 use aidaw_core::{
-    io as pio, pitch, presets, render, DrumKit, Instrument, Note, Project, Synth, Waveform,
+    io as pio, pitch, presets, render, DrumKit, Instrument, Note, Project, Synth, TimeSignature,
+    Waveform,
 };
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Map, Value};
@@ -172,12 +173,16 @@ impl Session {
                 if !(20.0..=400.0).contains(&bpm) {
                     bail!("bpm must be within 20..=400 (got {bpm})");
                 }
-                let project = Project::new(name, bpm);
+                let mut project = Project::new(name, bpm);
+                if let Some(ts) = time_signature_arg(&args)? {
+                    project.set_time_signature(ts);
+                }
                 pio::save(&project, &path)?;
                 self.path = Some(path.clone());
                 Ok(format!(
-                    "created {} ({bpm} BPM, 4/4). Next: add_track, e.g. {{\"name\": \"Drums\", \"instrument\": \"drum_kit\"}}",
-                    path.display()
+                    "created {} ({bpm} BPM, {}). Next: add_track, e.g. {{\"name\": \"Drums\", \"instrument\": \"drum_kit\"}}",
+                    path.display(),
+                    meter(&project)
                 ))
             }
             "open_project" => {
@@ -469,6 +474,9 @@ fn apply_tool(work: &mut Project, tool: &Tool, mut args: Args) -> Result<Value> 
                     bail!("beats_per_bar must be a whole number from 1 to 32, e.g. 4 for 4/4 or 3 for 3/4 (got {v})");
                 }
             }
+            if let Some(ts) = time_signature_arg(&args)? {
+                args.insert("time_signature".into(), json!(ts.to_string()));
+            }
         }
         "add_chords" | "add_drum_pattern" | "add_melody" => return musical(work, tool.name, args),
         "copy_bars" => return copy_bars(work, args),
@@ -589,6 +597,29 @@ fn apply_tool(work: &mut Project, tool: &Tool, mut args: Args) -> Result<Value> 
         result["warnings"] = json!(warnings);
     }
     Ok(result)
+}
+
+/// The `time_signature` argument, as "6/8" or [6, 8].
+fn time_signature_arg(args: &Args) -> Result<Option<TimeSignature>> {
+    let text = match args.get("time_signature") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(a)) if a.len() == 2 => format!("{}/{}", a[0], a[1]),
+        Some(other) => other.to_string(),
+    };
+    text.parse()
+        .map(Some)
+        .map_err(|e| anyhow!("{e}. Example: {{\"time_signature\": \"6/8\"}}"))
+}
+
+/// "4/4", or "6/8 (bars of 3 beats)" when the bar length is not obvious.
+fn meter(p: &Project) -> String {
+    let ts = p.time_signature();
+    if ts.den == 4 {
+        ts.to_string()
+    } else {
+        format!("{ts} (bars of {} beats)", p.beats_per_bar)
+    }
 }
 
 /// Clips may not end after this beat (4096 bars).
@@ -1892,10 +1923,10 @@ fn overview(p: &Project, only: Option<&str>, with_notes: bool) -> String {
     let bpb = p.beats_per_bar as f64;
     let len = p.length_beats();
     let mut s = format!(
-        "\"{}\" — {} BPM, {}/4, {} beats ({} bars), {} track(s), reverb room {:.2} tone {:.2}",
+        "\"{}\" — {} BPM, {}, {} beats ({} bars), {} track(s), reverb room {:.2} tone {:.2}",
         p.name,
         p.bpm,
-        p.beats_per_bar,
+        meter(p),
         fmt_num(len),
         fmt_num((len / bpb).ceil()),
         p.tracks.len(),

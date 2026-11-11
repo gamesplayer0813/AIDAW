@@ -20,6 +20,11 @@ use crate::settings::Settings;
 use crate::theme;
 use aidaw_core::presets;
 
+/// Status when the project file on disk was written by a newer AIDAW.
+fn newer_file() -> &'static str {
+    tr("A newer AIDAW saved this song, so this version won't overwrite it. Update AIDAW, or use Save As to keep your changes in another file.")
+}
+
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
 const POLL_INTERVAL: Duration = Duration::from_millis(400);
 const UNDO_LIMIT: usize = 200;
@@ -106,6 +111,10 @@ pub struct App {
     pub playhead: f64,
 
     disk_mtime: Option<SystemTime>,
+    /// Modification time of the project file when a newer AIDAW wrote it.
+    /// That version is never overwritten: saving would drop whatever this
+    /// build does not understand.
+    newer_on_disk: Option<SystemTime>,
     last_poll: Instant,
     save_at: Option<Instant>,
     pub status: String,
@@ -192,13 +201,18 @@ impl App {
     pub fn new(path: Option<PathBuf>) -> Self {
         let settings = Settings::load();
         i18n::set(settings.lang.unwrap_or_else(i18n::system));
+        let mut path = path;
         let (project, status) = match &path {
             Some(p) if p.exists() => match pio::load(p) {
                 Ok(proj) => (proj, trf("Opened {}", &[&p.display()])),
-                Err(e) => (
-                    starter_project(),
-                    trf("Failed to open: {}", &[&format!("{e:#}")]),
-                ),
+                Err(e) => {
+                    // Never autosave over a file we could not read.
+                    path = None;
+                    (
+                        starter_project(),
+                        trf("Failed to open: {}", &[&format!("{e:#}")]),
+                    )
+                }
             },
             Some(p) => (
                 starter_project(),
@@ -220,6 +234,7 @@ impl App {
             selected_track: project.tracks.first().map(|t| t.id.clone()),
             project,
             disk_mtime: path.as_deref().and_then(mtime),
+            newer_on_disk: None,
             save_at: path
                 .as_ref()
                 .filter(|p| !p.exists())
@@ -291,6 +306,7 @@ impl App {
         let old = std::mem::replace(&mut self.project, project);
         self.push_undo(old);
         self.disk_mtime = path.as_deref().and_then(mtime);
+        self.newer_on_disk = None;
         self.path = path;
         self.selected_clip = None;
         self.selected_notes.clear();
@@ -575,15 +591,23 @@ impl App {
         // put the AI's on the undo stack so nothing is lost.
         let on_disk = mtime(&path);
         if on_disk.is_some() && self.disk_mtime.is_some() && on_disk != self.disk_mtime {
-            if let Ok(theirs) = pio::load(&path) {
-                if theirs != self.project {
-                    self.push_undo(theirs);
-                    self.status = tr(
-                        "The AI changed the song while you were editing; kept your version (Ctrl+Z shows the AI's)",
-                    )
-                    .into();
+            match pio::load(&path) {
+                Ok(theirs) => {
+                    if theirs != self.project {
+                        self.push_undo(theirs);
+                        self.status = tr(
+                            "The AI changed the song while you were editing; kept your version (Ctrl+Z shows the AI's)",
+                        )
+                        .into();
+                    }
                 }
+                Err(e) if pio::is_newer_format(&e) => self.newer_on_disk = on_disk,
+                Err(_) => {}
             }
+        }
+        if on_disk.is_some() && on_disk == self.newer_on_disk {
+            self.status = newer_file().into();
+            return;
         }
         match pio::save(&self.project, &path) {
             Ok(()) => self.disk_mtime = mtime(&path),
@@ -601,11 +625,18 @@ impl App {
             return;
         };
         let Some(m) = mtime(&path) else { return };
-        if Some(m) == self.disk_mtime {
+        if Some(m) == self.disk_mtime || Some(m) == self.newer_on_disk {
             return;
         }
+        let loaded = pio::load(&path);
+        if let Err(e) = &loaded {
+            if pio::is_newer_format(e) {
+                self.newer_on_disk = Some(m);
+                self.status = newer_file().into();
+            }
+        }
         // On a parse error (e.g. a non-atomic writer mid-write) just retry next poll.
-        if let Ok(p) = pio::load(&path) {
+        if let Ok(p) = loaded {
             self.disk_mtime = Some(m);
             if p != self.project {
                 // Keep the local version on the undo stack so AI edits can be reverted.

@@ -55,8 +55,7 @@ fn gaps(clips: &[Clip], from: f64, to: f64) -> Vec<(f64, f64)> {
 }
 
 fn sort_notes(clip: &mut Clip) {
-    clip.notes
-        .sort_by(|a, b| a.start.total_cmp(&b.start).then(a.pitch.cmp(&b.pitch)));
+    clip.sort_notes();
 }
 
 /// Copy the notes that start in `[from, from + length)` beats to `to`, and
