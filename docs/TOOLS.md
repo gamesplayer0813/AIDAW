@@ -2,7 +2,7 @@
 
 <!-- Generated from crates/aidaw-mcp/src/tools.rs. Don't edit it here: change that file, then run `cargo run -p aidaw-mcp -- docs docs/TOOLS.md`. -->
 
-All 24 tools of `aidaw-mcp`, with every parameter. They are the same over MCP and on the command line (`aidaw-mcp tools --format ...`, `aidaw-mcp call`). How to connect a model and compose with them: [LLM_GUIDE.md](LLM_GUIDE.md).
+All 28 tools of `aidaw-mcp`, with every parameter. They are the same over MCP and on the command line (`aidaw-mcp tools --format ...`, `aidaw-mcp call`). How to connect a model and compose with them: [LLM_GUIDE.md](LLM_GUIDE.md).
 
 | Tool | What it does |
 |---|---|
@@ -13,7 +13,7 @@ All 24 tools of `aidaw-mcp`, with every parameter. They are the same over MCP an
 | [`list_presets`](#list_presets) | List the instrument presets (ids like "e_piano", "bass_808", "strings", "drums_808") usable as `instrument` in add_track/update_track, grouped by category. |
 | [`update_project`](#update_project) | Change the project name, bpm (20-400), time signature, master_gain (0-2) or the shared reverb room every track can send to (reverb_size, reverb_tone). |
 | [`add_track`](#add_track) | Add a track with an instrument preset. |
-| [`update_track`](#update_track) | Change a track's name, instrument preset, drum kit, volume, pan, reverb, mute/solo, or tweak its synth sound. |
+| [`update_track`](#update_track) | Change a track's name, instrument preset, drum kit, volume, pan, reverb, mute/solo, its row (position) and colour in the app, or tweak its synth sound. |
 | [`remove_track`](#remove_track) | Delete a track and all its clips. |
 | [`add_clip`](#add_clip) | Add a clip (a block of notes) to a track at a bar or beat, optionally with notes. |
 | [`update_clip`](#update_clip) | Move, resize or rename a clip. |
@@ -24,6 +24,10 @@ All 24 tools of `aidaw-mcp`, with every parameter. They are the same over MCP an
 | [`copy_bars`](#copy_bars) | Copy bars to another place, like copy and paste: the notes that start in those bars go to to_bar, repeated `times` times in a row. |
 | [`quantize`](#quantize) | Snap note starts to a grid so the timing is tight, optionally with swing (a shuffle feel). |
 | [`humanize`](#humanize) | Make programmed parts sound played: nudge note timing and velocity by small random amounts (the same seed gives the same result). |
+| [`split_clip`](#split_clip) | Cut clips in two at a bar, like scissors, so the parts can be moved, copied or removed on their own. |
+| [`set_loop`](#set_loop) | Make the AIDAW app repeat part of the song while the human listens (an A/B loop), e.g. the bars you just changed. |
+| [`set_playhead`](#set_playhead) | Put the AIDAW app's playhead at a bar, so the human hears that spot when they press Play. |
+| [`undo`](#undo) | Take back your last edit (or several), e.g. when analyze or the human says it was a mistake. |
 | [`add_chords`](#add_chords) | Write a chord progression from chord symbols; one chord per bar unless "Am:2" gives beats. |
 | [`add_drum_pattern`](#add_drum_pattern) | Write a drum beat from step strings, 4 steps per beat (16 per bar in 4/4): x = hit, X = accent, o = soft, . = rest. |
 | [`add_melody`](#add_melody) | Write a melody or bass line from compact text: PITCH/BEATS tokens, r = rest, C4+E4/2 = chord. |
@@ -146,6 +150,7 @@ Add a track with an instrument preset. Returns its track_id. Without instrument,
 | `gain` | number | no | volume 0-2 (default 0.8) |
 | `pan` | number | no | -1 left .. 1 right |
 | `reverb` | number | no | 0-1 how much of this track goes to the shared reverb: 0 dry, 0.2-0.35 typical for keys, pads and leads, 0.1 drums, 0 bass. New tracks start with their preset's usual amount |
+| `color` | string | no | colour of the track in the app: blue, orange, green, purple, yellow, cyan, pink, violet, red, teal, white, gray, a hex code like "#ff8a3d", or "auto" for its own colour |
 
 Example:
 
@@ -157,12 +162,14 @@ Also answers to `create_track`.
 
 ## `update_track`
 
-Change a track's name, instrument preset, drum kit, volume, pan, reverb, mute/solo, or tweak its synth sound.
+Change a track's name, instrument preset, drum kit, volume, pan, reverb, mute/solo, its row (position) and colour in the app, or tweak its synth sound.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `track` | string | yes | track name or id, e.g. "Bass" or "t1" |
 | `name` | string | no | new name |
+| `position` | integer | no | move the track to this row in the app, 1 = the top |
+| `color` | string | no | colour of the track in the app: blue, orange, green, purple, yellow, cyan, pink, violet, red, teal, white, gray, a hex code like "#ff8a3d", or "auto" for its own colour |
 | `instrument` | string | no | preset id (78 of them, see list_presets), e.g. soft_keys, e_piano, organ, bass, bass_808, acid_bass, bright_lead, supersaw, warm_pad, lush_pad, choir, pluck, nylon_guitar, rock_guitar, marimba, bell, strings, brass, flute, saxophone, chiptune, riser, drum_kit, drums_808, drums_909, drums_acoustic, drums_lofi, drums_trap. Loose names work too ("rhodes", "violin") |
 | `gain` | number | no | volume 0-2, 1 = unity |
 | `pan` | number | no | -1 left .. 1 right |
@@ -197,6 +204,8 @@ Example:
 ```json
 {"track": "Bass", "instrument": "pluck", "gain": 0.6, "cutoff": 1200}
 ```
+
+Also answers to `move_track`, `reorder_track`, `set_track_color`, `color_track`.
 
 ## `remove_track`
 
@@ -373,6 +382,79 @@ Example:
 ```
 
 Also answers to `humanize_clip`.
+
+## `split_clip`
+
+Cut clips in two at a bar, like scissors, so the parts can be moved, copied or removed on their own. Notes that start before the cut stay (shortened to end there); the rest go to a new clip that starts at the cut. Give clip, or track (its clips crossing the cut), or neither (every clip crossing the cut).
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `bar` | number | no | 1-based bar to cut at: 3 cuts between bars 2 and 3, 3.5 half way through bar 3 |
+| `beat` | number | no | absolute beat to cut at (alternative to bar) |
+| `clip` | string | no | clip name or id, e.g. "c1" (ids are shown by get_project) |
+| `track` | string | no | cut every clip on this track that crosses the cut |
+
+Example:
+
+```json
+{"clip": "c1", "bar": 3}
+```
+
+Also answers to `split`, `split_clips`, `cut_clip`.
+
+## `set_loop`
+
+Make the AIDAW app repeat part of the song while the human listens (an A/B loop), e.g. the bars you just changed. Give from_bar and bars, or a clip; on: false plays the whole song again (the loop is kept for later). play: true also starts playing at the loop. Only live playback in the app loops; render_wav and analyze always use the whole song.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `from_bar` | number | no | first bar of the loop (1 = the start of the song) |
+| `bars` | number | no | how many bars to loop (default 1) |
+| `clip` | string | no | loop exactly this clip instead (name or id) |
+| `on` | boolean | no | false: stop looping; true (default): loop |
+| `play` | boolean | no | true: start playing at the loop's start; false: stop playing |
+
+Example:
+
+```json
+{"from_bar": 5, "bars": 4, "play": true}
+```
+
+Also answers to `loop`, `set_loop_region`, `loop_bars`.
+
+## `set_playhead`
+
+Put the AIDAW app's playhead at a bar, so the human hears that spot when they press Play. play: true starts playing there at once, false stops. Use it to point the human at what you changed.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `bar` | number | no | 1-based bar: 1 = the start of the song, 9.5 = half way through bar 9 |
+| `beat` | number | no | absolute beat instead of bar (0 = the start) |
+| `play` | boolean | no | true: start playing there; false: stop |
+
+Example:
+
+```json
+{"bar": 9, "play": true}
+```
+
+Also answers to `seek`, `move_playhead`, `go_to_bar`, `play_from`.
+
+## `undo`
+
+Take back your last edit (or several), e.g. when analyze or the human says it was a mistake. Only edits made through these tools are undone, newest first; if the human changed the song in the app since, undo refuses rather than lose their work.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `steps` | integer | no | how many of your edits to take back, 1-30 (default 1) |
+
+Example:
+
+```json
+{"steps": 1}
+```
+
+Also answers to `undo_last`, `undo_edit`, `revert`.
 
 ## `add_chords`
 
