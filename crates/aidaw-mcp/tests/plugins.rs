@@ -161,11 +161,11 @@ fn the_ai_plays_and_shapes_plugins() {
     );
     let song = s.call("get_project", json!({}));
     assert!(
-        song.contains("[plugin AIDAW Test Synth, 1 params set]"),
+        song.contains("[plugin AIDAW Test Synth, 1 param set]"),
         "{song}"
     );
     assert!(
-        song.contains("effects: fx1 \"AIDAW Test Gain\" (1 params set)"),
+        song.contains("effects: fx1 \"AIDAW Test Gain\" (1 param set)"),
         "{song}"
     );
 

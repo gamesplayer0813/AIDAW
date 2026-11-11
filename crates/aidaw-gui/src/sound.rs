@@ -1,6 +1,7 @@
 //! "Sound" window: which speakers we play through, whether the device is
 //! actually running, a test beep and a level meter. Also writes `aidaw.log`
-//! next to the exe so a "no sound" report comes with the reason.
+//! (next to the settings, see [`crate::settings::dir`]) so a "no sound"
+//! report comes with the reason.
 
 use std::io::Write;
 
@@ -11,17 +12,25 @@ use crate::app::App;
 use crate::i18n::{tr, trf};
 use crate::icons::{self, Icon};
 
+/// Past this size the log becomes `aidaw.old.log` and a new one starts.
+const LOG_LIMIT: u64 = 1 << 20;
+
+/// Add a line to `aidaw.log`. It lives with the settings because the exe's
+/// folder may be read-only (Program Files), where logging used to fail
+/// silently.
 pub fn log(line: &str) {
-    let Some(path) = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("aidaw.log")))
-    else {
+    let Some(dir) = crate::settings::dir() else {
         return;
     };
+    let path = dir.join("aidaw.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > LOG_LIMIT) {
+        let _ = std::fs::rename(&path, dir.join("aidaw.old.log"));
+    }
+    let _ = std::fs::create_dir_all(&dir);
     if let Ok(mut f) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(path)
+        .open(&path)
     {
         let t = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

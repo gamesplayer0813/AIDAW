@@ -4,11 +4,13 @@
 //!   such as Claude Desktop or Cursor.
 //! * As a one-shot command line (`aidaw-mcp call <tool> '<json>'`) for agents
 //!   that can only run shell commands, plus `aidaw-mcp tools --format openai`
-//!   to hand the same tools to any function-calling API.
+//!   to hand the same tools to any function-calling API, and
+//!   `aidaw-mcp docs` for their reference in Markdown (docs/TOOLS.md).
 //!
 //! The GUI watches the same file and reloads it live, so a human sees every
 //! change the AI makes and can fine-tune it (and undo it) in the editor.
 
+mod history;
 mod plugins;
 mod session;
 mod tools;
@@ -48,6 +50,8 @@ usage:
   aidaw-mcp tools [--format mcp|openai|anthropic|gemini]
                                                 print the tool schemas as JSON
   aidaw-mcp guide                               print the cheat sheet
+  aidaw-mcp docs [FILE.md]                      print every tool with every parameter as
+                                                Markdown, or write it to FILE.md
 The project file can also be set with the AIDAW_PROJECT environment variable.";
 
 fn main() -> ExitCode {
@@ -95,6 +99,20 @@ fn run() -> Result<ExitCode> {
         }
         Some("guide") => {
             println!("{}", tools::GUIDE);
+            Ok(ExitCode::SUCCESS)
+        }
+        Some("docs") => {
+            let md = tools::markdown();
+            match positional.next() {
+                // Like the tools, never write anything but its own kind of file.
+                Some(file) if !file.ends_with(".md") => {
+                    bail!("docs writes Markdown files only (*.md), not {file:?}")
+                }
+                Some(file) => {
+                    std::fs::write(&file, md).with_context(|| format!("cannot write {file}"))?
+                }
+                None => print!("{md}"),
+            }
             Ok(ExitCode::SUCCESS)
         }
         Some("tools") => {

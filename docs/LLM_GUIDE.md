@@ -26,7 +26,7 @@ still write notes for you: see [4. Plain chat](#4-plain-chat-paste-the-answer).
 | `add_chords` | Chord symbols, e.g. `"Am F C G"`, one per bar. Styles: block, arpeggio, pulse |
 | `add_drum_pattern` | Step strings, e.g. `{"kick": "x...x...x...x...", "snare": "....x.......x..."}` |
 | `add_melody` | Compact text, e.g. `"C4/1 D4/0.5 E4/0.5 r/1 G4/2"` (pitch/beats, `r` = rest) |
-| `add_track`, `update_track`, `remove_track` | Tracks, instruments, volume, pan, reverb, mute and solo, plus synth tweaks |
+| `add_track`, `update_track`, `remove_track` | Tracks, instruments, volume, pan, reverb, mute and solo, row order and colour, plus synth tweaks |
 | `add_clip`, `update_clip`, `remove_clip` | Clips (blocks of notes on a track) |
 | `add_notes`, `remove_notes`, `transpose_clip` | Note-level edits |
 | `update_project` | Name, tempo, time signature, master volume, reverb room |
@@ -34,8 +34,18 @@ still write notes for you: see [4. Plain chat](#4-plain-chat-paste-the-answer).
 | `copy_bars` | Copy bars to another place, repeated `times` times: turn a 4-bar loop into a song |
 | `quantize` | Snap note starts to a grid, with optional strength and swing |
 | `humanize` | Small random timing and velocity changes, so programmed parts sound played |
+| `split_clip` | Cut clips in two at a bar, so the parts can be moved, copied or removed on their own |
+| `set_loop` | Make the app repeat some bars (or a clip) while the human listens |
+| `set_playhead` | Put the app's playhead at a bar, and start or stop playback there |
+| `undo` | Take back your own last edit(s); never what the human changed in the app |
+| `list_plugins` | The VST®3 instruments and effects installed on this computer |
+| `add_effect`, `update_effect`, `remove_effect` | A track's effect plugins: add, switch off or on, reorder, remove |
+| `plugin_params`, `set_plugin_params` | Read and turn a plugin's knobs by name, with values like `"800 Hz"` or `"-6 dB"` |
 | `analyze` | Listen to the mix: loudness, limiter, low/mid/high balance, each track alone, and tips |
 | `render_wav` | Render the song to a WAV file |
+
+Every parameter of every tool, with an example call, is in [TOOLS.md](TOOLS.md), which is generated
+from the code; `aidaw-mcp docs` prints the same reference.
 
 The musical tools (`add_chords`, `add_drum_pattern`, `add_melody`) do the note maths for you.
 Give them a `track` (a name such as `"Bass"`) and optionally a `bar` (1 = start of the song).
@@ -100,6 +110,86 @@ Tips:
 - **Each track alone** is each audible track soloed. A part more than 10 LU below the loudest
   one is hard to hear in the mix.
 - **Tips** appear only when something really stands out, each with a call that fixes it.
+
+## Cutting, ordering and showing the human
+
+**Cut a clip.** `split_clip {"clip": "c2", "bar": 5}` cuts clip c2 in two at the start of bar 5
+(`"bar": 5.5` is half way through it, `"beat"` takes an absolute beat instead). Notes that start
+before the cut stay, shortened to end there; the rest move to a new clip that starts at the cut
+and keeps the name. With `"track"` instead of `"clip"` it cuts that track's clips crossing the
+bar, with neither every clip crossing it.
+
+**Track order and colour.** `update_track {"track": "Bass", "position": 1, "color": "orange"}`
+moves Bass to the top row and colours it orange. Colours are names (blue, orange, green, purple,
+yellow, cyan, pink, violet, red, teal, white, gray), hex codes like `"#ff8a3d"`, or `"auto"` for
+the track's own colour. A track keeps its colour when other tracks are added, deleted or moved.
+
+**Point the human at your change.** While the AIDAW app has the song open:
+
+- `set_loop {"from_bar": 5, "bars": 4}` makes the app repeat bars 5-8; add `"play": true` to start
+  playing them at once. `{"clip": "Chorus"}` loops one clip, `{"on": false}` plays the whole song
+  again (the loop stays marked for later).
+- `set_playhead {"bar": 9}` moves the app's playhead to bar 9; `"play": true` also starts
+  playback there, `false` stops it. While a loop is on, Play starts inside the loop.
+
+Both are stored in the project file (its `transport` section) and picked up by the app within
+half a second. They never change the music: `render_wav` and `analyze` always play the whole song
+from the start, and `undo` leaves them alone.
+
+**Undo.** `undo` takes back the last edit made through these tools, `{"steps": 3}` the last
+three. The last 30 edits per song are kept on disk (in the user's app data folder), so this works
+across separate `aidaw-mcp call` runs too. If the human changed the song in the app after your
+edit, `undo` refuses and changes nothing rather than throw their work away: make a new edit
+instead. The human can undo anything, yours included, with `Ctrl+Z` in the app.
+
+## Plugins
+
+AIDAW hosts VST3 instruments and effects that are installed on the computer (VST is a
+registered trademark of Steinberg Media Technologies GmbH). Nothing is installed with AIDAW, so
+start with `list_plugins`: it lists instruments (they play notes) and effects (they change a
+track's sound), with each one's vendor. `{"kind": "effect"}` lists effects only, `"search"`
+filters by name, and plugins installed since the last call are found by themselves
+(`"rescan": true` looks at every plugin again).
+
+**An instrument plugin plays a track.** `add_track {"name": "Keys", "plugin": "Surge XT"}` adds
+a track played by Surge XT; `update_track {"track": "Keys", "plugin": "Vital"}` switches an
+existing track to another plugin, and `"instrument": "e_piano"` back to a preset. The musical
+tools work on plugin tracks like on any other.
+
+**Effects run on any track**, built-in sounds included. `add_effect {"track": "Keys", "plugin":
+"Supermassive"}` puts an effect at the end of the track's chain and returns its id (`fx1`);
+`"position": 1` puts it first. The sound runs through the effects in order, then the track's
+volume, pan and reverb send. `update_effect {"effect": "fx1", "bypass": true}` switches it off
+(`false` on again, `"position"` moves it), `remove_effect {"effect": "fx1"}` takes it off. Effect
+ids are unique in the song; names work too when they are.
+
+**Knobs.** `plugin_params {"track": "Keys"}` loads the plugin and lists its parameters, each as id,
+name, position (0-1) and the value the plugin shows, plus the options of stepped ones:
+
+```
+- 0 "Level" = 0.5 (50 %)
+- 1 "Octave" = 0.5 (Middle) options: Low | Middle | High
+```
+
+`"search": "cutoff"` narrows the list, `"effect": "fx1"` shows an effect's knobs instead of the
+instrument's. `set_plugin_params {"track": "Keys", "param": "Cutoff", "value": "800 Hz"}` turns
+one; `"params": [{"param": "Octave", "value": "High"}, {"param": 2, "value": 0.75}]` sets several
+at once. A parameter is named by its id, its name or a unique part of it. A value is a knob
+position from 0 to 1, an option name, or text the way the plugin shows it (`"-6 dB"`, `"30%"`,
+`"1.2 kHz"`); for text the plugin cannot read itself, the server searches for the position that
+shows the nearest value. The reply says what each knob shows now, so you can check.
+
+**Where the settings live.** The project file keeps each plugin's name, id and its own saved
+settings, never the plugin itself. Knobs you set are stored as overrides on top of those
+settings; when the human opens the plugin's window in the app and changes something, the app
+saves the plugin's settings again. `get_project` shows plugin tracks and effect chains;
+`detail: "json"` leaves the settings out (they are binary).
+
+**When a plugin is missing.** A song made on another computer can name plugins that are not
+installed here. Their tracks are silent (a missing effect is skipped), and `render_wav` and
+`analyze` say which ones were left out. Plugins run in a separate process for `plugin_params`,
+`set_plugin_params`, `render_wav` and `analyze`, so a plugin that crashes or hangs makes that
+one call fail and nothing else.
 
 ## Sounds
 

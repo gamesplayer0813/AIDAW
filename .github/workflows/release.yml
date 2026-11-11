@@ -1,0 +1,54 @@
+name: Release
+
+# Publish AIDAW-win64.zip as a GitHub Release. Either push a tag that matches
+# the version in Cargo.toml (git tag v0.2.0 && git push origin v0.2.0), or run
+# this workflow from the Actions tab and it tags the commit itself.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+
+jobs:
+  release:
+    runs-on: windows-latest
+    env:
+      RUSTFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check the version
+        id: version
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # "path+file:///…#aidaw-gui@0.1.0" (or "…#0.1.0" from older cargo)
+          id=$(cargo pkgid -p aidaw-gui)
+          tag="v${id##*[#@]}"
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "$tag" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the version in Cargo.toml ($tag). Change [workspace.package] version or push $tag."
+            exit 1
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::$tag is already released. Raise [workspace.package] version in Cargo.toml first."
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - run: cargo test --workspace
+      - run: cargo build --release --workspace
+      - run: bash packaging/package-windows.sh target/release dist
+      - name: Publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release create "$TAG" dist/AIDAW-win64.zip --target "$GITHUB_SHA" \
+            --title "AIDAW $TAG" --notes-file packaging/release-notes.md --generate-notes

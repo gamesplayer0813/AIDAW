@@ -13,27 +13,29 @@
 | 功能 | 一句话 |
 |---|---|
 | 🐣 Easy / 🔧 Pro 开关 | 左上角的大开关。新手默认 Easy，只留必要按钮；觉得自己行了再切 Pro。切换只改界面，不碰你的歌 |
-| 🔁 自动循环 | 播放到最后一个音符所在小节结尾就自动绕回开头，杂鱼不用手忙脚乱按停止 |
+| 🔁 循环播放 | 默认播到最后一个音符所在小节的结尾就绕回开头，杂鱼不用手忙脚乱按停止。想死磕某几小节？在小节号上方那条细条里拖一下就是循环区（A/B 循环）：拖中间挪位置、拖两头改长短、点一下开关，`L` 键或顶栏 🔁 按钮也行。AI 也能用 `set_loop` 帮你圈好，你只管竖起耳朵听♡ |
 | ▶️ 从哪儿播都有声 | 从长音、和弦中间开始播放也马上能听到（20 ms 淡入，不会「啪」一声），不用傻等下一个音符 |
 | ⚡ 不卡音的引擎 | 音频回调里不加锁、不分配内存，界面再忙也卡不出爆音。哼，本小姐写的引擎才不会掉链子 |
-| 🤖 任何 LLM 都能用 | `aidaw-mcp.exe`：24 个 MCP 工具，外加 CLI（`call` / `tools --format openai` / `guide`），Claude、GPT、Gemini、Ollama 都行 |
+| 🤖 任何 LLM 都能用 | `aidaw-mcp.exe`：34 个 MCP 工具，外加 CLI（`call` / `tools --format openai` / `guide`），Claude、GPT、Gemini、Ollama 都行 |
 | 🛡️ AI 不会乱来 | MCP 的相对路径一律相对工程目录，只允许写 `*.aidaw.json` 和 `*.wav`；GUI 和 AI 同时改也不会丢改动 |
 | ✨ 好看的界面 | 深色主题、LCD 风格走带、会发光的按钮，内置 Inter 字体 |
 | 📐 自适应布局 | 两行顶栏、钢琴卷帘按窗口比例缩放，小窗口（900×600）也不挤 |
 | 🌏 EN / 中文 | 顶栏右侧一键切换；首次启动跟随系统语言。内置 Noto Sans SC 子集，不靠系统字体 |
 | 🎛️ 78 个音色 + 7 套鼓组 | 10 个分类标签页，从电钢到 808 到 8-bit，挑到你满意为止（反正你也挑不出毛病吧？） |
 | 🌌 混响 | 每条轨道一个「混响」滑块，所有轨道共用一个房间（Pro 模式还能调房间大小和音色）。新轨道按音色自动给一点，贝斯默认干声。杂鱼的歌终于不那么干巴巴了♡ |
-| ✂️ 像样的编辑 | 按住 `Shift` 拖个框就能选中一堆音符：`Ctrl+C` / `Ctrl+V` 复制粘贴、`Ctrl+D` 重复、方向键挪位置和升降音高（按调内音走，乱按也不跑调）、`Q` 量化。片段也能 `Ctrl+C` / `Ctrl+V` / `Ctrl+D`。终于不用一个一个点了吧，杂鱼♡ |
+| ✂️ 像样的编辑 | 按住 `Shift` 拖个框就能选中一堆音符：`Ctrl+C` / `Ctrl+V` 复制粘贴、`Ctrl+D` 重复、方向键挪位置和升降音高（按调内音走，乱按也不跑调）、`Q` 量化。片段也能 `Ctrl+C` / `Ctrl+V` / `Ctrl+D`，按 `S` 在播放头处一刀两段，按住 `Alt` 拖动直接复制一份。音轨拖名字就能换顺序，颜色跟着音轨走（删轨、挪轨都不会乱变色），想换色就点「音色」面板里的小圆点。右键片段、音轨、标尺还有更多。终于不用一个一个点了吧，杂鱼♡ |
 | 🎚️ AI 会编曲，还会「听」 | `copy_bars` 把 4 小节复制成一整首，`quantize` 量化还能加摇摆，`humanize` 让死板的音符像真人弹的。`analyze` 把歌在内存里渲染一遍（不写文件），报响度（LUFS）、限幅器、高中低频比例、每条轨单独有多响，哪里不对还直接给出修正的调用。AI 终于不是捂着耳朵写歌了♡ |
 | 💬 聊天 AI 直接粘贴 | 什么都不用装：让随便哪个聊天 AI（ChatGPT、Gemini、DeepSeek…）用 JSON 列出音符，复制它的整段回答，点一个片段按 `Ctrl+V`，音符就进来了。现成的提示词在「问 AI」里 |
+| 🔌 VST®3 插件 | 电脑里装的 VST3 乐器和效果器都能用。「音色」面板的「插件」页挑乐器；效果器每条轨想挂几个挂几个（内置音色的轨也行），开关、换顺序、删掉随你；点「打开窗口」就是插件自己的界面，拧过的旋钮跟着 `.aidaw.json` 一起存。AI 也能挑插件、挂效果器、按名字拧旋钮（`"800 Hz"`、`"-6 dB"` 这种它也看得懂）。扫描插件和 AI 那边的渲染都在单独的进程里跑，坏插件崩了也拖不垮 AIDAW♡ |
 | 🔊 主总线限幅器 | 峰值限幅 + 软削波，杂鱼把音量推爆也不会炸耳朵 |
-| ↩ 撤销一切 | AI 的改动、你的改动，全都能 `Ctrl+Z` |
+| ↩ 撤销一切 | AI 的改动、你的改动，全都能 `Ctrl+Z`。AI 自己也能用 `undo` 撤回它写砸的东西，而且你在 GUI 里改过的话它会乖乖收手，绝不顺手把你的改动一起扔掉 |
 
 ## 快速上手
 
 ### 0. 拿到程序
 
-- **懒人**：去 GitHub Actions 最新一次 CI 下载 artifact `aidaw-windows-x64`，里面有 `aidaw.exe`、`aidaw-mcp.exe` 和 demo 工程。
+- **懒人**：去 [Releases](https://github.com/gamesplayer0813/AIDAW/releases/latest) 下载 `AIDAW-win64.zip`，解压到随便哪个文件夹，双击 `aidaw.exe`。里面还有 `aidaw-mcp.exe`、demo 工程、给 AI 看的说明书和一份 `README.txt`。Windows 弹出「Windows 已保护你的电脑」？点「更多信息」→「仍要运行」，只是 exe 没花钱买签名而已，本小姐才不会害你。
+- **想尝鲜的**：每次 CI 都会把最新代码打成同样的包，在 GitHub Actions 里下载 artifact `aidaw-windows-x64`（要登录 GitHub）。
 - **想自己编译的**：看下面的「构建」。哼，看你能不能编过。
 
 ### 1. 打开 GUI
@@ -75,7 +77,11 @@ aidaw.exe examples\demo.aidaw.json
 | 定位播放头 | 点编排区的标尺 |
 | 新建 clip | 编排区双击空白处 |
 | 移动 / 改长度 / 删除 clip | 拖动 / 拖右边缘 / 点一下再按 `Del` |
-| 复制 clip | 点一下再按 `Ctrl+D`，接在它后面复制一份（后面被占了就放到下一个空位）；`Ctrl+C` / `Ctrl+V` 粘到播放头所在的小节；`←` / `→` 挪一小节 |
+| 复制 clip | 点一下再按 `Ctrl+D`，接在它后面复制一份（后面被占了就放到下一个空位）；`Ctrl+C` / `Ctrl+V` 粘到播放头所在的小节；`←` / `→` 挪一小节；按住 `Alt` 拖动：原来的不动，拖走的是复制品 |
+| 切开 clip | 把播放头放进 clip 里按 `S`（Easy 模式切在最近的小节线上，Pro 按网格），或者右键 clip →「从这里切成两段」 |
+| 循环区 | 在小节号上方的细条里拖出范围；拖中间挪动、拖两头改长短、点一下开关。`L` 开关循环，第一次按会循环当前选中的 clip。循环打开时停止键回到循环起点 |
+| 音轨顺序 / 颜色 | 上下拖动编排区左边的音轨名称，或右键音轨 →「上移 / 下移」；颜色在左侧「音色」面板或右键菜单里挑 |
+| 更多操作 | 右键 clip、音轨或标尺，切开、循环、复制、删除都在里面 |
 | 画音符 | 钢琴卷帘里点击或拖拽空白处 |
 | 选中多个音符 | 按住 `Shift` 在空白处拖个框；`Ctrl+点击` 加选 / 取消；`Ctrl+A` 全选；`Esc` 全不选 |
 | 改音符时间、音高 / 时值 | 拖动音符（选中的会一起走）/ 拖右边缘 |
@@ -126,9 +132,9 @@ Claude Code / Cursor / Windsurf / Cline 等 MCP 客户端配置方式同理。
 - **普通聊天 AI**：`aidaw-mcp guide` 打印一页速查表，整页贴给它就行
 - **连命令都懒得敲**：点「问 AI」，展开「什么都不想装？从任何聊天 AI 粘贴音符」，复制里面的提示词发给聊天 AI，再把它的回答整段复制，回 GUI 点一个片段按 `Ctrl+V`。它认 `[{"pitch":"A4","start":0,"duration":1}]` 这样的列表，前后的废话和 ```` ``` ```` 代码块都会自己剥掉。AI 写得烂？`Ctrl+Z` 扔掉就好♡
 
-完整说明见 [docs/LLM_GUIDE.md](docs/LLM_GUIDE.md)。
+完整说明见 [docs/LLM_GUIDE.md](docs/LLM_GUIDE.md)；每个工具的每个参数见 [docs/TOOLS.md](docs/TOOLS.md)，它是 `aidaw-mcp docs` 从代码直接生成的，永远不会过时。
 
-### 24 个 MCP 工具
+### 34 个 MCP 工具
 
 - **音乐级**（模型不用自己算音符，对小模型很友好）：
   - `add_chords`：`"Am F C G"`
@@ -139,8 +145,16 @@ Claude Code / Cursor / Windsurf / Cline 等 MCP 客户端配置方式同理。
   - `copy_bars`：`{"from_bar": 1, "bars": 4, "to_bar": 5, "times": 3}` 把第 1-4 小节连着复制 3 次，4 小节的循环秒变 16 小节
   - `quantize`：`{"track": "Drums", "grid": 0.25, "swing": 0.6}` 对齐网格，`swing` 0.5 是直拍，越接近 0.75 越晃
   - `humanize`：`{"track": "Keys"}` 时间和力度随机抖一点点
+  - `split_clip`：`{"clip": "c1", "bar": 3}` 在第 3 小节开头把 clip 一刀切开
+- **给你指路**（GUI 开着同一首歌时）：`set_loop` `{"from_bar": 5, "bars": 4, "play": true}` 让 GUI 循环播放第 5-8 小节；`set_playhead` `{"bar": 9}` 把 GUI 的播放头挪过去。只管试听，导出和 `analyze` 永远是整首歌
+- **后悔药**：`undo` `{"steps": 1}` 撤回 AI 自己最近的改动（每首歌记 30 步，存在 `%APPDATA%\AIDAW\history` 里，每次单独 `call` 也认）。你在 GUI 里改过就拒绝，哼，本小姐可不会误伤你的劳动成果
 - **听**：`analyze` 报响度、峰值、限幅器、高中低频、每条轨单独的响度和整首歌的响度走向，外加修正建议（比如「鼓太大声，把别的都盖住了」）
-- **底层编辑**：`add_track` / `update_track` / `remove_track`、`add_clip` / `update_clip` / `remove_clip`、`add_notes` / `remove_notes` / `transpose_clip`、`apply_ops`（原子批量）
+- **VST3 插件**（电脑里装了才有）：
+  - `list_plugins`：看装了哪些插件乐器和效果器，新装的会自己找到
+  - `add_track` `{"name": "Keys", "plugin": "Surge XT"}`：用插件乐器建一条轨（`update_track` 换成插件也行）
+  - `add_effect` `{"track": "Keys", "plugin": "Supermassive"}`：给轨道挂效果器，返回 `fx1` 这样的 id；`update_effect` `{"effect": "fx1", "bypass": true}` 关掉 / `position` 换顺序；`remove_effect` 删掉
+  - `plugin_params` `{"track": "Keys", "search": "cutoff"}` 列出插件的旋钮；`set_plugin_params` `{"track": "Keys", "param": "Cutoff", "value": "800 Hz"}` 拧旋钮。数值写 0-1 是旋钮位置，也可以照插件自己显示的写（`"-6 dB"`、`"30%"`），或者直接写选项名（`"Saw"`）
+- **底层编辑**：`add_track` / `update_track`（`position` 换行、`color` 换颜色）/ `remove_track`、`add_clip` / `update_clip` / `remove_clip`、`add_notes` / `remove_notes` / `transpose_clip`、`apply_ops`（原子批量）
 
 对笨笨的小模型也很宽容：轨道 / clip 可以用名字引用，数字写成字符串也认，乐器可以直接写预设名（`"bass"`、`"Warm Pad"`），位置可以用小节（`bar: 5`）；每个错误都会列出合法值并附一个示例调用。
 
@@ -165,6 +179,7 @@ Claude Code / Cursor / Windsurf / Cline 等 MCP 客户端配置方式同理。
 | `aidaw-engine` | 实时播放：cpal → Windows 上走 WASAPI，音频回调里跑同一个音序器；回调不加锁、不分配内存，和界面之间只走无锁命令队列和原子变量 |
 | `aidaw-gui` | 桌面编辑器（`aidaw.exe`）：编排时间线、钢琴卷帘、轨道/混音、乐器参数、撤销重做、主题（`theme.rs`）、中英文（`i18n.rs`） |
 | `aidaw-mcp` | MCP 服务器 + CLI（`aidaw-mcp.exe`）：让 AI 新建/打开工程、加轨、写音符、批量编辑、渲染 |
+| `aidaw-plugin` | VST3 宿主：扫描插件文件夹（结果缓存在 `plugins.json`）、加载插件、实时 / 离线跑插件、读写插件的设置、插件窗口。扫描和 AI 那边的渲染都在单独的 worker 进程里跑（就是 exe 自己带上 `--aidaw-plugin-worker` 再启动一次） |
 
 **协作模型**：工程就是一个 `.aidaw.json` 文件。
 
@@ -172,6 +187,8 @@ Claude Code / Cursor / Windsurf / Cline 等 MCP 客户端配置方式同理。
 - GUI 轮询文件，发现外部修改就热重载，并把重载前的版本压进撤销栈，所以 AI 的任何改动按 `Ctrl+Z` 就能撤回。
 - GUI 里的修改 300ms 后自动保存，AI 下次调用就能读到；若保存时发现 AI 刚写过，保留你的版本并把 AI 的版本放进撤销栈。谁的改动都不会悄悄丢，放心啦。
 - 工程文件带格式版本号（`version`）。更新版的 AIDAW 存出来的文件，旧版本只会拒绝打开、绝不覆盖，免得把它看不懂的东西弄丢；旧格式的文件则会自动升级。
+
+**插件**：AIDAW 会在 `C:\Program Files\Common Files\VST3`、`%LOCALAPPDATA%\Programs\Common\VST3`、「插件」窗口里加的文件夹，以及环境变量 `AIDAW_VST3_PATH` 列出的文件夹里找 `.vst3`，找到的东西记在 `%APPDATA%\AIDAW\plugins.json`，只有新装或者更新过的插件才会重新扫。工程文件里存的是插件的名字、id 和它自己的设置（base64），不存插件本身：换台电脑只要装了同一个插件就能原样打开，没装的话那条轨不出声，别的照常，AI 渲染的时候也会告诉你缺了哪个。插件在 GUI 里播放时就跑在 `aidaw.exe` 里面（不然延迟太大）；扫描、AI 的 `render_wav` / `analyze` 和 GUI 导出 WAV 都在单独的进程里，坏插件最多让那一次失败。
 
 **安全**：MCP 收到的相对路径一律相对于工程所在目录（没打开工程时是 Music 目录），且只会写 `*.aidaw.json` 和 `*.wav`。AI 写错路径也覆盖不了别的文件，哼，本小姐可是考虑周全的。
 
@@ -194,17 +211,26 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-CI（GitHub Actions，`windows-latest`）每个 PR 都会跑上面这些，并上传两个 exe 作为 artifact。加了新的界面文字或音色？记得在 `i18n.rs` 里补中文翻译，不然测试 `every_string_is_translated` 会骂你的♡
+CI（GitHub Actions）每个 PR 跑两个 job：`ubuntu-latest` 跑上面三条，几分钟就出结果；`windows-latest` 在真正的 Windows 上再跑一遍测试（存文件、路径、字体在 Windows 上不一样），然后编译 release 版，打成和发版一样的包，作为 artifact `aidaw-windows-x64` 上传。在 Linux 上自己跑的话先装 ALSA 开发包（Ubuntu：`sudo apt install libasound2-dev`）。
+
+加了新的界面文字或音色？记得在 `i18n.rs` 里补中文翻译，不然测试 `every_string_is_translated` 会骂你的♡ 改了 MCP 工具？跑一下 `cargo run -p aidaw-mcp -- docs docs/TOOLS.md` 重新生成工具文档，再在本文件和 `docs/LLM_GUIDE.md` 的工具列表里写上新工具、改对工具的个数，这些测试都会盯着的。
+
+## 发版（给维护者）
+
+1. 把 `Cargo.toml` 里 `[workspace.package]` 的 `version` 改成新版本（比如 `0.2.0`），合进 main。
+2. 推一个对应的 tag：`git tag v0.2.0` 再 `git push origin v0.2.0`。懒得开命令行？在 GitHub 的 **Actions → Release** 点 **Run workflow**，它会按 `Cargo.toml` 的版本自己打 tag。
+3. Release workflow 会在 Windows 上测试、编译，把两个 exe、`README.txt`、`LLM_GUIDE.md`、`TOOLS.md`、demo 工程和许可证打成 `AIDAW-win64.zip`，挂到 GitHub Release 上。tag 和 `Cargo.toml` 的版本对不上、或者这个版本已经发过，它会直接报错，绝不乱发。哼，比杂鱼手动拷文件靠谱多了♡
 
 ## 路线图（本小姐接下来要做的事）
 
-- [ ] 插件宿主：VST3 / CLAP 乐器与效果器
+- [x] 插件宿主：VST3 乐器与效果器（扫描、加载、插件自己的窗口、设置存进工程、AI 工具）
+- [ ] CLAP 插件
 - [ ] 音频轨与录音、采样器
 - [x] 混响：每轨发送量 + 共用房间（大小 / 音色）
 - [ ] 自动化包络、效果器链（EQ / 压缩）
 - [ ] ASIO 低延迟驱动、导出 MIDI
 - [x] 多选、复制粘贴、重复、量化、人性化，还能直接粘贴聊天 AI 写的音符
-- [ ] 可自定义循环区
+- [x] 可自定义循环区（A/B 循环）、切开 clip、`Alt` 拖动复制、音轨排序和固定颜色；AI 也能设循环、挪播放头、撤销自己的改动
 - [x] 音频回调零分配、引擎与 UI 之间改为无锁命令队列
 - [x] AI 侧：`analyze` 回传音频分析（响度 / 高中低频 / 每轨电平），让 AI 能「听」自己的作品
 - [x] AI 侧：复制小节、量化 + 摇摆、人性化
@@ -217,6 +243,8 @@ AIDAW 用 [MIT 许可证](LICENSE)，随便用、随便改、拿去卖钱都行�
 
 - Inter：[`crates/aidaw-gui/assets/Inter-LICENSE.txt`](crates/aidaw-gui/assets/Inter-LICENSE.txt)
 - Noto Sans SC（子集）：[`crates/aidaw-gui/assets/NotoSansSC-LICENSE.txt`](crates/aidaw-gui/assets/NotoSansSC-LICENSE.txt)
+
+插件宿主用的是 [`vst3`](https://crates.io/crates/vst3) crate（MIT 和 Apache-2.0 双许可），它的接口定义是从 Steinberg 的 VST 3 SDK 头文件生成的，SDK 从 3.8 起也是 MIT。VST is a registered trademark of Steinberg Media Technologies GmbH.
 
 ---
 

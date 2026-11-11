@@ -746,8 +746,8 @@ pub struct Sequencer {
     events: Vec<NoteEvent>,
     /// Frames rendered so far, for [`Transport::frames`].
     clock: u64,
-    /// Where [`Self::process_looping`] wraps, for [`Transport::loop_end`].
-    loop_end: Option<f64>,
+    /// The region [`Self::process_looping`] repeats, for [`Transport::cycle`].
+    cycle: Option<(f64, f64)>,
     /// Clip notes started so far (tests check that none is missed).
     #[cfg(test)]
     notes_started: usize,
@@ -772,7 +772,7 @@ impl Sequencer {
             next_note_id: 0,
             events: Vec::with_capacity(MAX_EVENTS),
             clock: 0,
-            loop_end: None,
+            cycle: None,
             #[cfg(test)]
             notes_started: 0,
         }
@@ -847,15 +847,26 @@ impl Sequencer {
         rack: Option<&mut (dyn Rack + '_)>,
         out: &mut [f32],
     ) {
-        self.loop_end = None;
+        self.cycle = None;
         self.render_block(project, rack, out, true);
     }
 
-    /// Like [`Self::process`], but when the playhead reaches `loop_end` it
-    /// jumps back to beat 0 mid-block and keeps going. Notes already sounding
-    /// ring out naturally across the wrap, as in a real loop.
-    pub fn process_looping(&mut self, project: &Project, out: &mut [f32], loop_end: Option<f64>) {
-        self.process_looping_with(project, None, out, loop_end);
+    /// Like [`Self::process`], but playback repeats `region` = `(start, end)`
+    /// in beats: on reaching `end` the playhead jumps back to `start`, mid-block,
+    /// and keeps going (see [`Project::playback_loop`]). A playhead before
+    /// `start` plays on into the loop; one at or past `end` jumps back at once.
+    ///
+    /// Each pass sounds the same: notes still held at the loop end are let
+    /// go (they ring out with their own release, as in a real loop), notes
+    /// that start right on the end are not begun, and notes held across
+    /// `start` are picked up part-way, as after a seek.
+    pub fn process_looping(
+        &mut self,
+        project: &Project,
+        out: &mut [f32],
+        region: Option<(f64, f64)>,
+    ) {
+        self.process_looping_with(project, None, out, region);
     }
 
     /// [`Self::process_looping`] with the project's plugins in `rack`.
@@ -864,25 +875,49 @@ impl Sequencer {
         project: &Project,
         mut rack: Option<&mut (dyn Rack + '_)>,
         out: &mut [f32],
-        loop_end: Option<f64>,
+        region: Option<(f64, f64)>,
     ) {
-        let Some(end) = loop_end.filter(|e| e.is_finite() && *e > 0.0) else {
+        let frames_per_beat = self.sample_rate as f64 * project.seconds_per_beat();
+        // A loop shorter than a frame could never advance.
+        let Some((start, end)) = region.filter(|&(s, e)| {
+            s.is_finite() && e.is_finite() && s >= 0.0 && (e - s) * frames_per_beat >= 1.0
+        }) else {
             self.process_with(project, rack, out);
             return;
         };
-        self.loop_end = Some(end);
-        let frames_per_beat = self.sample_rate as f64 * project.seconds_per_beat();
+        self.cycle = Some((start, end));
         let mut rest = out;
-        while !rest.is_empty() {
-            if self.position >= end {
-                self.position = 0.0;
+        while rest.len() >= 2 {
+            // Whole frames before the end: the block stops short of it, so it
+            // never starts a note that lies on the end itself.
+            let left = ((end - self.position) * frames_per_beat).floor();
+            if left < 1.0 {
+                self.wrap_to(start);
+                continue;
             }
-            let until = ((end - self.position) * frames_per_beat).ceil().max(1.0);
-            let n = (rest.len() / 2).min(until as usize).max(1) * 2;
-            let (now, later) = rest.split_at_mut(n.min(rest.len()));
+            let n = (rest.len() / 2).min(left as usize) * 2;
+            let (now, later) = rest.split_at_mut(n);
             self.render_block(project, rack.as_deref_mut(), now, true);
             rest = later;
         }
+        rest.fill(0.0);
+    }
+
+    /// The jump back at the end of a loop: notes still held are released,
+    /// and those held across `beat` start sounding part-way through.
+    fn wrap_to(&mut self, beat: f64) {
+        for v in &mut self.voices {
+            if !v.held && v.gate > v.age {
+                v.gate = v.age;
+            }
+        }
+        for n in &mut self.plugin_notes {
+            if !n.held && n.gate > n.age {
+                n.gate = n.age;
+            }
+        }
+        self.position = beat;
+        self.chase = true;
     }
 
     /// Render only the voices already sounding (e.g. note previews) without
@@ -1052,13 +1087,15 @@ impl Sequencer {
 
         match rack {
             Some(rack) => {
+                let meter = project.time_signature();
                 let transport = Transport {
                     sample_rate: f64::from(sr),
                     bpm: project.bpm,
                     beats_per_bar: project.beats_per_bar,
+                    time_signature: (meter.num, meter.den),
                     beat: b0,
                     playing: advance,
-                    loop_end: self.loop_end,
+                    cycle: self.cycle,
                     frames: self.clock,
                 };
                 for n in &mut self.plugin_notes {
@@ -2262,7 +2299,7 @@ mod tests {
         let fpb = sr as f64 * p.seconds_per_beat();
         let frames = (fpb * 0.5) as usize; // half a beat: crosses the loop point
         let mut buf = vec![0.0f32; frames * 2];
-        seq.process_looping(&p, &mut buf, Some(end));
+        seq.process_looping(&p, &mut buf, Some((0.0, end)));
         assert!(
             (seq.position() - 0.25).abs() < 1e-3,
             "pos {}",
@@ -2364,6 +2401,78 @@ mod tests {
         let mut quiet = vec![0.0f32; 2 * 2048];
         seq.process(&p, &mut quiet);
         assert_eq!(peak(&quiet), 0.0);
+    }
+
+    /// Play `frames` frames looping `region`, in blocks like a sound card asks for.
+    fn play_loop(seq: &mut Sequencer, p: &Project, region: (f64, f64), frames: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; frames * 2];
+        for block in out.chunks_mut(2 * 441) {
+            seq.process_looping(p, block, Some(region));
+        }
+        out
+    }
+
+    #[test]
+    fn a_loop_region_repeats_and_keeps_its_place() {
+        let p = held_note(Instrument::Synth(Synth::BASE));
+        let sr = 22_050;
+        let fpb = sr as f64 * p.seconds_per_beat();
+        let mut seq = Sequencer::new(sr);
+        // Beats 4-6 of an 8-beat note: the note is held across the loop start.
+        seq.seek(4.0);
+        let audio = play_loop(&mut seq, &p, (4.0, 6.0), (fpb * 5.0) as usize);
+        // 5 beats in a 2-beat loop: a beat into the third pass.
+        assert!((seq.position() - 5.0).abs() < 1e-3, "{}", seq.position());
+        // Every pass picks the note up again, so the loop never goes quiet.
+        for pass in 0..2 {
+            let after_wrap = (fpb * (2.0 * pass as f64 + 2.2)) as usize * 2;
+            let s = peak(&audio[after_wrap..after_wrap + 2000]);
+            assert!(s > 0.02, "pass {pass} silent after the wrap: {s}");
+        }
+        // ...and the voice that was playing at the end was let go: only the
+        // newly picked-up one is left once the release (0.25 s) is over.
+        assert_eq!(seq.active_voices(), 1);
+        assert!(audio.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn a_note_right_on_the_loop_end_is_not_started() {
+        // A kick on beat 4 only, looping beats 0-4: the kick is never heard.
+        let mut p = held_note(Instrument::Drums {
+            kit: DrumKit::Standard,
+        });
+        p.tracks[0].clips[0].notes[0].start = 4.0;
+        p.tracks[0].clips[0].notes[0].duration = 0.25;
+        let sr = 22_050;
+        let fpb = sr as f64 * p.seconds_per_beat();
+        let mut seq = Sequencer::new(sr);
+        let audio = play_loop(&mut seq, &p, (0.0, 4.0), (fpb * 13.0) as usize);
+        assert_eq!(peak(&audio), 0.0);
+        // Played through without the loop, it is.
+        let mut seq = Sequencer::new(sr);
+        let mut once = vec![0.0f32; (fpb * 5.0) as usize * 2];
+        seq.process(&p, &mut once);
+        assert!(peak(&once) > 0.05);
+    }
+
+    #[test]
+    fn playing_before_a_loop_runs_into_it_and_past_it_jumps_back() {
+        let p = blip(0.0);
+        let sr = 22_050;
+        let fpb = sr as f64 * p.seconds_per_beat();
+        let mut seq = Sequencer::new(sr);
+        seq.seek(1.0);
+        play_loop(&mut seq, &p, (4.0, 8.0), (fpb * 2.0) as usize);
+        assert!((seq.position() - 3.0).abs() < 1e-3, "{}", seq.position());
+        play_loop(&mut seq, &p, (4.0, 8.0), (fpb * 2.0) as usize);
+        assert!((seq.position() - 5.0).abs() < 1e-3, "{}", seq.position());
+        seq.seek(12.0);
+        play_loop(&mut seq, &p, (4.0, 8.0), (fpb * 0.5) as usize);
+        assert!((seq.position() - 4.5).abs() < 1e-3, "{}", seq.position());
+        // A loop too short to play just plays on.
+        seq.seek(0.0);
+        play_loop(&mut seq, &p, (2.0, 2.0), (fpb * 3.0) as usize);
+        assert!((seq.position() - 3.0).abs() < 1e-3, "{}", seq.position());
     }
 
     #[test]

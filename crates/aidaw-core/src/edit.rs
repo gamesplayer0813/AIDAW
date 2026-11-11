@@ -11,7 +11,8 @@ use serde_json::{json, Value};
 use crate::model::{
     Clip, Effect, EffectKind, Instrument, Note, PluginRef, Project, TimeSignature, Track,
 };
-use crate::transform;
+use crate::transport::{Cue, LoopRegion, MIN_LOOP_BEATS};
+use crate::{color, transform};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -143,6 +144,35 @@ pub enum Op {
         track_id: String,
         effect_id: Option<String>,
         params: BTreeMap<String, f64>,
+    },
+    /// Move a track to `index` (0 = the top row); the others close up.
+    MoveTrack {
+        track_id: String,
+        index: usize,
+    },
+    /// Give a track a colour: a name ("orange") or hex code ("#ff8a3d").
+    /// None, "" or "auto" gives it back the colour that follows from its id.
+    SetTrackColor {
+        track_id: String,
+        color: Option<String>,
+    },
+    /// Cut a clip in two at `at` beats (song time); see [`split_clip`].
+    SplitClip {
+        clip_id: String,
+        at: f64,
+    },
+    /// Set the loop region in beats (both ends, or one to move just that
+    /// end) and switch looping on, or off with `on: false`.
+    SetLoop {
+        start: Option<f64>,
+        end: Option<f64>,
+        on: Option<bool>,
+    },
+    /// Ask the app to put its playhead at `beat`, and to start (`play:
+    /// true`) or stop (`false`) playing there.
+    SetPlayhead {
+        beat: f64,
+        play: Option<bool>,
     },
 }
 
@@ -290,6 +320,7 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
                 solo: false,
                 reverb,
                 effects: Vec::new(),
+                color: None,
                 clips: Vec::new(),
             });
             Ok(json!({"track_id": id}))
@@ -558,7 +589,135 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
             *plugin = next;
             Ok(json!({"ok": true, "params_set": n}))
         }
+        Op::MoveTrack { track_id, index } => {
+            let from = project
+                .tracks
+                .iter()
+                .position(|t| t.id == track_id)
+                .ok_or_else(|| anyhow!("no track {track_id}"))?;
+            let to = index.min(project.tracks.len() - 1);
+            let track = project.tracks.remove(from);
+            project.tracks.insert(to, track);
+            Ok(json!({"index": to}))
+        }
+        Op::SetTrackColor { track_id, color } => {
+            let picked = match color.as_deref().map(str::trim) {
+                None | Some("" | "auto" | "none" | "default") => None,
+                Some(text) => Some(color::hex(color::parse(text).ok_or_else(|| {
+                    anyhow!(
+                        "unknown colour {text:?}; use a hex code like \"#ff8a3d\" or one of: {}",
+                        color::names()
+                    )
+                })?)),
+            };
+            let t = project
+                .track_mut(&track_id)
+                .ok_or_else(|| anyhow!("no track {track_id}"))?;
+            t.color = picked;
+            Ok(json!({"color": color::hex(t.rgb())}))
+        }
+        Op::SplitClip { clip_id, at } => {
+            let new_id = split_clip(project, &clip_id, at)?;
+            Ok(json!({"clip_id": clip_id, "new_clip_id": new_id}))
+        }
+        Op::SetLoop { start, end, on } => {
+            let old = project.transport.loop_region;
+            if start.is_none() && end.is_none() && old.is_none() {
+                if on == Some(false) {
+                    return Ok(json!({"on": false}));
+                }
+                bail!("there is no loop region yet; give its start and end in beats");
+            }
+            let start = start.or(old.map(|r| r.start)).unwrap_or(0.0);
+            let end = match end.or(old.map(|r| r.end)) {
+                Some(e) => e,
+                None => bail!("the loop needs an end, in beats"),
+            };
+            let region = LoopRegion {
+                start,
+                end,
+                on: on.unwrap_or(true),
+            };
+            if !(start.is_finite() && start >= 0.0 && end.is_finite()) {
+                bail!("the loop's start and end must be beats >= 0");
+            }
+            if !region.is_valid() {
+                bail!(
+                    "the loop must end after it starts (start {start}, end {end}, at least {MIN_LOOP_BEATS} beats long)"
+                );
+            }
+            project.transport.loop_region = Some(region);
+            Ok(json!({"start": start, "end": end, "on": region.on}))
+        }
+        Op::SetPlayhead { beat, play } => {
+            if !(beat.is_finite() && beat >= 0.0) {
+                bail!("the playhead goes to a beat >= 0 (got {beat})");
+            }
+            let last = project.transport.cue.map_or(0, |c| c.id);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            let id = if now == last { now + 1 } else { now };
+            project.transport.cue = Some(Cue { beat, play, id });
+            Ok(json!({"beat": beat}))
+        }
     }
+}
+
+/// Cut clip `clip_id` in two at `at` beats (song time, strictly inside the
+/// clip). Notes that start before the cut stay in the clip, shortened so
+/// they end at the cut (they were silent past it anyway); the others move
+/// to a new clip right after it, which gets the same name. Returns the id
+/// of the new clip.
+pub fn split_clip(project: &mut Project, clip_id: &str, at: f64) -> Result<String> {
+    const EPS: f64 = 1e-9;
+    let new_id = project.next_id("c");
+    let track = project
+        .tracks
+        .iter_mut()
+        .find(|t| t.clips.iter().any(|c| c.id == clip_id))
+        .ok_or_else(|| anyhow!("no clip {clip_id}"))?;
+    let i = track
+        .clips
+        .iter()
+        .position(|c| c.id == clip_id)
+        .expect("found above");
+    let clip = &mut track.clips[i];
+    let cut = at - clip.start;
+    if !(cut.is_finite() && cut > EPS && cut < clip.length - EPS) {
+        bail!(
+            "beat {at} is not inside clip {clip_id}, which covers beats {}..{}; split it somewhere in between",
+            clip.start,
+            clip.end()
+        );
+    }
+    let (keep, moved): (Vec<Note>, Vec<Note>) =
+        clip.notes.drain(..).partition(|n| n.start < cut - EPS);
+    clip.notes = keep
+        .into_iter()
+        .map(|n| Note {
+            duration: n.duration.min(cut - n.start),
+            ..n
+        })
+        .collect();
+    // A copy, so the new half keeps everything else the clip carries.
+    let mut right = Clip {
+        notes: Vec::new(),
+        ..clip.clone()
+    };
+    right.id.clone_from(&new_id);
+    right.start = at;
+    right.length = clip.length - cut;
+    right.notes = moved
+        .into_iter()
+        .map(|n| Note {
+            start: (n.start - cut).max(0.0),
+            ..n
+        })
+        .collect();
+    clip.length = cut;
+    track.clips.insert(i + 1, right);
+    Ok(new_id)
 }
 
 /// Apply a batch atomically: if any op fails, the project is left untouched.

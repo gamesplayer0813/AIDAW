@@ -29,14 +29,17 @@ pub struct NoteEvent {
 pub struct Transport {
     pub sample_rate: f64,
     pub bpm: f64,
+    /// Bar length in beats (quarter notes).
     pub beats_per_bar: u32,
+    /// The meter as written, (6, 8) for 6/8.
+    pub time_signature: (u32, u32),
     /// Playhead in beats at the start of the block.
     pub beat: f64,
     /// Whether the song is playing (false while stopped, when only note
     /// previews and tails are heard).
     pub playing: bool,
-    /// Where playback wraps back to beat 0, when it loops.
-    pub loop_end: Option<f64>,
+    /// The region playback repeats, (start, end) in beats, when it loops.
+    pub cycle: Option<(f64, f64)>,
     /// Frames the sequencer has rendered so far, playing or not: a steady
     /// clock that never jumps.
     pub frames: u64,
@@ -246,7 +249,7 @@ mod tests {
             (t.sample_rate, t.bpm, t.beats_per_bar),
             (24_000.0, 120.0, 4)
         );
-        assert!(t.playing && t.beat == 0.0 && t.loop_end.is_none());
+        assert!(t.playing && t.beat == 0.0 && t.cycle.is_none());
     }
 
     #[test]
@@ -401,10 +404,10 @@ mod tests {
         let mut rack = FakeRack::new(vec![(None, false), (Some(2), false)]);
         let mut seq = Sequencer::new(SR);
         let mut buf = vec![0.0; 2 * 1000];
-        seq.process_looping_with(&p, Some(&mut rack), &mut buf, Some(4.0));
-        assert_eq!(rack.transports[0].loop_end, Some(4.0));
+        seq.process_looping_with(&p, Some(&mut rack), &mut buf, Some((0.0, 4.0)));
+        assert_eq!(rack.transports[0].cycle, Some((0.0, 4.0)));
         assert_eq!(rack.transports.last().unwrap().frames, 0);
-        seq.process_looping_with(&p, Some(&mut rack), &mut buf, Some(4.0));
+        seq.process_looping_with(&p, Some(&mut rack), &mut buf, Some((0.0, 4.0)));
         assert_eq!(rack.transports.last().unwrap().frames, 1000);
 
         // Offline renders add the plugins' tail.

@@ -3,8 +3,9 @@
 //! and the indexes of the selected notes), so they are tested without a
 //! window; `App` wires them to the keyboard and the selection.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
+use aidaw_core::model::note_order;
 use aidaw_core::transform;
 use aidaw_core::{Clip, Note};
 use serde::{Deserialize, Serialize};
@@ -281,6 +282,48 @@ pub fn in_box(notes: &[Note], (b0, b1): (f64, f64), (r0, r1): (f32, f32)) -> BTr
         .collect()
 }
 
+/// Put notes in playing order, like [`Clip::sort_notes`], and return
+/// where each one went: `moved[old index]` is its new index.
+pub fn sort_notes(notes: &mut Vec<Note>) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..notes.len()).collect();
+    order.sort_by(|&a, &b| note_order(&notes[a], &notes[b]));
+    let sorted: Vec<Note> = order.iter().map(|&i| notes[i].clone()).collect();
+    *notes = sorted;
+    let mut moved = vec![0; order.len()];
+    for (new, &old) in order.iter().enumerate() {
+        moved[old] = new;
+    }
+    moved
+}
+
+/// The selection `sel` after its notes moved (see [`sort_notes`]).
+pub fn moved_selection(sel: &BTreeSet<usize>, moved: &[usize]) -> BTreeSet<usize> {
+    sel.iter().filter_map(|&i| moved.get(i).copied()).collect()
+}
+
+/// The notes of `after` that the selected notes of `before` are, for a
+/// clip replaced as a whole (by the AI's version of the song, say): each
+/// selected note is matched with an identical note of `after`, used once.
+/// Notes that changed or went away drop out of the selection.
+pub fn follow_notes(before: &[Note], after: &[Note], sel: &BTreeSet<usize>) -> BTreeSet<usize> {
+    if sel.is_empty() {
+        return BTreeSet::new();
+    }
+    // `+ 0.0` turns -0.0 into 0.0, which compare equal but differ in bits.
+    let key = |n: &Note| {
+        let bits = |x: f64| (x + 0.0).to_bits();
+        (n.pitch, bits(n.start), bits(n.duration), n.velocity)
+    };
+    let mut free: HashMap<_, Vec<usize>> = HashMap::new();
+    for (i, n) in after.iter().enumerate().rev() {
+        free.entry(key(n)).or_default().push(i);
+    }
+    sel.iter()
+        .filter_map(|&i| before.get(i))
+        .filter_map(|n| free.get_mut(&key(n))?.pop())
+        .collect()
+}
+
 /// The first place at or after `from` where a clip `length` beats long fits
 /// between the clips already on a track, so a copy never plays on top of
 /// another part.
@@ -485,6 +528,57 @@ mod tests {
         );
         assert_eq!(in_box(&c.notes, (0.0, 4.0), (60.2, 60.8)), sel(&[2]));
         assert!(in_box(&c.notes, (3.6, 4.0), (0.0, 127.0)).is_empty());
+    }
+
+    #[test]
+    fn sorting_notes_keeps_the_selection_on_them() {
+        // Drawn out of order: G4 at beat 2, C4 at 0, then E4 and C4 at 1.
+        let mut notes = vec![
+            note(67, 2.0, 1.0),
+            note(60, 0.0, 1.0),
+            note(64, 1.0, 1.0),
+            note(60, 1.0, 0.5),
+        ];
+        let moved = sort_notes(&mut notes);
+        let order: Vec<(u8, f64)> = notes.iter().map(|n| (n.pitch, n.start)).collect();
+        assert_eq!(order, [(60, 0.0), (60, 1.0), (64, 1.0), (67, 2.0)]);
+        assert_eq!(moved, [3, 0, 2, 1]);
+        // G4 and the short C4 were selected, and still are.
+        assert_eq!(moved_selection(&sel(&[0, 3]), &moved), sel(&[1, 3]));
+        let mut c = clip();
+        c.notes = notes;
+        assert!(c.notes_sorted(), "the order Clip::sort_notes keeps");
+        assert_eq!(sort_notes(&mut c.notes), [0, 1, 2, 3], "sorted already");
+        assert!(sort_notes(&mut Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn the_selection_follows_notes_into_a_new_version() {
+        let before = clip().notes; // C4 E4 G4
+                                   // The AI added a note in front, moved E4 and kept the others.
+        let after = vec![
+            note(55, 0.0, 1.0),
+            note(60, 0.0, 1.0),
+            note(65, 1.0, 1.0),
+            note(67, 2.0, 1.5),
+        ];
+        assert_eq!(
+            follow_notes(&before, &after, &sel(&[0, 1, 2])),
+            sel(&[1, 3])
+        );
+        assert!(follow_notes(&before, &after, &BTreeSet::new()).is_empty());
+        assert!(follow_notes(&before, &[], &sel(&[0])).is_empty());
+        // Two identical notes: each selected one finds its own.
+        let twins = vec![note(60, 0.0, 1.0), note(60, 0.0, 1.0)];
+        assert_eq!(follow_notes(&twins, &twins, &sel(&[0, 1])), sel(&[0, 1]));
+        assert_eq!(follow_notes(&twins, &twins[..1], &sel(&[0, 1])), sel(&[0]));
+        // -0.0 and 0.0 are the same start.
+        let minus = vec![note(60, -0.0, 1.0)];
+        assert_eq!(follow_notes(&minus, &twins[..1], &sel(&[0])), sel(&[0]));
+        assert!(
+            follow_notes(&before, &after, &sel(&[7])).is_empty(),
+            "out of range"
+        );
     }
 
     #[test]

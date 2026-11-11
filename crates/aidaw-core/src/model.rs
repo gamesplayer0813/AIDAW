@@ -9,6 +9,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::pitch;
 pub use crate::plugin::{Blob, Effect, EffectKind, PluginRef};
+use crate::transport::Transport;
 
 /// Version of the project file format this build writes. Files from newer
 /// builds are refused by [`crate::io::load`] instead of being misread.
@@ -36,6 +37,9 @@ pub struct Project {
     /// The shared reverb that tracks send to (see [`Track::reverb`]).
     #[serde(default, skip_serializing_if = "Reverb::is_default")]
     pub reverb: Reverb,
+    /// Loop region and playhead requests shared with the app; not music.
+    #[serde(default, skip_serializing_if = "Transport::is_empty")]
+    pub transport: Transport,
     #[serde(default)]
     pub tracks: Vec<Track>,
 }
@@ -160,6 +164,10 @@ pub struct Track {
     /// pan and reverb send.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<Effect>,
+    /// Colour in the app, "#rrggbb". Unset: one that follows from the id
+    /// (see [`Track::rgb`]), so it stays put when tracks come and go.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
     #[serde(default)]
     pub clips: Vec<Clip>,
 }
@@ -458,6 +466,7 @@ impl Project {
             time_signature: None,
             master_gain: 0.8,
             reverb: Reverb::default(),
+            transport: Transport::default(),
             tracks: Vec::new(),
         }
     }

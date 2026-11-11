@@ -887,7 +887,7 @@ fn fill_context(c: &mut ProcessContext, t: &Transport) {
     if t.playing {
         state |= kPlaying;
     }
-    if t.loop_end.is_some() {
+    if t.cycle.is_some() {
         state |= kCycleValid | kCycleActive;
     }
     c.state = util::uint(state);
@@ -897,11 +897,19 @@ fn fill_context(c: &mut ProcessContext, t: &Transport) {
     c.continousTimeSamples = t.frames as i64;
     c.projectTimeMusic = beat;
     c.barPositionMusic = (beat / bpb).floor() * bpb;
-    c.cycleStartMusic = 0.0;
-    c.cycleEndMusic = t.loop_end.unwrap_or(0.0);
+    let (start, end) = t.cycle.unwrap_or((0.0, 0.0));
+    c.cycleStartMusic = start;
+    c.cycleEndMusic = end;
     c.tempo = bpm;
-    c.timeSigNumerator = bpb as i32;
-    c.timeSigDenominator = 4;
+    let (num, den) = t.time_signature;
+    // The meter as written (6/8), when it matches the bar length.
+    let (num, den) = if num > 0 && den > 0 && f64::from(num) * 4.0 / f64::from(den) == bpb {
+        (num, den)
+    } else {
+        (t.beats_per_bar.max(1), 4)
+    };
+    c.timeSigNumerator = num as i32;
+    c.timeSigDenominator = den as i32;
 }
 
 const _: () = {

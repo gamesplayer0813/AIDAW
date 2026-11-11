@@ -90,9 +90,10 @@ fn transport(frames: u64) -> Transport {
         sample_rate: SR,
         bpm: 120.0,
         beats_per_bar: 4,
+        time_signature: (4, 4),
         beat: 0.0,
         playing: true,
-        loop_end: None,
+        cycle: None,
         frames,
     }
 }

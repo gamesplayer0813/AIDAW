@@ -205,7 +205,15 @@ fn zh(en: &str) -> Option<&'static str> {
         "Save your song to a file. AI tools work on this file too." => {
             "把歌曲保存成文件，AI 工具也在这个文件上工作。"
         }
-        "Stop and go back to the start" => "停止并回到开头",
+        "Stop and go back to the start (of the loop, while the loop is on)" => {
+            "停止并回到开头（循环打开时回到循环起点）"
+        }
+        "Loop is on: playback repeats the marked part (L). Click to play the whole song again." => {
+            "循环已打开：反复播放标出的部分（L）。点一下就恢复播放整首歌。"
+        }
+        "Loop: play one part over and over while you work on it (L).\nDrag in the thin strip above the bar numbers to choose the part." => {
+            "循环：一边修改一边反复播放某一部分（L）。\n在小节号上方的细条里拖动，选出要循环的部分。"
+        }
         "Pause" => "暂停",
         "Play" => "播放",
         "Play or pause the song (Space bar)" => "播放或暂停歌曲（空格键）",
@@ -277,6 +285,16 @@ fn zh(en: &str) -> Option<&'static str> {
         "Click a track above to change its sound." => "点击上方的音轨来更换音色。",
         "Sound" => "音色",
         "Track name" => "音轨名称",
+        "The colour of this track's row and clips" => "这条音轨的行和片段的颜色",
+        "Blue" => "蓝色",
+        "Orange" => "橙色",
+        "Green" => "绿色",
+        "Purple" => "紫色",
+        "Yellow" => "黄色",
+        "Cyan" => "青色",
+        "Pink" => "粉色",
+        "Violet" => "紫罗兰色",
+        "This track's own colour (picked by the AI)" => "这条音轨自己的颜色（AI 选的）",
         "⚙ Custom" => "⚙ 自定义",
         "Pick a sound (click to hear it):" => "选一个音色（点击试听）：",
         "🔊 Try" => "🔊 试听",
@@ -547,18 +565,81 @@ fn zh(en: &str) -> Option<&'static str> {
         "Each row is one instrument. The coloured blocks are parts of the song.\nClick a part to see and edit its notes below." => {
             "每一行是一种乐器，彩色方块是歌曲的段落。\n点击一个段落，就能在下方查看和编辑它的音符。"
         }
-        "click a part to edit its notes · double-click an empty spot for a new part · drag to move · Ctrl+D repeats the part" => {
-            "点击段落编辑音符 · 双击空白处新建段落 · 拖动来移动 · Ctrl+D 重复这个段落"
+        "click a part to edit its notes · double-click an empty spot for a new part · drag to move · Ctrl+D repeats the part · S cuts it at the playhead · right-click for more" => {
+            "点击段落编辑音符 · 双击空白处新建段落 · 拖动来移动 · Ctrl+D 重复这个段落 · S 在播放头处切开 · 右键查看更多"
         }
         "Song" => "歌曲",
         "Each row is one instrument (a track). The coloured blocks are clips: pieces of music.\nClick a clip to edit its notes in the piano roll below." => {
             "每一行是一种乐器（音轨），彩色方块是片段：一小段音乐。\n点击片段，就能在下方的钢琴卷帘里编辑它的音符。"
         }
         "zoom" => "缩放",
-        "click a clip to edit it · double-click an empty spot for a new clip · drag to move · drag the right edge to make longer · Ctrl+D duplicates" => {
-            "点击片段进行编辑 · 双击空白处新建片段 · 拖动来移动 · 拖右边缘来加长 · Ctrl+D 复制一份"
+        "click a clip to edit it · double-click for a new clip · drag to move, Alt+drag to copy · drag the right edge to make longer · S splits · right-click for more" => {
+            "点击片段进行编辑 · 双击新建片段 · 拖动来移动，Alt+拖动来复制 · 拖右边缘来加长 · S 拆分 · 右键查看更多"
         }
         "Double-click here to add a clip" => "双击这里添加片段",
+        "LOOP" => "循环",
+        "Drag here to loop a part of the song (L turns the loop on and off)" => {
+            "在这里拖动，选出要循环播放的部分（L 键开关循环）"
+        }
+        "The loop: drag it to move it, drag an end to change it, click it to turn it on or off" => {
+            "循环区：拖动来移动，拖两端来调整范围，点击来开关"
+        }
+        "Cut in two here" => "从这里切成两段",
+        "S cuts the clip at the playhead" => "按 S 在播放头处切开片段",
+        "Loop this clip" => "循环播放这个片段",
+        "Play just this clip over and over (L turns the loop off)" => {
+            "只反复播放这个片段（L 键关闭循环）"
+        }
+        "Duplicate  (Ctrl+D)" => "复制一份  (Ctrl+D)",
+        "Delete  (Del)" => "删除  (Del)",
+        "New clip here" => "在这里新建片段",
+        "Colour" => "颜色",
+        "Move up" => "上移",
+        "Move down" => "下移",
+        "You can also drag a track's name up or down" => "也可以直接上下拖动音轨名称",
+        "Delete this track" => "删除这条音轨",
+        "Turn the loop off  (L)" => "关闭循环  (L)",
+        "Turn the loop on  (L)" => "打开循环  (L)",
+        "Remove the loop" => "去掉循环区",
+        "Move the playhead here" => "把播放头移到这里",
+        "Loop bar {}" => "循环第 {} 小节",
+        "The loop is on, so Play starts at bar {} (L turns the loop off)" => {
+            "循环开着呢，所以播放会从第 {} 小节开始（L 键关闭循环）"
+        }
+        "Copied the clip to bar {}" => "已把片段复制到第 {} 小节",
+        "Loop removed: the whole song plays" => "已去掉循环区：播放整首歌",
+        "Loop off: the whole song plays (L turns the loop back on)" => {
+            "循环已关闭：播放整首歌（L 键重新打开）"
+        }
+        "No loop: the whole song plays" => "没有循环区：播放整首歌",
+        "Loop on: bar {} plays over and over (L turns the loop off)" => {
+            "循环已打开：第 {} 小节反复播放（L 键关闭循环）"
+        }
+        "Loop on: bars {}–{} play over and over (L turns the loop off)" => {
+            "循环已打开：第 {}–{} 小节反复播放（L 键关闭循环）"
+        }
+        "Put the playhead inside a clip first (click the bar numbers), then press S to cut it there" => {
+            "先把播放头放进一个片段里（点击小节号），再按 S 在那里切开"
+        }
+        "That is the edge of the clip: cut a little further inside it" => {
+            "这里是片段的边缘：往片段里面一点再切"
+        }
+        "Parts are cut at bar lines, and the nearest one here is the edge of the part: move the playhead further into it" => {
+            "段落只能在小节线上切开，而这里最近的小节线正好是段落边缘：把播放头往段落里面再挪一点"
+        }
+        "Cut the clip in two at bar {} (Ctrl+Z puts it back together)" => {
+            "已在第 {} 小节把片段切成两段（Ctrl+Z 可以拼回去）"
+        }
+        "The AI started playback at bar {}" => "AI 从第 {} 小节开始播放",
+        "The AI started playback at the loop, bar {}" => "AI 从循环起点（第 {} 小节）开始播放",
+        "The AI stopped playback at bar {}" => "AI 在第 {} 小节停止了播放",
+        "The AI moved the playhead to bar {}" => "AI 把播放头移到了第 {} 小节",
+        "The AI moved the playhead to bar {}, outside the loop: Play starts at bar {}" => {
+            "AI 把播放头移到了第 {} 小节，在循环区外：播放会从第 {} 小节开始"
+        }
+        "The AI moved the playhead to bar {} (Space plays from there)" => {
+            "AI 把播放头移到了第 {} 小节（按空格从那里播放）"
+        }
         "No tracks yet. Click + Add instrument on the left." => "还没有音轨。点击左边的 + 添加乐器。",
         "Custom sound" => "自定义音色",
 
@@ -867,6 +948,16 @@ fn zh(en: &str) -> Option<&'static str> {
         "Double-click a track row" => "双击音轨行",
         "New clip" => "新建片段",
         "Drag a clip / its right edge" => "拖动片段 / 片段右边缘",
+        "Alt+drag a clip" => "Alt+拖动片段",
+        "Copy it" => "复制它",
+        "Cut the clip at the playhead in two" => "在播放头处把片段切成两段",
+        "Loop on / off (drag in the strip above the bar numbers to choose the part)" => {
+            "打开 / 关闭循环（在小节号上方的细条里拖动来选范围）"
+        }
+        "Drag a track's name" => "拖动音轨名称",
+        "Change the order of the tracks" => "调整音轨顺序",
+        "Right-click a clip, a track or the ruler" => "右键点击片段、音轨或标尺",
+        "More: cut, loop, colour, move, delete" => "更多操作：切开、循环、颜色、移动、删除",
         "Move / make longer" => "移动 / 加长",
         "Click the piano roll grid" => "点击钢琴卷帘网格",
         "Add a note" => "添加音符",
@@ -937,11 +1028,9 @@ mod tests {
     }
 
     /// Every `tr("…")` / `trf("…")` in the GUI, plus the tutorial and preset
-    /// text that is translated where it is shown, has a Chinese entry.
-    #[test]
-    fn every_string_is_translated() {
+    /// text that is translated where it is shown.
+    fn ui_texts() -> Vec<String> {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
-        let mut missing = Vec::new();
         let mut texts = Vec::new();
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
@@ -968,12 +1057,58 @@ mod tests {
             texts.push(p.name.to_string());
             texts.push(p.hint.to_string());
         }
-        for t in &texts {
-            if zh(t).is_none() {
-                missing.push(t.clone());
-            }
-        }
+        texts
+    }
+
+    #[test]
+    fn every_string_is_translated() {
+        let texts = ui_texts();
+        let missing: Vec<&String> = texts.iter().filter(|t| zh(t).is_none()).collect();
         assert!(texts.len() > 200, "found only {} strings", texts.len());
         assert!(missing.is_empty(), "no Chinese for: {missing:#?}");
+    }
+
+    /// Every character of the interface, in English and in Chinese, is in
+    /// the fonts AIDAW ships (a system font is not counted), so none shows
+    /// up as an empty box on a PC that lacks some font.
+    #[test]
+    fn every_character_has_a_glyph() {
+        use eframe::egui::{Context, FontFamily, FontId};
+        let ctx = Context::default();
+        ctx.set_fonts(crate::theme::font_definitions(None));
+        let _ = ctx.run(Default::default(), |_| {});
+        let has = |c| ctx.fonts(|f| f.has_glyph(&FontId::proportional(14.0), c));
+        assert!(
+            has('中') && has('🔊') && !has('한'),
+            "the check itself works"
+        );
+        // Text shown without `tr`, such as emoji in labels, is in the code
+        // too (comments aside).
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        let mut code = String::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let src = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+            let src = src.split("#[cfg(test)]").next().unwrap();
+            for line in src.lines().filter(|l| !l.trim_start().starts_with("//")) {
+                code.push_str(line);
+            }
+        }
+        let mut missing = std::collections::BTreeMap::new();
+        for en in ui_texts().into_iter().chain([code]) {
+            let zh = zh(&en).unwrap_or_default().to_string();
+            for text in [en, zh] {
+                for family in [FontFamily::Proportional, crate::theme::bold()] {
+                    let font = FontId::new(14.0, family);
+                    for c in text.chars().filter(|c| !c.is_control()) {
+                        if !ctx.fonts(|f| f.has_glyph(&font, c)) {
+                            let at = text.find(c).unwrap_or(0);
+                            let context: String = text[at..].chars().take(40).collect();
+                            missing.entry(c).or_insert(context);
+                        }
+                    }
+                }
+            }
+        }
+        assert!(missing.is_empty(), "no glyph for: {missing:#?}");
     }
 }

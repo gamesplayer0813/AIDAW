@@ -150,9 +150,10 @@ impl Plugins {
                 .collect();
             let instruments = all.iter().filter(|p| p.kind == Kind::Instrument).count();
             out += &format!(
-                "{} VST3 plugins installed ({instruments} instruments, {} effects)",
-                all.len(),
-                all.len() - instruments
+                "{} installed ({}, {})",
+                count(all.len(), "VST3 plugin"),
+                count(instruments, "instrument"),
+                count(all.len() - instruments, "effect")
             );
             if shown.len() != all.len() {
                 out += &format!(", {} shown", shown.len());
@@ -193,8 +194,8 @@ impl Plugins {
         }
         if report.scanned > 0 {
             out += &format!(
-                "\n(looked at {} new or updated plugin files)",
-                report.scanned
+                "\n(looked at {})",
+                count(report.scanned, "new or updated plugin file")
             );
         }
         if !report.problems.is_empty() {
@@ -235,10 +236,10 @@ impl Plugins {
             .filter(|p| search.as_deref().is_none_or(|s| norm(&p.name).contains(s)))
             .collect();
         let mut out = format!(
-            "{} ({}): {} parameters",
+            "{} ({}): {}",
             target.plugin.name,
             target.label,
-            params.len()
+            count(params.len(), "parameter")
         );
         if let Some(s) = &search {
             out += &format!(", {} matching {s:?}", shown.len());
@@ -656,6 +657,15 @@ pub fn readable_json(p: &Project) -> Result<String> {
     let mut v = serde_json::to_value(p)?;
     walk(&mut v);
     Ok(serde_json::to_string_pretty(&v)?)
+}
+
+/// "1 effect", "2 effects".
+pub fn count(n: usize, thing: &str) -> String {
+    if n == 1 {
+        format!("1 {thing}")
+    } else {
+        format!("{n} {thing}s")
+    }
 }
 
 #[cfg(test)]

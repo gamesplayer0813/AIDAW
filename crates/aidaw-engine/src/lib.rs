@@ -40,7 +40,8 @@ const MAX_BACKLOG: usize = 4096;
 enum Command {
     SetProject {
         project: Arc<Project>,
-        loop_end: Option<f64>,
+        /// [`Project::playback_loop`], worked out on the UI thread.
+        looping: Option<(f64, f64)>,
         /// The project's plugins, if it has any.
         rack: Option<Box<dyn Rack>>,
     },
@@ -86,8 +87,8 @@ struct Player {
     transport: Arc<Transport>,
     project: Arc<Project>,
     rack: Option<Box<dyn Rack>>,
-    /// Cached [`Project::loop_end_beats`]: playback wraps to the start here.
-    loop_end: Option<f64>,
+    /// What playback repeats: the loop region, or else the whole song.
+    looping: Option<(f64, f64)>,
     seq: Sequencer,
     playing: bool,
 }
@@ -99,7 +100,7 @@ impl Player {
         let rack = self.rack.as_deref_mut().map(|r| r as &mut dyn Rack);
         if self.playing {
             self.seq
-                .process_looping_with(&self.project, rack, out, self.loop_end);
+                .process_looping_with(&self.project, rack, out, self.looping);
             self.transport
                 .position
                 .store(self.seq.position().to_bits(), Ordering::Release);
@@ -124,17 +125,30 @@ impl Player {
             match cmd {
                 Command::SetProject {
                     project,
-                    loop_end,
+                    looping,
                     rack,
                 } => {
                     let old = Retired {
                         _project: std::mem::replace(&mut self.project, project),
                         _rack: std::mem::replace(&mut self.rack, rack),
                     };
-                    self.loop_end = loop_end;
+                    self.looping = looping;
                     self.retire(old);
                 }
-                Command::Play => self.playing = true,
+                Command::Play => {
+                    // Play starts inside the loop: from its start when the
+                    // playhead is before it or past it.
+                    if let Some((start, end)) = self.looping {
+                        let pos = self.seq.position();
+                        if !self.playing && (pos < start || pos >= end) {
+                            self.seq.seek(start);
+                            self.transport
+                                .position
+                                .store(self.seq.position().to_bits(), Ordering::Release);
+                        }
+                    }
+                    self.playing = true;
+                }
                 Command::Pause => {
                     self.playing = false;
                     // Fade out whatever is sounding; playing again picks up
@@ -213,7 +227,7 @@ fn connect(project: &Project, sample_rate: u32) -> (Remote, Player) {
         transport,
         project: snapshot(project),
         rack: None,
-        loop_end: project.loop_end_beats(),
+        looping: project.playback_loop(),
         seq: Sequencer::new(sample_rate),
         playing: false,
     };
@@ -267,7 +281,7 @@ impl Remote {
     fn set_project(&self, project: &Project, rack: Option<Box<dyn Rack>>) {
         self.send(Command::SetProject {
             project: snapshot(project),
-            loop_end: project.loop_end_beats(),
+            looping: project.playback_loop(),
             rack,
         });
     }
@@ -473,6 +487,8 @@ impl Engine {
         self.remote.set_project(project, rack);
     }
 
+    /// Start playing. With a loop region on, playback starts at the loop's
+    /// start unless the playhead is already inside the loop.
     pub fn play(&self) {
         self.remote.play();
     }
@@ -840,6 +856,47 @@ mod tests {
     }
 
     #[test]
+    fn play_starts_inside_the_loop_region_and_repeats_it() {
+        let mut p = song();
+        p.transport.loop_region = Some(aidaw_core::LoopRegion {
+            start: 4.0,
+            end: 6.0,
+            on: true,
+        });
+        let (remote, mut player) = connect(&p, SR);
+        let mut buf = block();
+        // The playhead sits at the start of the song, before the loop.
+        remote.play();
+        player.render(&mut buf);
+        let pos = remote.position();
+        assert!(pos > 4.0 && pos < 4.1, "{pos}");
+        // Two beats at 120 BPM is one second: the loop comes round again.
+        for _ in 0..(SR as usize / 512 + 2) {
+            player.render(&mut buf);
+        }
+        let pos = remote.position();
+        assert!((4.0..4.2).contains(&pos), "{pos}");
+        // Seeking before the loop while playing plays into it...
+        remote.seek(3.0);
+        player.render(&mut buf);
+        assert!(remote.position() < 4.0);
+        // ...but Play after a pause starts inside the loop again.
+        remote.pause();
+        player.render(&mut buf);
+        remote.play();
+        player.render(&mut buf);
+        assert!(remote.position() >= 4.0, "{}", remote.position());
+
+        // Switched off, the loop no longer holds playback.
+        let mut off = p.clone();
+        off.transport.loop_region.as_mut().unwrap().on = false;
+        remote.set_project(&off, None);
+        remote.seek(6.5);
+        player.render(&mut buf);
+        assert!(remote.position() > 6.5, "{}", remote.position());
+    }
+
+    #[test]
     fn pausing_lets_the_reverb_ring_out() {
         let p = song();
         let (remote, mut player) = connect(&p, SR);
@@ -974,7 +1031,7 @@ mod tests {
                 .commands
                 .try_send(Command::SetProject {
                     project: Arc::new(q.clone()),
-                    loop_end: q.loop_end_beats(),
+                    looping: q.playback_loop(),
                     rack: None,
                 })
                 .ok();
