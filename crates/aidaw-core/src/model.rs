@@ -2,10 +2,15 @@
 //! GUI, the audio engine and the AI (through the MCP server). It serialises
 //! to a human- and LLM-readable JSON file (`*.aidaw.json`).
 
-use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::str::FromStr;
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::pitch;
 
+/// Version of the project file format this build writes. Files from newer
+/// builds are refused by [`crate::io::load`] instead of being misread.
 pub const FORMAT_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -15,8 +20,16 @@ pub struct Project {
     pub name: String,
     /// Tempo in beats per minute (a beat is a quarter note).
     pub bpm: f64,
+    /// How long a bar is, in beats (quarter notes): 4 in 4/4, 3 in 3/4 and
+    /// in 6/8 (six eighth notes are three quarter notes).
     #[serde(default = "default_beats_per_bar")]
     pub beats_per_bar: u32,
+    /// The time signature as the song should be written, when it is not
+    /// simply `beats_per_bar`/4: "6/8", "12/8", "2/2". It only changes how
+    /// the meter is shown; bars always last `beats_per_bar` beats. Ignored
+    /// when it does not fit `beats_per_bar` (see [`Project::time_signature`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_signature: Option<TimeSignature>,
     #[serde(default = "default_gain")]
     pub master_gain: f32,
     /// The shared reverb that tracks send to (see [`Track::reverb`]).
@@ -49,6 +62,78 @@ impl Default for Reverb {
 impl Reverb {
     fn is_default(&self) -> bool {
         *self == Reverb::default()
+    }
+}
+
+/// A time signature such as 6/8: `num` notes of value 1/`den` per bar.
+/// Saved as the string "6/8".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimeSignature {
+    pub num: u32,
+    pub den: u32,
+}
+
+impl TimeSignature {
+    /// Bar length in beats (quarter notes), when it is a whole number of
+    /// beats AIDAW can use (1..=32): 6/8 -> 3, 12/8 -> 6, 2/2 -> 4.
+    /// `None` for 7/8 (3.5 beats) and the like.
+    pub fn beats_per_bar(self) -> Option<u32> {
+        let quarters = self.num * 4;
+        (self.den > 0 && quarters.is_multiple_of(self.den))
+            .then(|| quarters / self.den)
+            .filter(|b| (1..=32).contains(b))
+    }
+}
+
+impl fmt::Display for TimeSignature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.num, self.den)
+    }
+}
+
+impl FromStr for TimeSignature {
+    type Err = String;
+
+    /// Parses "6/8". The bar it describes must last a whole number of beats
+    /// (quarter notes), from 1 to 32.
+    fn from_str(s: &str) -> Result<Self, String> {
+        let bad =
+            || format!("time signature must look like \"4/4\", \"3/4\" or \"6/8\" (got {s:?})");
+        let (n, d) = s.trim().split_once('/').ok_or_else(bad)?;
+        let num: u32 = n.trim().parse().map_err(|_| bad())?;
+        let den: u32 = d.trim().parse().map_err(|_| bad())?;
+        if num == 0 || !matches!(den, 1 | 2 | 4 | 8 | 16) {
+            return Err(format!(
+                "time signature {s:?}: the top number must be 1 or more and the bottom one 1, 2, 4, 8 or 16"
+            ));
+        }
+        let ts = TimeSignature { num, den };
+        let beats = f64::from(num) * 4.0 / f64::from(den);
+        if beats.fract() != 0.0 {
+            return Err(format!(
+                "a {ts} bar is {beats} beats long, but AIDAW bars last a whole number of beats (quarter notes); write it as {num}/4 with a {}x higher bpm instead",
+                den / 4
+            ));
+        }
+        if ts.beats_per_bar().is_none() {
+            return Err(format!(
+                "a {ts} bar is {beats} beats long; AIDAW bars are 1 to 32 beats"
+            ));
+        }
+        Ok(ts)
+    }
+}
+
+impl Serialize for TimeSignature {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for TimeSignature {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -318,6 +403,27 @@ impl Clip {
     pub fn end(&self) -> f64 {
         self.start + self.length
     }
+
+    /// Put the notes in playing order: by start, then pitch. Playback
+    /// relies on it (see [`crate::render::Sequencer`]), and the GUI and
+    /// the AI keep the same order, so a note's index means the same note
+    /// in both.
+    pub fn sort_notes(&mut self) {
+        if !self.notes_sorted() {
+            self.notes.sort_by(note_order);
+        }
+    }
+
+    /// Whether the notes are in the order [`Self::sort_notes`] puts them in.
+    pub fn notes_sorted(&self) -> bool {
+        self.notes
+            .is_sorted_by(|a, b| note_order(a, b) != std::cmp::Ordering::Greater)
+    }
+}
+
+/// Playing order of notes: by start, then pitch.
+pub fn note_order(a: &Note, b: &Note) -> std::cmp::Ordering {
+    a.start.total_cmp(&b.start).then(a.pitch.cmp(&b.pitch))
 }
 
 impl Project {
@@ -327,10 +433,50 @@ impl Project {
             name: name.into(),
             bpm,
             beats_per_bar: 4,
+            time_signature: None,
             master_gain: 0.8,
             reverb: Reverb::default(),
             tracks: Vec::new(),
         }
+    }
+
+    /// The meter to show: the saved time signature when it matches the bar
+    /// length, otherwise `beats_per_bar`/4.
+    pub fn time_signature(&self) -> TimeSignature {
+        self.time_signature
+            .filter(|ts| ts.beats_per_bar() == Some(self.beats_per_bar))
+            .unwrap_or(TimeSignature {
+                num: self.beats_per_bar,
+                den: 4,
+            })
+    }
+
+    /// Use this meter: bars become `ts.beats_per_bar()` beats long.
+    /// Returns false (and changes nothing) for a meter whose bars are not a
+    /// whole number of beats, such as 7/8.
+    pub fn set_time_signature(&mut self, ts: TimeSignature) -> bool {
+        let Some(beats) = ts.beats_per_bar() else {
+            return false;
+        };
+        self.beats_per_bar = beats;
+        // x/4 is what `beats_per_bar` says anyway; keep the file minimal.
+        self.time_signature = (ts.den != 4).then_some(ts);
+        true
+    }
+
+    /// [`Clip::sort_notes`] for every clip.
+    pub fn sort_notes(&mut self) {
+        for clip in self.tracks.iter_mut().flat_map(|t| t.clips.iter_mut()) {
+            clip.sort_notes();
+        }
+    }
+
+    /// Whether every clip's notes are in playing order.
+    pub fn notes_sorted(&self) -> bool {
+        self.tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .all(Clip::notes_sorted)
     }
 
     pub fn seconds_per_beat(&self) -> f64 {
@@ -512,6 +658,46 @@ mod tests {
         assert!(s.contains(r#""reverb":{"size":0.75,"tone":0.5}"#), "{s}");
         assert!(s.contains(r#""solo":false,"reverb":0.25"#), "{s}");
         assert_eq!(serde_json::from_str::<Project>(&s).unwrap(), q);
+    }
+
+    #[test]
+    fn time_signatures_parse_and_set_the_bar_length() {
+        let ts = |s: &str| s.parse::<TimeSignature>();
+        assert_eq!(ts(" 6/8 ").unwrap().beats_per_bar(), Some(3));
+        assert_eq!(ts("12/8").unwrap().beats_per_bar(), Some(6));
+        assert_eq!(ts("2/2").unwrap().beats_per_bar(), Some(4));
+        assert_eq!(ts("3 / 4").unwrap().to_string(), "3/4");
+        assert!(ts("7/8").unwrap_err().contains("3.5 beats"));
+        assert!(ts("7/8").unwrap_err().contains("7/4 with a 2x higher bpm"));
+        assert!(ts("33/4").unwrap_err().contains("1 to 32 beats"));
+        for bad in ["", "4", "0/4", "4/3", "4/0", "x/4", "-3/4"] {
+            assert!(ts(bad).is_err(), "{bad}");
+        }
+
+        let mut p = Project::new("x", 100.0);
+        assert_eq!(p.time_signature().to_string(), "4/4");
+        assert!(p.set_time_signature(ts("6/8").unwrap()));
+        assert_eq!(
+            (p.beats_per_bar, p.time_signature().to_string()),
+            (3, "6/8".into())
+        );
+        let json = serde_json::to_string(&p).unwrap();
+        assert!(json.contains(r#""time_signature":"6/8""#), "{json}");
+        assert_eq!(serde_json::from_str::<Project>(&json).unwrap(), p);
+        // A meter that does not fit the bar length (an older AIDAW changed
+        // beats_per_bar and kept the field) is not shown.
+        p.beats_per_bar = 4;
+        assert_eq!(p.time_signature().to_string(), "4/4");
+        // x/4 needs no field of its own.
+        assert!(p.set_time_signature(ts("3/4").unwrap()));
+        assert_eq!((p.beats_per_bar, p.time_signature), (3, None));
+        assert!(!serde_json::to_string(&p)
+            .unwrap()
+            .contains("time_signature"));
+        assert!(
+            serde_json::from_str::<Project>(r#"{"name":"x","bpm":90,"time_signature":"7/8"}"#)
+                .is_err()
+        );
     }
 
     #[test]

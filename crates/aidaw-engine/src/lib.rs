@@ -161,6 +161,15 @@ struct Remote {
     seek_to: Cell<f64>,
 }
 
+/// The copy of `project` the audio thread plays, with every clip's notes in
+/// start order as the sequencer needs (the editor may have them in any
+/// order while a note is being dragged).
+fn snapshot(project: &Project) -> Arc<Project> {
+    let mut copy = project.clone();
+    copy.sort_notes();
+    Arc::new(copy)
+}
+
 /// Create both ends for `project`: the UI's [`Remote`] and the callback's [`Player`].
 fn connect(project: &Project, sample_rate: u32) -> (Remote, Player) {
     let (commands, commands_rx) = mpsc::sync_channel(QUEUE_LEN);
@@ -180,7 +189,7 @@ fn connect(project: &Project, sample_rate: u32) -> (Remote, Player) {
         retired: retired_tx,
         graveyard: Vec::with_capacity(GRAVEYARD_LEN),
         transport,
-        project: Arc::new(project.clone()),
+        project: snapshot(project),
         loop_end: project.loop_end_beats(),
         seq: Sequencer::new(sample_rate),
         playing: false,
@@ -234,7 +243,7 @@ impl Remote {
 
     fn set_project(&self, project: &Project) {
         self.send(Command::SetProject {
-            project: Arc::new(project.clone()),
+            project: snapshot(project),
             loop_end: project.loop_end_beats(),
         });
     }
@@ -727,6 +736,21 @@ mod tests {
         assert!(peak(&buf) > 0.01, "chord is heard: {}", peak(&buf));
         // It fades in rather than jumping straight to full level.
         assert!(buf[0].abs() < 1e-3, "{}", buf[0]);
+    }
+
+    #[test]
+    fn notes_the_editor_left_out_of_order_still_play() {
+        // Dragging a note past its neighbours leaves the clip unsorted.
+        let mut p = song();
+        p.tracks[1].clips[0].notes.reverse();
+        assert!(!p.notes_sorted());
+        let (remote, mut player) = connect(&p, SR);
+        remote.set_project(&p);
+        remote.play();
+        let mut buf = block();
+        player.render(&mut buf);
+        assert!(player.project.notes_sorted());
+        assert!(peak(&buf) > 0.01, "the first kick is heard: {}", peak(&buf));
     }
 
     #[test]

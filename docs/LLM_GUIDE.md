@@ -266,11 +266,14 @@ plain JSON as well, so they can be pasted into a chat for the AI to vary.
 ## Music in one minute
 
 - **Time** is counted in beats; 1 beat is a quarter note. In 4/4 a bar has 4 beats, so bar 5
-  starts at beat 16.
+  starts at beat 16. `update_project {"time_signature": "3/4"}` makes bars 3 beats long; `"6/8"`
+  does too (six eighth notes), and `"12/8"` makes them 6 beats. Bars must last a whole number of
+  beats, so 5/8 and 7/8 are not possible yet.
 - **Pitch** is written as a note name with an octave. `C4` is middle C (MIDI 60). Bass sits
   around `C2`, chords around `C4`, melodies between `C4` and `C6`.
 - **Drums** are written by name: `kick`, `snare`, `clap`, `hat`, `open_hat`, `tom_low`,
   `tom_mid`, `tom_high`, `crash`, `ride`, plus percussion such as `cowbell`, `shaker`,
-  `tambourine` and `conga_high`. Each pattern has 16 steps per bar.
+  `tambourine` and `conga_high`. Each pattern has 4 steps per beat: 16 per bar in 4/4, 12 in 3/4
+  and 6/8.
 - **Chords** are written as symbols: `C Am F#m Bb G7 Cmaj7 Dm7 Bm7b5 Esus4 Cdim Caug C/E`.
   `C6/9 C9 C13 G7b9 Dm11 Cmaj7#11` also work. `Am:2` lasts 2 beats.
