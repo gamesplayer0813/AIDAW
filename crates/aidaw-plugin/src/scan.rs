@@ -270,7 +270,9 @@ impl Store {
             let key = path.display().to_string();
             let (size, modified) = stamp(&path);
             match self.modules.iter().find(|m| m.path == key) {
-                Some(m) if !force && m.size == size && m.modified == modified => keep.push(m.clone()),
+                Some(m) if !force && m.size == size && m.modified == modified => {
+                    keep.push(m.clone())
+                }
                 _ => todo.push((path, size, modified)),
             }
         }
@@ -331,9 +333,7 @@ impl Store {
             .filter(|p| seen.insert(p.uid.to_ascii_uppercase()))
             .cloned()
             .collect();
-        out.sort_by(|a, b| {
-            (a.kind, a.name.to_lowercase()).cmp(&(b.kind, b.name.to_lowercase()))
-        });
+        out.sort_by_key(|p| (p.kind, p.name.to_lowercase()));
         out
     }
 
@@ -483,14 +483,20 @@ mod tests {
     fn plugins_are_listed_once_instruments_first() {
         let names: Vec<String> = store().plugins().into_iter().map(|p| p.name).collect();
         assert_eq!(names, ["Bass Synth", "Big Reverb", "Small Reverb"]);
-        assert_eq!(store().problems(), [("/broken.vst3".into(), "crashed".into())]);
+        assert_eq!(
+            store().problems(),
+            [("/broken.vst3".into(), "crashed".into())]
+        );
     }
 
     #[test]
     fn names_resolve_by_uid_name_or_unique_part() {
         let s = store();
         assert_eq!(s.resolve("big reverb", None).unwrap().uid, "A".repeat(32));
-        assert_eq!(s.resolve(&"c".repeat(32), None).unwrap().name, "Small Reverb");
+        assert_eq!(
+            s.resolve(&"c".repeat(32), None).unwrap().name,
+            "Small Reverb"
+        );
         assert_eq!(s.resolve("bass", None).unwrap().name, "Bass Synth");
         let e = s.resolve("reverb", None).unwrap_err().to_string();
         assert!(e.contains("could mean"), "{e}");
@@ -517,11 +523,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("aidaw-find-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("Vendor/Synth.vst3/Contents/x86_64-linux")).unwrap();
-        std::fs::write(dir.join("Vendor/Synth.vst3/Contents/x86_64-linux/Synth.so"), b"").unwrap();
+        std::fs::write(
+            dir.join("Vendor/Synth.vst3/Contents/x86_64-linux/Synth.so"),
+            b"",
+        )
+        .unwrap();
         std::fs::write(dir.join("Old.VST3"), b"").unwrap();
         std::fs::write(dir.join("readme.txt"), b"").unwrap();
         let found = find_modules(std::slice::from_ref(&dir));
-        assert_eq!(found, vec![dir.join("Old.VST3"), dir.join("Vendor/Synth.vst3")]);
+        assert_eq!(
+            found,
+            vec![dir.join("Old.VST3"), dir.join("Vendor/Synth.vst3")]
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

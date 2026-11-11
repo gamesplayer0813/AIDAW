@@ -9,6 +9,7 @@
 //! The GUI watches the same file and reloads it live, so a human sees every
 //! change the AI makes and can fine-tune it (and undo it) in the editor.
 
+mod plugins;
 mod session;
 mod tools;
 
@@ -50,6 +51,10 @@ usage:
 The project file can also be set with the AIDAW_PROJECT environment variable.";
 
 fn main() -> ExitCode {
+    // Plugins load in copies of this program (see aidaw_plugin::worker).
+    if let Some(code) = aidaw_plugin::worker::run_if_worker() {
+        return ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
     match run() {
         Ok(code) => code,
         Err(e) => {

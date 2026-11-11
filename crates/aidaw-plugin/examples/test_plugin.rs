@@ -39,6 +39,15 @@ fn copy_c(src: &str, dst: &mut [c_char]) {
     dst[n] = 0;
 }
 
+/// Enum constants are C `int`s on Windows and `unsigned` elsewhere.
+fn int(k: impl Into<i64>) -> i32 {
+    k.into() as i32
+}
+
+fn uint(k: impl Into<i64>) -> u32 {
+    k.into() as u32
+}
+
 fn copy_w(src: &str, dst: &mut [TChar]) {
     let mut n = 0;
     for (d, s) in dst.iter_mut().zip(src.encode_utf16()) {
@@ -71,8 +80,7 @@ unsafe fn write_f64s(stream: *mut IBStream, values: &[f64]) -> tresult {
     for v in values {
         let mut bytes = v.to_le_bytes();
         let mut n = 0;
-        if unsafe { s.write(bytes.as_mut_ptr() as *mut c_void, 8, &mut n) } != kResultOk || n != 8
-        {
+        if unsafe { s.write(bytes.as_mut_ptr() as *mut c_void, 8, &mut n) } != kResultOk || n != 8 {
             return kResultFalse;
         }
     }
@@ -119,8 +127,8 @@ fn bus_info(bus: *mut BusInfo, dir: i32, ch: i32, name: &str, media: i32) -> tre
     bus.direction = dir;
     bus.channelCount = ch;
     copy_w(name, &mut bus.name);
-    bus.busType = BusTypes_::kMain as i32;
-    bus.flags = BusInfo_::BusFlags_::kDefaultActive as u32;
+    bus.busType = int(BusTypes_::kMain);
+    bus.flags = uint(BusInfo_::BusFlags_::kDefaultActive);
     kResultOk
 }
 
@@ -170,8 +178,8 @@ impl IComponentTrait for SynthProcessor {
     }
     unsafe fn getBusCount(&self, media: MediaType, dir: BusDirection) -> int32 {
         match (media as u32, dir as u32) {
-            (m, d) if m == MediaTypes_::kAudio as u32 && d == BusDirections_::kOutput as u32 => 1,
-            (m, d) if m == MediaTypes_::kEvent as u32 && d == BusDirections_::kInput as u32 => 1,
+            (m, d) if m == uint(MediaTypes_::kAudio) && d == uint(BusDirections_::kOutput) => 1,
+            (m, d) if m == uint(MediaTypes_::kEvent) && d == uint(BusDirections_::kInput) => 1,
             _ => 0,
         }
     }
@@ -185,7 +193,7 @@ impl IComponentTrait for SynthProcessor {
         if index != 0 || unsafe { self.getBusCount(media, dir) } == 0 {
             return kInvalidArgument;
         }
-        if media == MediaTypes_::kAudio as i32 {
+        if media == int(MediaTypes_::kAudio) {
             bus_info(bus, dir, 2, "Out", media)
         } else {
             bus_info(bus, dir, 16, "Notes", media)
@@ -214,7 +222,11 @@ impl IComponentTrait for SynthProcessor {
         }
     }
     unsafe fn getState(&self, state: *mut IBStream) -> tresult {
-        let greeted = if self.greeted.load(Ordering::Relaxed) { 1.0 } else { 0.0 };
+        let greeted = if self.greeted.load(Ordering::Relaxed) {
+            1.0
+        } else {
+            0.0
+        };
         unsafe { write_f64s(state, &[self.level.get(), self.octave.get(), greeted]) }
     }
 }
@@ -239,7 +251,7 @@ impl IAudioProcessorTrait for SynthProcessor {
         index: int32,
         arr: *mut SpeakerArrangement,
     ) -> tresult {
-        if dir == BusDirections_::kOutput as i32 && index == 0 {
+        if dir == int(BusDirections_::kOutput) && index == 0 {
             unsafe { *arr = SpeakerArr::kStereo };
             kResultOk
         } else {
@@ -247,7 +259,7 @@ impl IAudioProcessorTrait for SynthProcessor {
         }
     }
     unsafe fn canProcessSampleSize(&self, size: int32) -> tresult {
-        if size == SymbolicSampleSizes_::kSample32 as i32 {
+        if size == int(SymbolicSampleSizes_::kSample32) {
             kResultOk
         } else {
             kNotImplemented
@@ -455,7 +467,12 @@ impl IEditControllerTrait for SynthController {
             };
         kResultOk
     }
-    unsafe fn getParamStringByValue(&self, id: ParamID, v: ParamValue, s: *mut String128) -> tresult {
+    unsafe fn getParamStringByValue(
+        &self,
+        id: ParamID,
+        v: ParamValue,
+        s: *mut String128,
+    ) -> tresult {
         let Some(s) = (unsafe { s.as_mut() }) else {
             return kInvalidArgument;
         };
@@ -467,7 +484,12 @@ impl IEditControllerTrait for SynthController {
         copy_w(&text, s);
         kResultOk
     }
-    unsafe fn getParamValueByString(&self, _id: ParamID, _s: *mut TChar, _v: *mut ParamValue) -> tresult {
+    unsafe fn getParamValueByString(
+        &self,
+        _id: ParamID,
+        _s: *mut TChar,
+        _v: *mut ParamValue,
+    ) -> tresult {
         kNotImplemented
     }
     unsafe fn normalizedParamToPlain(&self, _id: ParamID, v: ParamValue) -> ParamValue {
@@ -559,10 +581,16 @@ impl IComponentTrait for Gain {
         kResultOk
     }
     unsafe fn getBusCount(&self, media: MediaType, _dir: BusDirection) -> int32 {
-        (media == MediaTypes_::kAudio as i32) as int32
+        (media == int(MediaTypes_::kAudio)) as int32
     }
-    unsafe fn getBusInfo(&self, media: MediaType, dir: BusDirection, index: int32, bus: *mut BusInfo) -> tresult {
-        if media != MediaTypes_::kAudio as i32 || index != 0 {
+    unsafe fn getBusInfo(
+        &self,
+        media: MediaType,
+        dir: BusDirection,
+        index: int32,
+        bus: *mut BusInfo,
+    ) -> tresult {
+        if media != int(MediaTypes_::kAudio) || index != 0 {
             return kInvalidArgument;
         }
         bus_info(bus, dir, 2, "Main", media)
@@ -607,7 +635,12 @@ impl IAudioProcessorTrait for Gain {
             kResultFalse
         }
     }
-    unsafe fn getBusArrangement(&self, _dir: BusDirection, index: int32, arr: *mut SpeakerArrangement) -> tresult {
+    unsafe fn getBusArrangement(
+        &self,
+        _dir: BusDirection,
+        index: int32,
+        arr: *mut SpeakerArrangement,
+    ) -> tresult {
         if index != 0 {
             return kInvalidArgument;
         }
@@ -615,7 +648,7 @@ impl IAudioProcessorTrait for Gain {
         kResultOk
     }
     unsafe fn canProcessSampleSize(&self, size: int32) -> tresult {
-        if size == SymbolicSampleSizes_::kSample32 as i32 {
+        if size == int(SymbolicSampleSizes_::kSample32) {
             kResultOk
         } else {
             kNotImplemented
@@ -647,8 +680,12 @@ impl IAudioProcessorTrait for Gain {
         let (input, output) = unsafe { (&*data.inputs, &*data.outputs) };
         for ch in 0..2 {
             unsafe {
-                let i = std::slice::from_raw_parts(*input.__field0.channelBuffers32.add(ch), frames);
-                let o = std::slice::from_raw_parts_mut(*output.__field0.channelBuffers32.add(ch), frames);
+                let i =
+                    std::slice::from_raw_parts(*input.__field0.channelBuffers32.add(ch), frames);
+                let o = std::slice::from_raw_parts_mut(
+                    *output.__field0.channelBuffers32.add(ch),
+                    frames,
+                );
                 for f in 0..frames {
                     o[f] = i[f] * g;
                 }
@@ -691,7 +728,12 @@ impl IEditControllerTrait for Gain {
         info.flags = ParameterInfo_::ParameterFlags_::kCanAutomate;
         kResultOk
     }
-    unsafe fn getParamStringByValue(&self, _id: ParamID, v: ParamValue, s: *mut String128) -> tresult {
+    unsafe fn getParamStringByValue(
+        &self,
+        _id: ParamID,
+        v: ParamValue,
+        s: *mut String128,
+    ) -> tresult {
         match unsafe { s.as_mut() } {
             Some(s) => {
                 copy_w(&format!("{:.2}", v * 2.0), s);
@@ -700,8 +742,28 @@ impl IEditControllerTrait for Gain {
             None => kInvalidArgument,
         }
     }
-    unsafe fn getParamValueByString(&self, _id: ParamID, _s: *mut TChar, _v: *mut ParamValue) -> tresult {
-        kNotImplemented
+    unsafe fn getParamValueByString(
+        &self,
+        id: ParamID,
+        s: *mut TChar,
+        v: *mut ParamValue,
+    ) -> tresult {
+        // Reads what it shows: the factor, 0.00 to 2.00.
+        if id != GAIN || s.is_null() || v.is_null() {
+            return kInvalidArgument;
+        }
+        let mut len = 0;
+        while unsafe { *s.add(len) } != 0 && len < 128 {
+            len += 1;
+        }
+        let text = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(s, len) });
+        match text.trim().parse::<f64>() {
+            Ok(x) if (0.0..=2.0).contains(&x) => {
+                unsafe { *v = x / 2.0 };
+                kResultOk
+            }
+            _ => kResultFalse,
+        }
     }
     unsafe fn normalizedParamToPlain(&self, _id: ParamID, v: ParamValue) -> ParamValue {
         v * 2.0
@@ -771,7 +833,7 @@ impl IPluginFactoryTrait for Factory {
         copy_c("AIDAW", &mut info.vendor);
         copy_c("https://github.com/gamesplayer0813/AIDAW", &mut info.url);
         copy_c("", &mut info.email);
-        info.flags = PFactoryInfo_::FactoryFlags_::kUnicode as i32;
+        info.flags = int(PFactoryInfo_::FactoryFlags_::kUnicode);
         kResultOk
     }
     unsafe fn countClasses(&self) -> int32 {
@@ -782,12 +844,17 @@ impl IPluginFactoryTrait for Factory {
             return kInvalidArgument;
         };
         info.cid = e.cid;
-        info.cardinality = PClassInfo_::ClassCardinality_::kManyInstances as i32;
+        info.cardinality = int(PClassInfo_::ClassCardinality_::kManyInstances);
         copy_c(e.category, &mut info.category);
         copy_c(e.name, &mut info.name);
         kResultOk
     }
-    unsafe fn createInstance(&self, cid: FIDString, iid: FIDString, obj: *mut *mut c_void) -> tresult {
+    unsafe fn createInstance(
+        &self,
+        cid: FIDString,
+        iid: FIDString,
+        obj: *mut *mut c_void,
+    ) -> tresult {
         let cid = unsafe { *(cid as *const TUID) };
         let made: Option<ComPtr<FUnknown>> = if cid == SYNTH_CID {
             ComWrapper::new(SynthProcessor {
@@ -808,7 +875,10 @@ impl IPluginFactoryTrait for Factory {
             })
             .to_com_ptr()
         } else if cid == GAIN_CID {
-            ComWrapper::new(Gain { gain: F64::new(0.5) }).to_com_ptr()
+            ComWrapper::new(Gain {
+                gain: F64::new(0.5),
+            })
+            .to_com_ptr()
         } else {
             None
         };
@@ -831,7 +901,7 @@ impl IPluginFactory2Trait for Factory {
             return kInvalidArgument;
         };
         info.cid = e.cid;
-        info.cardinality = PClassInfo_::ClassCardinality_::kManyInstances as i32;
+        info.cardinality = int(PClassInfo_::ClassCardinality_::kManyInstances);
         copy_c(e.category, &mut info.category);
         copy_c(e.name, &mut info.name);
         info.classFlags = 0;
@@ -849,7 +919,7 @@ impl IPluginFactory3Trait for Factory {
             return kInvalidArgument;
         };
         info.cid = e.cid;
-        info.cardinality = PClassInfo_::ClassCardinality_::kManyInstances as i32;
+        info.cardinality = int(PClassInfo_::ClassCardinality_::kManyInstances);
         copy_c(e.category, &mut info.category);
         copy_w(e.name, &mut info.name);
         info.classFlags = 0;

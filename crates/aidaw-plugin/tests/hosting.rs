@@ -16,6 +16,7 @@ use aidaw_plugin::module::Module;
 use aidaw_plugin::rack::{self, Key, LiveRack};
 use aidaw_plugin::scan::{self, Kind, Store};
 use aidaw_plugin::worker::{Job, Worker};
+use serde_json::{json, Value};
 
 const SYNTH: &str = "41494441570000015445535453594E54";
 const GAIN: &str = "414944415700000354455354"; // + "4741494E"
@@ -180,7 +181,10 @@ fn the_module_lists_its_two_plugins() {
     assert_eq!(gain.sub_categories, "Fx|Dynamics");
     assert!(!gain.is_instrument());
     // Loading again hands back the same module.
-    assert!(std::sync::Arc::ptr_eq(&m, &Module::load(&bundle()).unwrap()));
+    assert!(std::sync::Arc::ptr_eq(
+        &m,
+        &Module::load(&bundle()).unwrap()
+    ));
 }
 
 #[test]
@@ -198,7 +202,13 @@ fn the_synth_plays_notes_and_its_settings_round_trip() {
 
     let mut l = vec![0.0f32; 512];
     let mut r = vec![0.0f32; 512];
-    proc.run(Role::Instrument, 512, &[on(100, 69)], &transport(0), [&mut l, &mut r]);
+    proc.run(
+        Role::Instrument,
+        512,
+        &[on(100, 69)],
+        &transport(0),
+        [&mut l, &mut r],
+    );
     assert_eq!(peak(&l[..100]), 0.0, "silent before the note");
     let p = peak(&l[100..]);
     assert!((p - 0.5).abs() < 0.01, "a sine at level 0.5: {p}");
@@ -207,8 +217,18 @@ fn the_synth_plays_notes_and_its_settings_round_trip() {
     synth.set_param(0, 0.25);
     l.fill(0.0);
     r.fill(0.0);
-    proc.run(Role::Instrument, 512, &[], &transport(512), [&mut l, &mut r]);
-    assert!((peak(&l) - 0.25).abs() < 0.01, "level now 0.25: {}", peak(&l));
+    proc.run(
+        Role::Instrument,
+        512,
+        &[],
+        &transport(512),
+        [&mut l, &mut r],
+    );
+    assert!(
+        (peak(&l) - 0.25).abs() < 0.01,
+        "level now 0.25: {}",
+        peak(&l)
+    );
 
     let (state, controller) = synth.state().unwrap();
     // Level, octave, and whether the editor half's greeting arrived
@@ -218,9 +238,19 @@ fn the_synth_plays_notes_and_its_settings_round_trip() {
     drop(proc);
     drop(synth);
 
-    let again = Plugin::load(&bundle(), SYNTH, setup(), Some(&state), controller.as_deref());
+    let again = Plugin::load(
+        &bundle(),
+        SYNTH,
+        setup(),
+        Some(&state),
+        controller.as_deref(),
+    );
     let (again, _proc) = again.unwrap();
-    assert_eq!(again.params()[0].value, 0.25, "the editor half was told too");
+    assert_eq!(
+        again.params()[0].value,
+        0.25,
+        "the editor half was told too"
+    );
     assert_eq!(f64s(&again.state().unwrap().0)[0], 0.25);
 }
 
@@ -324,7 +354,10 @@ fn the_live_rack_keeps_plugins_running_across_edits() {
     let fx_ref = song.tracks[0].effects[0].plugin();
     assert!(fx_ref.params.is_empty(), "folded into its settings");
     assert_eq!(f64s(fx_ref.state.as_ref().unwrap().as_bytes()), [0.25]);
-    assert!(!live.capture(&mut song, true), "nothing new the second time");
+    assert!(
+        !live.capture(&mut song, true),
+        "nothing new the second time"
+    );
 
     // Settings that differ in the file do not reload a running plugin
     // (the running one is newer: only AIDAW's editor writes them).
@@ -355,7 +388,11 @@ fn plugins_that_fail_are_not_retried_every_edit() {
     let mut live = LiveRack::new(SR);
     let _a = live.build(&song, &locate);
     let _b = live.build(&song, &locate);
-    assert_eq!(tries.load(Ordering::Relaxed), 2, "synth once, missing effect once");
+    assert_eq!(
+        tries.load(Ordering::Relaxed),
+        2,
+        "synth once, missing effect once"
+    );
     let f = live.failure(&Key::effect("t1", "fx1")).unwrap();
     assert!(f.error.contains("does not exist"), "{}", f.error);
     live.retry_failed();
@@ -400,7 +437,9 @@ fn workers_scan_render_and_report_crashes() {
     };
     let mut progress = Vec::new();
     let done = w
-        .run(&job, std::time::Duration::from_secs(60), &mut |p| progress.push(p))
+        .run(&job, std::time::Duration::from_secs(60), &mut |p| {
+            progress.push(p)
+        })
         .unwrap();
     assert!(done["seconds"].as_f64().unwrap() > 1.9, "{done}");
     assert!(std::fs::metadata(&wav).unwrap().len() > 100_000);
@@ -416,6 +455,54 @@ fn workers_scan_render_and_report_crashes() {
         )
         .unwrap();
     assert_eq!(params["params"][1]["name"], "Octave", "{params}");
+
+    // Values by option name, by what the plugin shows (read by the gain
+    // plugin itself; found along the knob for the synth's level), and as
+    // knob positions.
+    let set = |plugin: PluginRef, wanted: &[(&str, Value)]| {
+        let wanted = wanted
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+        w.run(
+            &Job::SetParams {
+                plugin: Box::new(plugin),
+                wanted,
+            },
+            std::time::Duration::from_secs(30),
+            &mut |_| {},
+        )
+    };
+    let done = set(
+        synth_ref(&bundle()),
+        &[
+            ("octave", json!("high")),
+            ("Level", json!("30")),
+            ("0", json!(0.25)),
+        ],
+    )
+    .unwrap();
+    let got: Vec<(u64, f64, &str)> = done["set"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| {
+            (
+                s["id"].as_u64().unwrap(),
+                s["value"].as_f64().unwrap(),
+                s["display"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(got[0], (1, 1.0, "High"), "{done}");
+    assert_eq!((got[1].0, got[1].2), (0, "30"), "{done}");
+    assert_eq!(got[2], (0, 0.25, "25"), "{done}");
+    let mut gain = synth_ref(&bundle());
+    gain.uid = "4149444157000003544553544741494E".into();
+    let done = set(gain.clone(), &[("gain", json!("1.5"))]).unwrap();
+    assert_eq!(done["set"][0]["value"], 0.75, "{done}");
+    let err = set(gain, &[("Volume", json!(0.5))]).unwrap_err();
+    assert!(err.to_string().contains("no parameter"), "{err}");
 
     let err = w
         .run(

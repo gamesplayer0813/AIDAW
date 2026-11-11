@@ -321,7 +321,7 @@ impl App {
     /// Hear one note on a track's sound, even while stopped.
     pub fn preview_note(&self, track_index: usize, pitch: u8) {
         if let Some(e) = &self.engine {
-            e.set_project(&self.project);
+            e.set_project(&self.project, None);
             e.preview(track_index, pitch);
         }
     }
@@ -329,7 +329,7 @@ impl App {
     /// Hear a few notes together, e.g. a chord that was just moved.
     pub fn preview_notes(&self, track_index: usize, pitches: &[u8]) {
         if let Some(e) = &self.engine {
-            e.set_project(&self.project);
+            e.set_project(&self.project, None);
             for &p in pitches {
                 e.preview(track_index, p);
             }
@@ -340,7 +340,7 @@ impl App {
     pub fn hold_note(&mut self, track_index: usize, pitch: u8) {
         if let Some(e) = &self.engine {
             if self.held_key.is_none() {
-                e.set_project(&self.project);
+                e.set_project(&self.project, None);
             }
             e.hold(track_index, pitch);
         }
@@ -505,7 +505,7 @@ impl App {
 
     fn on_project_changed(&mut self) {
         if let Some(e) = &self.engine {
-            e.set_project(&self.project);
+            e.set_project(&self.project, None);
         }
         if self.path.is_some() {
             self.save_at = Some(Instant::now() + SAVE_DEBOUNCE);

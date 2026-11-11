@@ -194,7 +194,8 @@ fn tool_list_is_simple_and_documented() {
         .contains("add_chords"));
     let tools = c.rpc("tools/list", json!({}));
     let tools = tools["tools"].as_array().unwrap();
-    assert!(tools.len() <= 24, "keep the tool list small");
+    // Some clients take at most 40 tools from all their servers together.
+    assert!(tools.len() <= 30, "keep the tool list small");
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     for expected in [
         "help",

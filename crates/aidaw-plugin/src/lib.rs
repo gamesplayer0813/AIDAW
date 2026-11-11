@@ -6,6 +6,7 @@ pub mod editor;
 pub mod host;
 pub mod instance;
 pub mod module;
+pub mod params;
 pub mod rack;
 pub mod scan;
 pub mod util;

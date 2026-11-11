@@ -9,15 +9,17 @@ use aidaw_core::analysis::{self, Analysis, Levels};
 use aidaw_core::edit::{self, Op};
 use aidaw_core::music::{self, ChordStyle};
 use aidaw_core::{
-    io as pio, pitch, presets, render, DrumKit, Instrument, Note, Project, Synth, TimeSignature,
-    Waveform,
+    io as pio, pitch, presets, render, DrumKit, Instrument, Note, PluginRef, Project, Synth,
+    TimeSignature, Waveform,
 };
+use aidaw_plugin::scan::Kind;
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Map, Value};
 
+use crate::plugins::{self, Plugins};
 use crate::tools::{self, Tool};
 
-type Args = Map<String, Value>;
+pub(crate) type Args = Map<String, Value>;
 
 /// Keys whose string values are turned into numbers.
 const NUMERIC_KEYS: &[&str] = &[
@@ -70,8 +72,9 @@ const NUMERIC_KEYS: &[&str] = &[
     "swing",
     "timing",
     "seed",
+    "position",
 ];
-const BOOL_KEYS: &[&str] = &["mute", "solo", "overwrite"];
+const BOOL_KEYS: &[&str] = &["mute", "solo", "overwrite", "bypass", "rescan"];
 /// Accepted everywhere although not advertised in the schemas.
 const HIDDEN_KEYS: &[&str] = &[
     "track_id",
@@ -80,6 +83,7 @@ const HIDDEN_KEYS: &[&str] = &[
     "clip_name",
     "beat",
     "op",
+    "effect_id",
 ];
 const SYNTH_KEYS: &[&str] = &[
     "waveform",
@@ -107,11 +111,15 @@ const SYNTH_KEYS: &[&str] = &[
 
 pub struct Session {
     pub path: Option<PathBuf>,
+    plugins: Plugins,
 }
 
 impl Session {
     pub fn new(path: Option<PathBuf>) -> Self {
-        Session { path }
+        Session {
+            path,
+            plugins: Plugins::default(),
+        }
     }
 
     fn path(&self) -> Result<&Path> {
@@ -221,7 +229,7 @@ impl Session {
                     "json" | "full" => Ok(format!(
                         "{}\n\n{}",
                         summary(&project),
-                        serde_json::to_string_pretty(&project)?
+                        plugins::readable_json(&project)?
                     )),
                     other => {
                         bail!("unknown detail {other:?}; use \"summary\", \"notes\" or \"json\"")
@@ -244,16 +252,46 @@ impl Session {
                             anyhow!("sample_rate must be a whole number from 8000 to 192000, e.g. 44100 (got {v})")
                         })? as u32,
                 };
+                if project.uses_plugins() {
+                    return self.plugins.render(&project, &out, sr);
+                }
                 let seconds = render::render_to_wav(&project, &out, sr)?;
                 Ok(format!("rendered {seconds:.1}s to {}", out.display()))
             }
             "analyze" => {
                 let project = pio::load(self.path()?)?;
+                if project.uses_plugins() {
+                    let (measured, problems) = self.plugins.analyze(&project)?;
+                    return Ok(format!(
+                        "{}{problems}",
+                        analysis_report(&project, &measured)
+                    ));
+                }
                 let measured = analysis::analyze(&project)?;
                 Ok(analysis_report(&project, &measured))
             }
+            "list_plugins" => self.plugins.list(&args),
+            "plugin_params" => {
+                let project = pio::load(self.path()?)?;
+                self.plugins.params(&project, &args)
+            }
+            "set_plugin_params" => {
+                let project = pio::load(self.path()?)?;
+                let set = self.plugins.prepare_params(&project, &mut args)?;
+                let out = self.edit(|work| Ok(vec![apply_tool(work, tool, args.clone())?]))?;
+                Ok(match set {
+                    Some(set) => {
+                        let now: Vec<String> = set
+                            .iter()
+                            .map(|s| format!("{} = {} ({})", s.name, fmt_num(s.value), s.display))
+                            .collect();
+                        format!("{out}\nSet: {}", now.join(", "))
+                    }
+                    None => out,
+                })
+            }
             "apply_ops" => {
-                let ops = match args.remove("ops") {
+                let mut ops = match args.remove("ops") {
                     Some(Value::Array(ops)) => ops,
                     Some(Value::String(s)) => match serde_json::from_str(&s) {
                         Ok(Value::Array(ops)) => ops,
@@ -261,6 +299,19 @@ impl Session {
                     },
                     _ => bail!("ops must be an array of objects like {{\"op\": \"add_track\", \"name\": \"Bass\"}}"),
                 };
+                // Plugin names are looked up once, before the edit.
+                for (i, op) in ops.iter_mut().enumerate() {
+                    let Value::Object(item) = op else { continue };
+                    let name = ["op", "tool"]
+                        .iter()
+                        .find_map(|k| item.get(*k).and_then(Value::as_str))
+                        .and_then(tools::find)
+                        .map(|t| t.name);
+                    if let Some(name) = name {
+                        self.prepare(name, item)
+                            .map_err(|e| anyhow!("op #{i} ({name}): {e:#}"))?;
+                    }
+                }
                 self.edit(|work| {
                     let mut results = Vec::with_capacity(ops.len());
                     for (i, item) in ops.clone().into_iter().enumerate() {
@@ -295,10 +346,55 @@ impl Session {
                 })
             }
             name if is_edit_tool(name) => {
+                self.prepare(name, &mut args)?;
                 self.edit(|work| Ok(vec![apply_tool(work, tool, args.clone())?]))
             }
             other => bail!("tool {other} is not implemented"),
         }
+    }
+
+    /// Before an edit: turn plugin names into the plugins themselves, which
+    /// takes the list of installed plugins (edits only see the song).
+    fn prepare(&mut self, tool: &str, args: &mut Args) -> Result<()> {
+        match tool {
+            "add_track" | "update_track" => {
+                if let Some(s) = args.get("instrument").and_then(Value::as_str) {
+                    let s = s.trim().to_string();
+                    let lower = s.to_ascii_lowercase();
+                    let prefixed = ["vst3:", "vst:", "plugin:"]
+                        .iter()
+                        .find(|p| lower.starts_with(*p))
+                        .map(|p| s[p.len()..].trim().to_string());
+                    if let Some(name) = prefixed {
+                        args.remove("instrument");
+                        args.insert("plugin".into(), json!(name));
+                    } else if !names_builtin_exactly(&s) {
+                        // "Pianoteq 8" is the plugin, not the piano preset.
+                        if let Some(p) = plugins::known_instrument(&s) {
+                            args.remove("instrument");
+                            args.insert("plugin".into(), serde_json::to_value(p.to_ref())?);
+                        }
+                    }
+                }
+                if let Some(name) = args.get("plugin").and_then(Value::as_str) {
+                    let found = self.plugins.find(name, Kind::Instrument)?;
+                    args.insert("plugin".into(), serde_json::to_value(found.to_ref())?);
+                }
+            }
+            "add_effect" => match args.get("plugin") {
+                Some(Value::String(name)) => {
+                    let found = self.plugins.find(&name.clone(), Kind::Effect)?;
+                    args.insert("plugin".into(), serde_json::to_value(found.to_ref())?);
+                }
+                Some(Value::Object(_)) => {}
+                None => bail!(
+                    "missing \"plugin\": the effect's name (list_plugins {{\"kind\": \"effect\"}} shows them)"
+                ),
+                Some(other) => bail!("plugin is the effect's name (got {other})"),
+            },
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Load, edit a working copy, save. Re-reading the file on every call
@@ -439,6 +535,10 @@ const EDIT_TOOLS: &[&str] = &[
     "copy_bars",
     "quantize",
     "humanize",
+    "add_effect",
+    "update_effect",
+    "remove_effect",
+    "set_plugin_params",
 ];
 
 fn is_edit_tool(name: &str) -> bool {
@@ -489,7 +589,35 @@ fn apply_tool(work: &mut Project, tool: &Tool, mut args: Args) -> Result<Value> 
                 }
                 _ => None,
             };
-            resolve_instrument(&mut args, existing)?;
+            let plugin = args.remove("plugin");
+            if plugin.is_some() {
+                if let Some(k) = ["instrument", "kit"]
+                    .iter()
+                    .chain(SYNTH_KEYS)
+                    .find(|k| args.contains_key(**k))
+                {
+                    bail!(
+                        "give \"plugin\" or \"{k}\", not both: \"plugin\" plays an installed instrument plugin, \"{k}\" is for the built-in instruments"
+                    );
+                }
+            }
+            resolve_instrument(&mut args, existing.clone())?;
+            if let Some(plugin) = plugin {
+                let plugin: PluginRef = serde_json::from_value(plugin).map_err(|e| {
+                    anyhow!("plugin must be a plugin's name (got something else: {e})")
+                })?;
+                // Picking the plugin the track already plays keeps its settings.
+                let same = existing
+                    .as_ref()
+                    .and_then(Instrument::plugin)
+                    .is_some_and(|p| p.same_plugin(&plugin));
+                if !same {
+                    args.insert(
+                        "instrument".into(),
+                        serde_json::to_value(Instrument::Vst3(plugin))?,
+                    );
+                }
+            }
             if tool.name == "add_track" && !args.contains_key("instrument") {
                 // "Drums" gets a drum kit, "Bass" a bass, and so on.
                 if let Some(p) = args
@@ -512,6 +640,48 @@ fn apply_tool(work: &mut Project, tool: &Tool, mut args: Args) -> Result<Value> 
         }
         "remove_track" => {
             resolve_track(work, &mut args)?;
+        }
+        "add_effect" => {
+            resolve_track(work, &mut args)?;
+            if !args.get("plugin").is_some_and(Value::is_object) {
+                bail!("missing \"plugin\": the effect's name (list_plugins {{\"kind\": \"effect\"}} shows them)");
+            }
+            position_to_index(&mut args)?;
+        }
+        "update_effect" | "remove_effect" => {
+            let q = ["effect", "effect_id"]
+                .iter()
+                .find_map(|k| args.remove(*k))
+                .and_then(ref_string)
+                .ok_or_else(|| anyhow!("missing \"effect\": an effect id like \"fx1\" (get_project shows them) or the plugin's name"))?;
+            let track = track_query(&mut args);
+            let (_, id) = plugins::find_effect(work, &q, track.as_deref())?;
+            args.insert("effect_id".into(), json!(id));
+            if tool.name == "update_effect" {
+                position_to_index(&mut args)?;
+                if !has_any(&args, &["bypass", "index"]) {
+                    bail!("say what to change: \"bypass\": true (off) or false (on), or \"position\" (1 = first)");
+                }
+            }
+        }
+        "set_plugin_params" => {
+            let id = resolve_track(work, &mut args)?;
+            let effect = ["effect", "effect_id"]
+                .iter()
+                .find_map(|k| args.remove(*k))
+                .and_then(ref_string);
+            if let Some(q) = effect {
+                let track = work.track(&id).expect("resolved");
+                let fx = plugins::find_effect_on(track, &q)?;
+                args.insert("effect_id".into(), json!(fx.id));
+            }
+            let wanted = plugins::wanted_params(&mut args)?;
+            let plain = plugins::plain_params(&wanted).ok_or_else(|| {
+                anyhow!(
+                    "here parameters are given by id with values from 0 to 1, e.g. {{\"params\": [{{\"param\": 12, \"value\": 0.4}}]}} (plugin_params shows the ids); call set_plugin_params by itself to use names or values like \"-6 dB\""
+                )
+            })?;
+            args.insert("params".into(), json!(plain));
         }
         "add_clip" => {
             let id = resolve_track(work, &mut args)?;
@@ -597,6 +767,17 @@ fn apply_tool(work: &mut Project, tool: &Tool, mut args: Args) -> Result<Value> 
         result["warnings"] = json!(warnings);
     }
     Ok(result)
+}
+
+/// Turn a 1-based `position` (in an effect chain) into the op's `index`.
+fn position_to_index(args: &mut Args) -> Result<()> {
+    if let Some(v) = args.remove("position") {
+        let n = v.as_u64().filter(|n| *n >= 1).ok_or_else(|| {
+            anyhow!("position is 1 for the first effect, 2 for the second, ... (got {v})")
+        })?;
+        args.insert("index".into(), json!(n - 1));
+    }
+    Ok(())
 }
 
 /// The `time_signature` argument, as "6/8" or [6, 8].
@@ -1464,7 +1645,7 @@ fn resolve_track(work: &Project, args: &mut Args) -> Result<String> {
     Ok(id)
 }
 
-fn norm(s: &str) -> String {
+pub(crate) fn norm(s: &str) -> String {
     s.chars()
         .filter(|c| c.is_alphanumeric())
         .flat_map(char::to_lowercase)
@@ -1473,7 +1654,7 @@ fn norm(s: &str) -> String {
 
 /// Find a track by id, name (case and punctuation ignored), or position:
 /// `"2"` or `"Track 2"` is the second track.
-fn find_track<'a>(p: &'a Project, q: &str) -> Result<&'a aidaw_core::Track> {
+pub(crate) fn find_track<'a>(p: &'a Project, q: &str) -> Result<&'a aidaw_core::Track> {
     let q = q.trim();
     if norm(q).is_empty() {
         bail!("the track name is empty. {}", track_list(p));
@@ -1651,7 +1832,7 @@ fn bar_range(start: f64, end: f64, bpb: f64) -> String {
     }
 }
 
-fn fmt_num(x: f64) -> String {
+pub(crate) fn fmt_num(x: f64) -> String {
     let r = (x * 1000.0).round() / 1000.0;
     format!("{r}")
 }
@@ -1757,7 +1938,8 @@ fn kit_names() -> String {
 fn resolve_instrument(args: &mut Args, existing: Option<Instrument>) -> Result<()> {
     let bad = |what: &str| {
         anyhow!(
-            "unknown instrument {what}. Use a preset id: {} (or a plain waveform: sine, triangle, saw, square, pulse, noise)",
+            "unknown instrument {what}. Use a preset id: {} (or a plain waveform: sine, triangle, saw, square, pulse, noise). \
+             For an installed VST3 instrument pass its name as \"plugin\" (list_plugins shows them)",
             preset_ids()
         )
     };
@@ -1765,14 +1947,7 @@ fn resolve_instrument(args: &mut Args, existing: Option<Instrument>) -> Result<(
         if let Some(p) = presets::find(s) {
             return Ok(p.instrument.clone());
         }
-        let wave = match norm(s).as_str() {
-            "saw" | "sawtooth" | "synth" => Waveform::Saw,
-            "square" => Waveform::Square,
-            "triangle" | "tri" => Waveform::Triangle,
-            "pulse" => Waveform::Pulse,
-            "noise" => Waveform::Noise,
-            _ => return Err(bad(&format!("{s:?}"))),
-        };
+        let wave = waveform_name(s).ok_or_else(|| bad(&format!("{s:?}")))?;
         Ok(with_waveform(Instrument::default_synth(), wave))
     };
     let mut inst = match args.remove("instrument") {
@@ -1806,8 +1981,14 @@ fn resolve_instrument(args: &mut Args, existing: Option<Instrument>) -> Result<(
                 "\"kit\" is for drum tracks, but the instrument given is a synth; drop one of them"
             );
         }
-        if existing.as_ref().is_some_and(|b| !b.is_drums()) && inst.is_none() {
-            bail!("this track plays a synth, so it has no drum kit; set \"instrument\": \"drums_{}\" to turn it into drums", kit.label());
+        if let (Some(b), None) = (&existing, &inst) {
+            if !b.is_drums() {
+                bail!(
+                    "this track plays {}, so it has no drum kit; set \"instrument\": \"drums_{}\" to turn it into drums",
+                    instrument_label(b),
+                    kit.label()
+                );
+            }
         }
         inst = Some(Instrument::Drums { kit });
     }
@@ -1816,6 +1997,13 @@ fn resolve_instrument(args: &mut Args, existing: Option<Instrument>) -> Result<(
             .take()
             .or(existing)
             .unwrap_or_else(Instrument::default_synth);
+        if let Some(p) = base.plugin() {
+            bail!(
+                "this track plays the plugin {}; synth settings (waveform, cutoff, ...) are for the built-in synths. \
+                 Change the plugin's own parameters with set_plugin_params, or pick a preset with \"instrument\"",
+                p.name
+            );
+        }
         let mut v = serde_json::to_value(base)?;
         if v.get("type").and_then(Value::as_str) == Some("drums") {
             bail!("drum kits have no synth settings (waveform, attack, ...); pick another kit with \"kit\" ({}) or change the instrument to a synth preset first", kit_names());
@@ -1836,6 +2024,31 @@ fn resolve_instrument(args: &mut Args, existing: Option<Instrument>) -> Result<(
     Ok(())
 }
 
+/// The waveform a plain instrument name means: "saw", "square", ...
+fn waveform_name(s: &str) -> Option<Waveform> {
+    Some(match norm(s).as_str() {
+        "saw" | "sawtooth" | "synth" => Waveform::Saw,
+        "square" => Waveform::Square,
+        "triangle" | "tri" => Waveform::Triangle,
+        "pulse" => Waveform::Pulse,
+        "noise" => Waveform::Noise,
+        _ => return None,
+    })
+}
+
+/// Whether `s` names a built-in instrument exactly: a preset's id, name or
+/// alias, or a waveform. ("Pianoteq 8" only contains a preset's name.)
+fn names_builtin_exactly(s: &str) -> bool {
+    let q = norm(s);
+    waveform_name(s).is_some()
+        || presets::all().iter().any(|p| {
+            [p.id, presets::plain_name(p.name)]
+                .into_iter()
+                .chain(p.aliases.iter().copied())
+                .any(|k| norm(k) == q)
+        })
+}
+
 fn with_waveform(inst: Instrument, wave: Waveform) -> Instrument {
     match inst {
         Instrument::Synth(s) => Instrument::Synth(Synth {
@@ -1853,7 +2066,8 @@ fn instrument_label(inst: &Instrument) -> String {
     match inst {
         Instrument::Drums { kit } => format!("drums ({} kit)", kit.label()),
         Instrument::Synth(s) => format!("custom {} synth", s.waveform.label()),
-        Instrument::Vst3(p) => format!("plugin {}", p.name),
+        Instrument::Vst3(p) if p.params.is_empty() => format!("plugin {}", p.name),
+        Instrument::Vst3(p) => format!("plugin {}, {} params set", p.name, p.params.len()),
     }
 }
 
@@ -1946,6 +2160,23 @@ fn overview(p: &Project, only: Option<&str>, with_notes: bool) -> String {
             if t.mute { " MUTED" } else { "" },
             if t.solo { " SOLO" } else { "" }
         ));
+        if !t.effects.is_empty() {
+            let chain: Vec<String> = t
+                .effects
+                .iter()
+                .map(|e| {
+                    let mut x = format!("{} \"{}\"", e.id, e.name());
+                    if !e.plugin().params.is_empty() {
+                        x += &format!(" ({} params set)", e.plugin().params.len());
+                    }
+                    if e.bypass {
+                        x += " OFF";
+                    }
+                    x
+                })
+                .collect();
+            s.push_str(&format!("\n    effects: {}", chain.join(" -> ")));
+        }
         for c in &t.clips {
             let (lo, hi) = c.notes.iter().fold((127u8, 0u8), |(lo, hi), n| {
                 (lo.min(n.pitch), hi.max(n.pitch))
@@ -1995,8 +2226,245 @@ mod tests {
             mute: false,
             solo: false,
             reverb: 0.0,
+            effects: Vec::new(),
             clips: Vec::new(),
         }
+    }
+
+    fn tool(work: &mut Project, name: &str, args: Value) -> Result<Value> {
+        let Value::Object(mut args) = args else {
+            panic!("args must be an object")
+        };
+        coerce(&mut args);
+        apply_tool(work, tools::find(name).unwrap(), args)
+    }
+
+    /// A plugin as `prepare` hands it to the edit (no plugin is installed
+    /// in tests).
+    fn plugin(name: &str, uid_digit: char) -> Value {
+        json!({"name": name, "uid": uid_digit.to_string().repeat(32), "path": "/x/y.vst3"})
+    }
+
+    #[test]
+    fn effects_are_added_found_by_name_moved_switched_off_and_removed() {
+        let mut p = Project::new("fx", 120.0);
+        tool(&mut p, "add_track", json!({"name": "Keys"})).unwrap();
+        let r = tool(
+            &mut p,
+            "add_effect",
+            json!({"track": "Keys", "plugin": plugin("Big Verb", 'A')}),
+        )
+        .unwrap();
+        assert_eq!(r["effect_id"], "fx1");
+        let r = tool(
+            &mut p,
+            "add_effect",
+            json!({"track": "1", "plugin": plugin("Pro EQ", 'B'), "position": "1"}),
+        )
+        .unwrap();
+        assert_eq!(
+            (r["effect_id"].as_str(), r["position"].as_u64()),
+            (Some("fx2"), Some(1))
+        );
+        assert!(
+            summary(&p).contains("effects: fx2 \"Pro EQ\" -> fx1 \"Big Verb\""),
+            "{}",
+            summary(&p)
+        );
+        tool(
+            &mut p,
+            "update_effect",
+            json!({"effect": "verb", "bypass": "true"}),
+        )
+        .unwrap();
+        assert!(p.tracks[0].effects[1].bypass);
+        assert!(
+            summary(&p).contains("fx1 \"Big Verb\" OFF"),
+            "{}",
+            summary(&p)
+        );
+        tool(
+            &mut p,
+            "update_effect",
+            json!({"effect": "fx1", "position": 1}),
+        )
+        .unwrap();
+        assert_eq!(p.tracks[0].effects[0].id, "fx1");
+        let err = tool(&mut p, "update_effect", json!({"effect": "fx1"})).unwrap_err();
+        assert!(err.to_string().contains("say what to change"), "{err}");
+        let err = tool(&mut p, "remove_effect", json!({"effect": "Chorus"})).unwrap_err();
+        assert!(err.to_string().contains("fx1 \"Big Verb\""), "{err}");
+        tool(
+            &mut p,
+            "remove_effect",
+            json!({"effect": "Pro EQ", "track": "Keys"}),
+        )
+        .unwrap();
+        assert_eq!(p.tracks[0].effects.len(), 1);
+        let err = tool(
+            &mut p,
+            "add_effect",
+            json!({"track": "Keys", "plugin": "Unresolved"}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("missing \"plugin\""), "{err}");
+    }
+
+    #[test]
+    fn picking_the_same_plugin_again_keeps_its_settings() {
+        let mut p = Project::new("plug", 120.0);
+        let r = tool(
+            &mut p,
+            "add_track",
+            json!({"name": "Keys", "plugin": plugin("Synth One", 'C')}),
+        )
+        .unwrap();
+        assert_eq!(r["instrument"], "plugin Synth One");
+        assert_eq!(p.tracks[0].reverb, 0.0);
+        p.tracks[0].instrument.plugin_mut().unwrap().state =
+            Some(aidaw_core::Blob::new(vec![1u8, 2, 3]));
+        tool(
+            &mut p,
+            "update_track",
+            json!({"track": "Keys", "plugin": plugin("Synth One", 'C')}),
+        )
+        .unwrap();
+        assert!(p.tracks[0].instrument.plugin().unwrap().state.is_some());
+        tool(
+            &mut p,
+            "update_track",
+            json!({"track": "Keys", "plugin": plugin("Synth Two", 'D')}),
+        )
+        .unwrap();
+        let now = p.tracks[0].instrument.plugin().unwrap();
+        assert_eq!(
+            (now.name.as_str(), now.state.is_none()),
+            ("Synth Two", true)
+        );
+        let err = tool(
+            &mut p,
+            "update_track",
+            json!({"track": "Keys", "cutoff": 500}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("set_plugin_params"), "{err}");
+        let err = tool(
+            &mut p,
+            "update_track",
+            json!({"track": "Keys", "kit": "808"}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("plugin Synth Two"), "{err}");
+        let err = tool(
+            &mut p,
+            "update_track",
+            json!({"track": "Keys", "plugin": plugin("Synth One", 'C'), "instrument": "bass"}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not both"), "{err}");
+        tool(
+            &mut p,
+            "update_track",
+            json!({"track": "Keys", "instrument": "bass"}),
+        )
+        .unwrap();
+        assert!(p.tracks[0].instrument.plugin().is_none());
+    }
+
+    #[test]
+    fn parameters_by_id_are_set_without_loading_the_plugin() {
+        let mut p = Project::new("knobs", 120.0);
+        tool(
+            &mut p,
+            "add_track",
+            json!({"name": "Keys", "plugin": plugin("Synth One", 'C')}),
+        )
+        .unwrap();
+        tool(
+            &mut p,
+            "add_effect",
+            json!({"track": "Keys", "plugin": plugin("Big Verb", 'A')}),
+        )
+        .unwrap();
+        tool(
+            &mut p,
+            "set_plugin_params",
+            json!({"track": "Keys", "params": [{"param": 3, "value": 0.5}, {"param": "4", "value": 1}]}),
+        )
+        .unwrap();
+        tool(
+            &mut p,
+            "set_plugin_params",
+            json!({"track": "Keys", "effect": "verb", "param": "0", "value": 0.25}),
+        )
+        .unwrap();
+        let synth = p.tracks[0].instrument.plugin().unwrap();
+        assert_eq!(synth.params.get("3"), Some(&0.5));
+        assert_eq!(synth.params.get("4"), Some(&1.0));
+        assert_eq!(p.tracks[0].effects[0].plugin().params.get("0"), Some(&0.25));
+        assert!(
+            summary(&p).contains("plugin Synth One, 2 params set"),
+            "{}",
+            summary(&p)
+        );
+        assert!(
+            summary(&p).contains("fx1 \"Big Verb\" (1 params set)"),
+            "{}",
+            summary(&p)
+        );
+        // Names need the plugin, which only the tool itself loads.
+        let err = tool(
+            &mut p,
+            "set_plugin_params",
+            json!({"track": "Keys", "param": "Cutoff", "value": 0.3}),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("set_plugin_params by itself"),
+            "{err}"
+        );
+        let mut plain = Project::new("plain", 120.0);
+        tool(
+            &mut plain,
+            "add_track",
+            json!({"name": "Bass", "instrument": "bass"}),
+        )
+        .unwrap();
+        let err = tool(
+            &mut plain,
+            "set_plugin_params",
+            json!({"track": "Bass", "param": 1, "value": 0.5}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("does not play a plugin"), "{err}");
+    }
+
+    #[test]
+    fn the_raw_json_leaves_out_plugin_settings() {
+        let mut p = Project::new("json", 120.0);
+        tool(
+            &mut p,
+            "add_track",
+            json!({"name": "Keys", "plugin": plugin("Synth One", 'C')}),
+        )
+        .unwrap();
+        p.tracks[0].instrument.plugin_mut().unwrap().state =
+            Some(aidaw_core::Blob::new(vec![7u8; 3000]));
+        let text = plugins::readable_json(&p).unwrap();
+        assert!(
+            text.contains("(3000 bytes of the plugin's own settings, not shown)"),
+            "{text}"
+        );
+        assert!(!text.contains("BwcH"), "{text}");
+    }
+
+    #[test]
+    fn plugin_names_are_not_mistaken_for_presets() {
+        assert!(names_builtin_exactly("e_piano"));
+        assert!(names_builtin_exactly("Rhodes"));
+        assert!(names_builtin_exactly("saw"));
+        assert!(!names_builtin_exactly("Pianoteq 8"));
+        assert!(!names_builtin_exactly("Surge XT"));
     }
 
     /// A song whose tracks measure `levels` (LUFS) alone, in a mix that is

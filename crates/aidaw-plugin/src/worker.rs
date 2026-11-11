@@ -25,6 +25,7 @@ use serde_json::{json, Value};
 
 use crate::instance::{Plugin, Setup};
 use crate::module::Module;
+use crate::params;
 use crate::rack;
 
 /// The command-line flag that turns AIDAW into a plugin worker.
@@ -49,6 +50,13 @@ pub enum Job {
     Analyze { project: Box<Project> },
     /// List a plugin's parameters, with its settings applied.
     Params { plugin: Box<PluginRef> },
+    /// Work out parameter values from what was asked for (see
+    /// [`params::resolve`]): parameter name or id, and a value as a knob
+    /// position, an option name or text such as "-6 dB".
+    SetParams {
+        plugin: Box<PluginRef>,
+        wanted: Vec<(String, Value)>,
+    },
 }
 
 /// How to start a worker.
@@ -88,18 +96,27 @@ impl Worker {
             .spawn()
             .with_context(|| format!("could not start {}", self.program.display()))?;
         let input = serde_json::to_vec(job)?;
-        let mut stdin = child.stdin.take().ok_or_else(|| anyhow!("no worker stdin"))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("no worker stdin"))?;
         let writer = std::thread::spawn(move || {
             let _ = stdin.write_all(&input);
         });
-        let stdout = child.stdout.take().ok_or_else(|| anyhow!("no worker stdout"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("no worker stdout"))?;
         let (tx, rx) = mpsc::channel();
         let reader = std::thread::spawn(move || {
             for line in BufReader::new(stdout).split(b'\n') {
                 let Ok(line) = line else { break };
                 let line = String::from_utf8_lossy(&line);
                 if let Some(at) = line.find(PREFIX) {
-                    if tx.send(line[at + PREFIX.len()..].trim().to_string()).is_err() {
+                    if tx
+                        .send(line[at + PREFIX.len()..].trim().to_string())
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -213,7 +230,13 @@ pub fn work(job: Job, progress: &mut dyn FnMut(f64)) -> Result<Value> {
         }
         Job::Analyze { project } => {
             let mut problems = Vec::new();
+            // The song is played once for the mix and once per track; each
+            // pass is a sign of life.
+            let passes = 1 + project.tracks.len();
+            let mut pass = 0;
             let measured = analysis::analyze_with(&project, |p| {
+                progress(pass as f64 / passes as f64);
+                pass += 1;
                 let (rack, mut trouble) =
                     rack::offline(p, f64::from(analysis::ANALYSIS_SAMPLE_RATE), &by_path);
                 trouble.retain(|t| !problems.contains(t));
@@ -223,29 +246,45 @@ pub fn work(job: Job, progress: &mut dyn FnMut(f64)) -> Result<Value> {
             Ok(json!({ "analysis": measured, "problems": problems }))
         }
         Job::Params { plugin } => {
-            let path = by_path(&plugin)?;
-            let (p, _processor) = Plugin::load(
-                &path,
-                &plugin.uid,
-                Setup {
-                    sample_rate: 48_000.0,
-                    offline: true,
-                },
-                plugin.state.as_ref().map(|b| b.as_bytes()),
-                plugin.controller_state.as_ref().map(|b| b.as_bytes()),
-            )?;
-            for (id, v) in plugin.param_values() {
-                p.set_param(id, v);
-            }
+            let p = set_up(&plugin)?;
             Ok(json!({ "name": p.name, "params": p.params() }))
+        }
+        Job::SetParams { plugin, wanted } => {
+            let p = set_up(&plugin)?;
+            let set = params::resolve(&p, &wanted)?;
+            Ok(json!({ "name": p.name, "set": set }))
         }
     }
 }
 
-/// In a worker, a plugin's `path` says where it is (the parent found it).
+/// Load `plugin` as the song has it: its saved settings, then the
+/// parameters set on top.
+fn set_up(plugin: &PluginRef) -> Result<Plugin> {
+    let path = by_path(plugin)?;
+    let (p, _processor) = Plugin::load(
+        &path,
+        &plugin.uid,
+        Setup {
+            sample_rate: 48_000.0,
+            offline: true,
+        },
+        plugin.state.as_ref().map(|b| b.as_bytes()),
+        plugin.controller_state.as_ref().map(|b| b.as_bytes()),
+    )?;
+    for (id, v) in plugin.param_values() {
+        p.set_param(id, v);
+    }
+    Ok(p)
+}
+
+/// In a worker, a plugin's `path` says where it is: the parent found it,
+/// or left it empty when it could not.
 fn by_path(p: &PluginRef) -> Result<PathBuf> {
     if p.path.is_empty() {
-        bail!("{} has no install path", p.name);
+        bail!(
+            "{} is not installed on this computer (if it is, scan for plugins again)",
+            p.name
+        );
     }
     Ok(PathBuf::from(&p.path))
 }

@@ -314,7 +314,11 @@ mod tests {
         assert_eq!(binary_path(&bundle).unwrap(), other);
         let named = arch.join(format!("Thing.{BINARY_EXTENSION}"));
         std::fs::write(&named, b"").unwrap();
-        assert_eq!(binary_path(&bundle).unwrap(), named, "the bundle's own name wins");
+        assert_eq!(
+            binary_path(&bundle).unwrap(),
+            named,
+            "the bundle's own name wins"
+        );
         assert!(binary_path(&dir.join("Missing.vst3")).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }

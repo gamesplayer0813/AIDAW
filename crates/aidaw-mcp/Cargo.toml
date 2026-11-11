@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 aidaw-core.workspace = true
+aidaw-plugin.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

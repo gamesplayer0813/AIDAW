@@ -55,6 +55,18 @@ pub fn from_utf16(chars: &[char16]) -> String {
     String::from_utf16_lossy(&chars[..len]).trim().to_string()
 }
 
+/// The bindings' enum constants are C `int`s on Windows and `unsigned`
+/// elsewhere, while methods take `int32` and structs hold `uint32`: these
+/// convert either, without a cast that is useless on one of the platforms.
+pub fn int(k: impl Into<i64>) -> i32 {
+    k.into() as i32
+}
+
+/// See [`int`].
+pub fn uint(k: impl Into<i64>) -> u32 {
+    k.into() as u32
+}
+
 /// Copy `text` into a fixed UTF-16 buffer, cut to fit and NUL-terminated.
 pub fn to_utf16(text: &str, out: &mut [char16]) {
     if out.is_empty() {
@@ -110,7 +122,10 @@ mod tests {
     fn uids_round_trip() {
         let uid = vst3::uid(0x00112233, 0x44556677, 0x8899AABB, 0xCCDDEEFF);
         let hex = uid_to_hex(&uid);
-        assert_eq!(hex, "00112233445566778899AABBCCDDEEFF", "the same on every platform");
+        assert_eq!(
+            hex, "00112233445566778899AABBCCDDEEFF",
+            "the same on every platform"
+        );
         assert_eq!(hex_to_uid(&hex), Some(uid));
         assert_eq!(hex_to_uid(&hex.to_lowercase()), Some(uid));
         assert_eq!(hex_to_uid("0011"), None);

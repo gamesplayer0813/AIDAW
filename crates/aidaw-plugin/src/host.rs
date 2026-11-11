@@ -72,8 +72,7 @@ impl IHostApplicationTrait for HostApplication {
             ComWrapper::new(Message::new())
                 .to_com_ptr::<IMessage>()
                 .map(|p| p.into_raw() as *mut c_void)
-        } else if cid == IAttributeList::IID
-            && (iid == IAttributeList::IID || iid == FUnknown::IID)
+        } else if cid == IAttributeList::IID && (iid == IAttributeList::IID || iid == FUnknown::IID)
         {
             ComWrapper::new(AttributeList::default())
                 .to_com_ptr::<IAttributeList>()
@@ -247,7 +246,12 @@ impl IAttributeListTrait for AttributeList {
         }
     }
 
-    unsafe fn getString(&self, id: IAttributeList_::AttrID, string: *mut TChar, size_in_bytes: uint32) -> tresult {
+    unsafe fn getString(
+        &self,
+        id: IAttributeList_::AttrID,
+        string: *mut TChar,
+        size_in_bytes: uint32,
+    ) -> tresult {
         let chars = (size_in_bytes as usize) / 2;
         if string.is_null() || chars == 0 {
             return kInvalidArgument;
@@ -270,7 +274,12 @@ impl IAttributeListTrait for AttributeList {
         }
     }
 
-    unsafe fn setBinary(&self, id: IAttributeList_::AttrID, data: *const c_void, size_in_bytes: uint32) -> tresult {
+    unsafe fn setBinary(
+        &self,
+        id: IAttributeList_::AttrID,
+        data: *const c_void,
+        size_in_bytes: uint32,
+    ) -> tresult {
         let bytes = if data.is_null() || size_in_bytes == 0 {
             Box::default()
         } else {
@@ -382,7 +391,9 @@ impl IBStreamTrait for MemoryStream {
             if data.len() < *pos + n {
                 data.resize(*pos + n, 0);
             }
-            unsafe { ptr::copy_nonoverlapping(buffer as *const u8, data.as_mut_ptr().add(*pos), n) };
+            unsafe {
+                ptr::copy_nonoverlapping(buffer as *const u8, data.as_mut_ptr().add(*pos), n)
+            };
             *pos += n;
         }
         if !written.is_null() {
@@ -396,9 +407,9 @@ impl IBStreamTrait for MemoryStream {
             return kInternalError;
         };
         let base = match mode as u32 {
-            m if m == IBStream_::IStreamSeekMode_::kIBSeekSet as u32 => 0,
-            m if m == IBStream_::IStreamSeekMode_::kIBSeekCur as u32 => g.1 as i64,
-            m if m == IBStream_::IStreamSeekMode_::kIBSeekEnd as u32 => g.0.len() as i64,
+            m if m == util::uint(IBStream_::IStreamSeekMode_::kIBSeekSet) => 0,
+            m if m == util::uint(IBStream_::IStreamSeekMode_::kIBSeekCur) => g.1 as i64,
+            m if m == util::uint(IBStream_::IStreamSeekMode_::kIBSeekEnd) => g.0.len() as i64,
             _ => return kInvalidArgument,
         };
         let target = base.saturating_add(pos);
@@ -487,7 +498,10 @@ impl IComponentHandlerTrait for ComponentHandler {
         if value.is_finite() {
             // A full queue (the audio thread is stuck) drops the move; the
             // plugin's own state still has it.
-            let _ = self.edits.to_processor.try_send((id, value.clamp(0.0, 1.0)));
+            let _ = self
+                .edits
+                .to_processor
+                .try_send((id, value.clamp(0.0, 1.0)));
         }
         self.edits.dirty.store(true, Ordering::Release);
         kResultOk
@@ -497,7 +511,9 @@ impl IComponentHandlerTrait for ComponentHandler {
         let _ = self
             .edits
             .gestures
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |g| Some((g - 1).max(0)));
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |g| {
+                Some((g - 1).max(0))
+            });
         self.edits.dirty.store(true, Ordering::Release);
         kResultOk
     }
@@ -597,7 +613,10 @@ impl IEventListTrait for EventList {
     }
 
     unsafe fn getEvent(&self, index: int32, e: *mut Event) -> tresult {
-        match (usize::try_from(index).ok().and_then(|i| self.list().get(i)), e.is_null()) {
+        match (
+            usize::try_from(index).ok().and_then(|i| self.list().get(i)),
+            e.is_null(),
+        ) {
             (Some(ev), false) => {
                 unsafe { *e = *ev };
                 kResultOk
@@ -678,7 +697,10 @@ impl IParamValueQueueTrait for ParamValueQueue {
     }
 
     unsafe fn getPoint(&self, index: int32, offset: *mut int32, value: *mut ParamValue) -> tresult {
-        let Some(&(o, v)) = usize::try_from(index).ok().and_then(|i| self.points().get(i)) else {
+        let Some(&(o, v)) = usize::try_from(index)
+            .ok()
+            .and_then(|i| self.points().get(i))
+        else {
             return kInvalidArgument;
         };
         unsafe {
@@ -795,7 +817,11 @@ impl IParameterChangesTrait for ParameterChanges {
             .map_or(ptr::null_mut(), |r| r.as_ptr())
     }
 
-    unsafe fn addParameterData(&self, id: *const ParamID, index: *mut int32) -> *mut IParamValueQueue {
+    unsafe fn addParameterData(
+        &self,
+        id: *const ParamID,
+        index: *mut int32,
+    ) -> *mut IParamValueQueue {
         if id.is_null() {
             return ptr::null_mut();
         }
@@ -823,17 +849,28 @@ mod tests {
         let p = unsafe { ComRef::from_raw(stream_ptr(&s)) }.unwrap();
         let mut n = 0;
         unsafe {
-            assert_eq!(p.write(b"hello".as_ptr() as *mut c_void, 5, &mut n), kResultOk);
+            assert_eq!(
+                p.write(b"hello".as_ptr() as *mut c_void, 5, &mut n),
+                kResultOk
+            );
             assert_eq!(n, 5);
             let mut at = 0;
-            p.seek(1, IBStream_::IStreamSeekMode_::kIBSeekSet as i32, &mut at);
+            p.seek(
+                1,
+                util::int(IBStream_::IStreamSeekMode_::kIBSeekSet),
+                &mut at,
+            );
             assert_eq!(at, 1);
             let mut buf = [0u8; 10];
             p.read(buf.as_mut_ptr() as *mut c_void, 10, &mut n);
             assert_eq!(&buf[..n as usize], b"ello");
             p.read(buf.as_mut_ptr() as *mut c_void, 10, &mut n);
             assert_eq!(n, 0, "at the end");
-            p.seek(-2, IBStream_::IStreamSeekMode_::kIBSeekEnd as i32, &mut at);
+            p.seek(
+                -2,
+                util::int(IBStream_::IStreamSeekMode_::kIBSeekEnd),
+                &mut at,
+            );
             p.write(b"LP".as_ptr() as *mut c_void, 2, &mut n);
         }
         assert_eq!(s.bytes(), b"helLP");
@@ -858,7 +895,10 @@ mod tests {
             assert_eq!((o, v), (10, 0.75));
             assert!(p.getParameterData(2).is_null());
         }
-        assert_eq!(c.last_values().collect::<Vec<_>>(), vec![(7, 0.75), (9, 1.0)]);
+        assert_eq!(
+            c.last_values().collect::<Vec<_>>(),
+            vec![(7, 0.75), (9, 1.0)]
+        );
         c.clear();
         assert!(c.is_empty());
     }
@@ -870,7 +910,10 @@ mod tests {
         let mut want = iid::<IMessage>();
         let mut obj = ptr::null_mut();
         unsafe {
-            assert_eq!(host.createInstance(&mut cid, &mut want, &mut obj), kResultOk);
+            assert_eq!(
+                host.createInstance(&mut cid, &mut want, &mut obj),
+                kResultOk
+            );
             let msg = ComPtr::from_raw(obj as *mut IMessage).unwrap();
             msg.setMessageID(c"hello".as_ptr());
             assert_eq!(util::c_str_at(msg.getMessageID()).as_deref(), Some("hello"));
@@ -883,7 +926,10 @@ mod tests {
             attrs.setBinary(c"b".as_ptr(), data.as_ptr() as *const c_void, 3);
             let (mut p, mut len) = (ptr::null(), 0);
             attrs.getBinary(c"b".as_ptr(), &mut p, &mut len);
-            assert_eq!(std::slice::from_raw_parts(p as *const u8, len as usize), &data);
+            assert_eq!(
+                std::slice::from_raw_parts(p as *const u8, len as usize),
+                &data
+            );
             let text: Vec<u16> = "hey\0".encode_utf16().collect();
             attrs.setString(c"s".as_ptr(), text.as_ptr());
             let mut out = [0u16; 8];

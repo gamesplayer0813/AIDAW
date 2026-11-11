@@ -177,6 +177,7 @@ name = "aidaw-mcp"
 version = "0.1.0"
 dependencies = [
  "aidaw-core",
+ "aidaw-plugin",
  "anyhow",
  "hound",
  "serde",

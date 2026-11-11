@@ -102,8 +102,11 @@ pub struct PluginRack {
     tail: f64,
 }
 
+/// One track's plugins: its instrument (if a plugin) and its effects.
+type Loaded = (Option<Arc<Slot>>, Vec<Arc<Slot>>);
+
 impl PluginRack {
-    fn new(tracks: Vec<(Option<Arc<Slot>>, Vec<Arc<Slot>>)>) -> PluginRack {
+    fn new(tracks: Vec<Loaded>) -> PluginRack {
         let tail = tracks
             .iter()
             .flat_map(|(i, fx)| i.iter().chain(fx))
@@ -147,16 +150,34 @@ impl Rack for PluginRack {
         Some([l.as_mut_slice(), r.as_mut_slice()])
     }
 
-    fn process(&mut self, track: usize, frames: usize, events: &[NoteEvent], transport: &Transport) {
+    fn process(
+        &mut self,
+        track: usize,
+        frames: usize,
+        events: &[NoteEvent],
+        transport: &Transport,
+    ) {
         let Some(t) = self.tracks.get_mut(track) else {
             return;
         };
         let [l, r] = &mut t.bus;
         if let Some(s) = &t.instrument {
-            s.process(Role::Instrument, frames, events, transport, [&mut l[..], &mut r[..]]);
+            s.process(
+                Role::Instrument,
+                frames,
+                events,
+                transport,
+                [&mut l[..], &mut r[..]],
+            );
         }
         for s in &t.effects {
-            s.process(Role::Effect, frames, &[], transport, [&mut l[..], &mut r[..]]);
+            s.process(
+                Role::Effect,
+                frames,
+                &[],
+                transport,
+                [&mut l[..], &mut r[..]],
+            );
         }
     }
 
@@ -206,6 +227,11 @@ pub fn offline(project: &Project, sample_rate: f64, locate: Locate) -> (PluginRa
         .tracks
         .iter()
         .map(|t| {
+            // Nobody hears a muted track (or one another track's solo
+            // silences): its plugins can stay unloaded.
+            if !project.track_audible(t) {
+                return (None, Vec::new());
+            }
             let instrument = match &t.instrument {
                 Instrument::Vst3(p) => get(&t.name, p),
                 _ => None,
@@ -312,7 +338,7 @@ impl LiveRack {
     /// Plugins run at the audio device's rate: a new rate restarts them
     /// all with their current settings (at the next build).
     pub fn set_sample_rate(&mut self, sample_rate: f64) {
-        if sample_rate == self.setup.sample_rate || !(sample_rate > 0.0) {
+        if sample_rate == self.setup.sample_rate || sample_rate.is_nan() || sample_rate <= 0.0 {
             return;
         }
         self.setup.sample_rate = sample_rate;
@@ -581,8 +607,8 @@ impl LiveRack {
 
     /// Whether a plugin's editor has changes not yet read back.
     pub fn has_unsaved(&self) -> bool {
-        self.live.values().any(|l| {
-            l.dirty_since.is_some() || l.slot.plugin.edits.dirty.load(Ordering::Acquire)
-        })
+        self.live
+            .values()
+            .any(|l| l.dirty_since.is_some() || l.slot.plugin.edits.dirty.load(Ordering::Acquire))
     }
 }

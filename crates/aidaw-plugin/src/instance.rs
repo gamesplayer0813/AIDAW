@@ -268,7 +268,9 @@ impl Plugin {
         }
 
         unsafe {
-            if processor.canProcessSampleSize(SymbolicSampleSizes_::kSample32 as i32) != kResultOk {
+            if processor.canProcessSampleSize(util::int(SymbolicSampleSizes_::kSample32))
+                != kResultOk
+            {
                 bail!(
                     "{} only works with 64-bit audio, which AIDAW does not run yet",
                     info.name
@@ -276,11 +278,11 @@ impl Plugin {
             }
             let mut ps = ProcessSetup {
                 processMode: if setup.offline {
-                    ProcessModes_::kOffline as i32
+                    util::int(ProcessModes_::kOffline)
                 } else {
-                    ProcessModes_::kRealtime as i32
+                    util::int(ProcessModes_::kRealtime)
                 },
-                symbolicSampleSize: SymbolicSampleSizes_::kSample32 as i32,
+                symbolicSampleSize: util::int(SymbolicSampleSizes_::kSample32),
                 maxSamplesPerBlock: MAX_BLOCK as i32,
                 sampleRate: setup.sample_rate,
             };
@@ -422,6 +424,16 @@ impl Plugin {
         }
     }
 
+    /// The value (0..1) the plugin reads `text` as, for parameter `id`:
+    /// "-6 dB", "800 Hz" and the like, if the plugin understands it.
+    pub fn parse(&self, id: u32, text: &str) -> Option<f64> {
+        let c = self.controller.as_ref()?;
+        let mut wide: Vec<TChar> = text.encode_utf16().chain(Some(0)).collect();
+        let mut value: ParamValue = f64::NAN;
+        let ok = unsafe { c.getParamValueByString(id, wide.as_mut_ptr(), &mut value) } == kResultOk;
+        (ok && value.is_finite()).then(|| value.clamp(0.0, 1.0))
+    }
+
     /// The editor half, for showing the plugin's own window.
     pub fn controller(&self) -> Option<&ComPtr<IEditController>> {
         self.controller.as_ref()
@@ -506,17 +518,17 @@ fn connect(component: &ComPtr<IComponent>, controller: &ComPtr<IEditController>)
 unsafe fn arrange(component: &ComPtr<IComponent>, processor: &ComPtr<IAudioProcessor>) -> Layout {
     use BusDirections_::{kInput, kOutput};
     use MediaTypes_::{kAudio, kEvent};
-    let audio = kAudio as i32;
-    let buses = |dir| unsafe { component.getBusCount(audio, dir as i32) }.clamp(0, 64) as usize;
+    let audio = util::int(kAudio);
+    let buses = |dir| unsafe { component.getBusCount(audio, util::int(dir)) }.clamp(0, 64) as usize;
     let info = |dir, i| {
         let mut b: BusInfo = unsafe { std::mem::zeroed() };
-        (unsafe { component.getBusInfo(audio, dir as i32, i as i32, &mut b) } == kResultOk)
+        (unsafe { component.getBusInfo(audio, util::int(dir), i as i32, &mut b) } == kResultOk)
             .then_some(b)
     };
     let main = |dir| -> Option<usize> {
         let n = buses(dir);
         (0..n)
-            .find(|&i| info(dir, i).is_some_and(|b| b.busType == BusTypes_::kMain as i32))
+            .find(|&i| info(dir, i).is_some_and(|b| b.busType == util::int(BusTypes_::kMain)))
             .or((n > 0).then_some(0))
     };
     let (n_in, n_out) = (buses(kInput), buses(kOutput));
@@ -525,7 +537,7 @@ unsafe fn arrange(component: &ComPtr<IComponent>, processor: &ComPtr<IAudioProce
     // Stereo on the main buses; the rest keep what they have.
     let current = |dir, i| {
         let mut arr: SpeakerArrangement = 0;
-        if unsafe { processor.getBusArrangement(dir as i32, i as i32, &mut arr) } == kResultOk {
+        if unsafe { processor.getBusArrangement(util::int(dir), i as i32, &mut arr) } == kResultOk {
             arr
         } else {
             let ch = info(dir, i).map_or(0, |b| b.channelCount.clamp(0, 64));
@@ -559,12 +571,12 @@ unsafe fn arrange(component: &ComPtr<IComponent>, processor: &ComPtr<IAudioProce
 
     for (dir, n, m) in [(kInput, n_in, main_in), (kOutput, n_out, main_out)] {
         for i in 0..n {
-            unsafe { component.activateBus(audio, dir as i32, i as i32, (Some(i) == m) as u8) };
+            unsafe { component.activateBus(audio, util::int(dir), i as i32, (Some(i) == m) as u8) };
         }
     }
-    let events = unsafe { component.getBusCount(kEvent as i32, kInput as i32) } > 0;
+    let events = unsafe { component.getBusCount(util::int(kEvent), util::int(kInput)) } > 0;
     if events {
-        unsafe { component.activateBus(kEvent as i32, kInput as i32, 0, 1) };
+        unsafe { component.activateBus(util::int(kEvent), util::int(kInput), 0, 1) };
     }
     let channels = |dir, n| -> Vec<i32> {
         (0..n)
@@ -672,9 +684,9 @@ impl Processor {
         Processor {
             processor,
             mode: if setup.offline {
-                ProcessModes_::kOffline as i32
+                util::int(ProcessModes_::kOffline)
             } else {
-                ProcessModes_::kRealtime as i32
+                util::int(ProcessModes_::kRealtime)
             },
             events: EventList::with_capacity(EVENTS),
             changes_in: ParameterChanges::with_capacity(CHANGES),
@@ -740,7 +752,7 @@ impl Processor {
         fill_context(&mut self.context, transport);
         let mut data = ProcessData {
             processMode: self.mode,
-            symbolicSampleSize: SymbolicSampleSizes_::kSample32 as i32,
+            symbolicSampleSize: util::int(SymbolicSampleSizes_::kSample32),
             numSamples: frames as i32,
             numInputs: self.inputs.buffers.len() as i32,
             numOutputs: self.outputs.buffers.len() as i32,
@@ -859,21 +871,26 @@ fn note_event(e: &NoteEvent) -> Event {
 /// The song's clock as VST3 describes it (beats are quarter notes).
 fn fill_context(c: &mut ProcessContext, t: &Transport) {
     use ProcessContext_::StatesAndFlags_::*;
-    let bpm = if t.bpm.is_finite() && t.bpm > 0.0 { t.bpm } else { 120.0 };
-    let beat = if t.beat.is_finite() { t.beat.max(0.0) } else { 0.0 };
+    let bpm = if t.bpm.is_finite() && t.bpm > 0.0 {
+        t.bpm
+    } else {
+        120.0
+    };
+    let beat = if t.beat.is_finite() {
+        t.beat.max(0.0)
+    } else {
+        0.0
+    };
     let bpb = f64::from(t.beats_per_bar.max(1));
-    let mut state = kTempoValid
-        | kTimeSigValid
-        | kProjectTimeMusicValid
-        | kBarPositionValid
-        | kContTimeValid;
+    let mut state =
+        kTempoValid | kTimeSigValid | kProjectTimeMusicValid | kBarPositionValid | kContTimeValid;
     if t.playing {
         state |= kPlaying;
     }
     if t.loop_end.is_some() {
         state |= kCycleValid | kCycleActive;
     }
-    c.state = state as u32;
+    c.state = util::uint(state);
     c.sampleRate = t.sample_rate;
     c.projectTimeSamples = (beat * 60.0 / bpm * t.sample_rate).round() as i64;
     c.systemTime = 0;
