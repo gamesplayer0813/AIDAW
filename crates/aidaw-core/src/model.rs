@@ -173,6 +173,11 @@ pub struct Track {
     /// (see [`Track::rgb`]), so it stays put when tracks come and go.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// Audio tracks: the inputs of the sound card this track records from,
+    /// numbered from 1 (`[1]` = input 1 in mono, `[1, 2]` = inputs 1 and 2
+    /// in stereo). Empty: input 1.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input: Vec<u16>,
     #[serde(default)]
     pub clips: Vec<Clip>,
     /// Settings of this track that move over time: volume, pan, reverb and,
@@ -401,6 +406,9 @@ pub enum Instrument {
     },
     /// A VST3 instrument plugin installed on the computer.
     Vst3(PluginRef),
+    /// An audio track: it plays its audio clips (recordings and imported
+    /// WAV files) and records from the sound card's inputs. It has no notes.
+    Audio,
 }
 
 impl Instrument {
@@ -410,6 +418,10 @@ impl Instrument {
 
     pub fn is_drums(&self) -> bool {
         matches!(self, Instrument::Drums { .. })
+    }
+
+    pub fn is_audio(&self) -> bool {
+        matches!(self, Instrument::Audio)
     }
 
     /// The plugin this instrument is, if it is one.
@@ -439,6 +451,43 @@ pub struct Clip {
     pub length: f64,
     #[serde(default)]
     pub notes: Vec<Note>,
+    /// Set on audio clips: the recording or WAV file the clip plays. An
+    /// audio clip has no notes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<AudioRef>,
+}
+
+/// What an audio clip plays: a stretch of a WAV file, at its own speed (it
+/// is not stretched when the tempo changes; the clip's start is in beats).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AudioRef {
+    /// The WAV file: relative to the project file's folder (with `/`
+    /// between folders), or an absolute path.
+    pub file: String,
+    /// Where in the file the clip begins, in seconds (trims the start).
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub offset: f64,
+    /// Volume of the clip, linear: 1.0 = as recorded.
+    #[serde(default = "d_one", skip_serializing_if = "is_one")]
+    pub gain: f32,
+    /// Fade in at the clip's start and fade out at its end, in seconds. A
+    /// few milliseconds are always applied so the edges never click.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub fade_in: f64,
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub fade_out: f64,
+}
+
+impl AudioRef {
+    pub fn new(file: impl Into<String>) -> AudioRef {
+        AudioRef {
+            file: file.into(),
+            offset: 0.0,
+            gain: 1.0,
+            fade_in: 0.0,
+            fade_out: 0.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -457,6 +506,10 @@ pub struct Note {
 impl Clip {
     pub fn end(&self) -> f64 {
         self.start + self.length
+    }
+
+    pub fn is_audio(&self) -> bool {
+        self.audio.is_some()
     }
 
     /// Put the notes in playing order: by start, then pitch. Playback
@@ -564,10 +617,10 @@ impl Project {
     }
 
     /// Where live playback wraps back to the start: the end of the last
-    /// playable note, rounded up to a whole bar so loops stay in time.
-    /// `None` when the song has no notes.
+    /// playable note or audio clip, rounded up to a whole bar so loops stay
+    /// in time. `None` when the song has no notes and no audio.
     pub fn loop_end_beats(&self) -> Option<f64> {
-        let last = self
+        let notes = self
             .tracks
             .iter()
             .flat_map(|t| t.clips.iter())
@@ -576,7 +629,15 @@ impl Project {
                     .iter()
                     .filter(|n| n.start >= 0.0 && n.start < c.length && n.duration > 0.0)
                     .map(|n| c.start + (n.start + n.duration).min(c.length))
-            })
+            });
+        let audio = self
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| c.is_audio())
+            .map(Clip::end);
+        let last = notes
+            .chain(audio)
             .filter(|b| b.is_finite())
             .fold(0.0, f64::max);
         if last <= 0.0 {
@@ -705,6 +766,9 @@ fn d_pitch_decay() -> f32 {
 fn is_zero(x: &f32) -> bool {
     *x == 0.0
 }
+fn is_zero_f64(x: &f64) -> bool {
+    *x == 0.0
+}
 fn is_one(x: &f32) -> bool {
     *x == 1.0
 }
@@ -828,6 +892,34 @@ mod tests {
             None,
             "an empty lane does nothing"
         );
+    }
+
+    #[test]
+    fn audio_tracks_and_clips_round_trip() {
+        let json = r#"{"version":1,"name":"x","bpm":120.0,"beats_per_bar":4,"master_gain":0.8,"tracks":[{"id":"t1","name":"Vox","instrument":{"type":"audio"},"gain":0.8,"pan":0.0,"mute":false,"solo":false,"input":[2],"clips":[{"id":"c1","name":"Take 1","start":4.0,"length":8.0,"notes":[],"audio":{"file":"song audio/Take 1.wav","offset":0.5,"gain":0.7,"fade_in":0.01}}]}]}"#;
+        let p: Project = serde_json::from_str(json).unwrap();
+        let t = &p.tracks[0];
+        assert!(t.instrument.is_audio());
+        assert_eq!(t.input, vec![2]);
+        let c = &t.clips[0];
+        assert!(c.is_audio());
+        let a = c.audio.as_ref().unwrap();
+        assert_eq!(
+            (a.offset, a.gain, a.fade_in, a.fade_out),
+            (0.5, 0.7, 0.01, 0.0)
+        );
+        assert_eq!(serde_json::to_string(&p).unwrap(), json);
+        // The audio clip counts toward the song's length.
+        assert_eq!(p.length_beats(), 12.0);
+
+        // A clip with only a file keeps the JSON short.
+        let mut q = p.clone();
+        q.tracks[0].clips[0].audio = Some(AudioRef::new("a.wav"));
+        q.tracks[0].input.clear();
+        let s = serde_json::to_string(&q).unwrap();
+        assert!(s.contains(r#""audio":{"file":"a.wav"}"#), "{s}");
+        assert!(!s.contains("input"), "{s}");
+        assert_eq!(serde_json::from_str::<Project>(&s).unwrap(), q);
     }
 
     #[test]

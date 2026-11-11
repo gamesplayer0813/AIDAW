@@ -15,8 +15,8 @@ All 35 tools of `aidaw-mcp`, with every parameter. They are the same over MCP an
 | [`add_track`](#add_track) | Add a track with an instrument preset, or with an installed VST3 instrument plugin ("plugin"). |
 | [`update_track`](#update_track) | Change a track's name, instrument preset or plugin, drum kit, volume, pan, reverb, mute/solo, its row (position) and colour in the app, or tweak its synth sound. |
 | [`remove_track`](#remove_track) | Delete a track and all its clips. |
-| [`add_clip`](#add_clip) | Add a clip (a block of notes) to a track at a bar or beat, optionally with notes. |
-| [`update_clip`](#update_clip) | Move, resize or rename a clip. |
+| [`add_clip`](#add_clip) | Add a clip to a track at a bar or beat: a block of notes, or on an audio track a WAV file ("audio"). |
+| [`update_clip`](#update_clip) | Move, resize or rename a clip; for audio clips (recordings) also change the volume, the trim at the start and the fades. |
 | [`remove_clip`](#remove_clip) | Delete a clip. |
 | [`add_notes`](#add_notes) | Add notes to an existing clip. |
 | [`remove_notes`](#remove_notes) | Remove notes from a clip whose start is in [from, to) beats and that match pitch. |
@@ -152,7 +152,7 @@ Add a track with an instrument preset, or with an installed VST3 instrument plug
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `name` | string | yes | track name, e.g. "Bass" |
-| `instrument` | string | no | preset id (78 of them, see list_presets), e.g. soft_keys, e_piano, organ, bass, bass_808, acid_bass, bright_lead, supersaw, warm_pad, lush_pad, choir, pluck, nylon_guitar, rock_guitar, marimba, bell, strings, brass, flute, saxophone, chiptune, riser, drum_kit, drums_808, drums_909, drums_acoustic, drums_lofi, drums_trap. Loose names work too ("rhodes", "violin") |
+| `instrument` | string | no | preset id (78 of them, see list_presets), e.g. soft_keys, e_piano, organ, bass, bass_808, acid_bass, bright_lead, supersaw, warm_pad, lush_pad, choir, pluck, nylon_guitar, rock_guitar, marimba, bell, strings, brass, flute, saxophone, chiptune, riser, drum_kit, drums_808, drums_909, drums_acoustic, drums_lofi, drums_trap. Loose names work too ("rhodes", "violin"). "audio" makes a track for recordings and WAV files instead of an instrument |
 | `plugin` | string | no | name of an installed VST3 instrument plugin (list_plugins), e.g. "Surge XT"; a unique part of the name or its uid works too. Instead of "instrument" |
 | `kit` | string | no | drum tracks only: standard \| 808 \| 909 \| acoustic \| lofi \| trap \| electro |
 | `gain` | number | no | volume 0-2 (default 0.8) |
@@ -178,7 +178,7 @@ Change a track's name, instrument preset or plugin, drum kit, volume, pan, rever
 | `name` | string | no | new name |
 | `position` | integer | no | move the track to this row in the app, 1 = the top |
 | `color` | string | no | colour of the track in the app: blue, orange, green, purple, yellow, cyan, pink, violet, red, teal, white, gray, a hex code like "#ff8a3d", or "auto" for its own colour |
-| `instrument` | string | no | preset id (78 of them, see list_presets), e.g. soft_keys, e_piano, organ, bass, bass_808, acid_bass, bright_lead, supersaw, warm_pad, lush_pad, choir, pluck, nylon_guitar, rock_guitar, marimba, bell, strings, brass, flute, saxophone, chiptune, riser, drum_kit, drums_808, drums_909, drums_acoustic, drums_lofi, drums_trap. Loose names work too ("rhodes", "violin") |
+| `instrument` | string | no | preset id (78 of them, see list_presets), e.g. soft_keys, e_piano, organ, bass, bass_808, acid_bass, bright_lead, supersaw, warm_pad, lush_pad, choir, pluck, nylon_guitar, rock_guitar, marimba, bell, strings, brass, flute, saxophone, chiptune, riser, drum_kit, drums_808, drums_909, drums_acoustic, drums_lofi, drums_trap. Loose names work too ("rhodes", "violin"). "audio" makes a track for recordings and WAV files instead of an instrument |
 | `plugin` | string | no | name of an installed VST3 instrument plugin (list_plugins), e.g. "Surge XT"; a unique part of the name or its uid works too. Instead of "instrument" |
 | `gain` | number | no | volume 0-2, 1 = unity |
 | `pan` | number | no | -1 left .. 1 right |
@@ -232,7 +232,7 @@ Example:
 
 ## `add_clip`
 
-Add a clip (a block of notes) to a track at a bar or beat, optionally with notes. Returns clip_id. Length defaults to fit the notes.
+Add a clip to a track at a bar or beat: a block of notes, or on an audio track a WAV file ("audio"). Returns clip_id. Length defaults to fit the notes, or the whole file.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -243,6 +243,9 @@ Add a clip (a block of notes) to a track at a bar or beat, optionally with notes
 | `length` | number | no | length in beats (alternative to bars) |
 | `name` | string | no | clip name |
 | `notes` | string or array | no | notes as a melody string like "C4/1 E4/0.5 G4/0.5" (PITCH/BEATS, r = rest), or an array of {pitch, start, duration, velocity} with start in beats from the clip start |
+| `audio` | string | no | audio tracks only: a WAV file to play, relative to the project's folder (e.g. "My Song audio/Take 1.wav") or absolute |
+| `offset` | number | no | audio clips: seconds to skip at the start of the file |
+| `gain` | number | no | audio clips: volume 0-4, 1 = as recorded, 2 = +6 dB, 4 = +12 dB |
 
 Example:
 
@@ -254,7 +257,7 @@ Also answers to `create_clip`.
 
 ## `update_clip`
 
-Move, resize or rename a clip.
+Move, resize or rename a clip; for audio clips (recordings) also change the volume, the trim at the start and the fades.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -264,6 +267,10 @@ Move, resize or rename a clip.
 | `start` | number | no | move to this absolute beat |
 | `bars` | number | no | new length in bars |
 | `length` | number | no | new length in beats |
+| `gain` | number | no | audio clips: volume 0-4, 1 = as recorded, 2 = +6 dB, 4 = +12 dB |
+| `offset` | number | no | audio clips: seconds of the file skipped at the clip's start |
+| `fade_in` | number | no | audio clips: fade-in in seconds |
+| `fade_out` | number | no | audio clips: fade-out in seconds |
 
 Example:
 

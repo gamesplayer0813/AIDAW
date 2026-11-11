@@ -25,9 +25,13 @@
 | 🌌 混响 | 每条轨道一个「混响」滑块，所有轨道共用一个房间（Pro 模式还能调房间大小和音色）。新轨道按音色自动给一点，贝斯默认干声。杂鱼的歌终于不那么干巴巴了♡ |
 | ✂️ 像样的编辑 | 按住 `Shift` 拖个框就能选中一堆音符：`Ctrl+C` / `Ctrl+V` 复制粘贴、`Ctrl+D` 重复、方向键挪位置和升降音高（按调内音走，乱按也不跑调）、`Q` 量化。片段也能 `Ctrl+C` / `Ctrl+V` / `Ctrl+D`，按 `S` 在播放头处一刀两段，按住 `Alt` 拖动直接复制一份。音轨拖名字就能换顺序，颜色跟着音轨走（删轨、挪轨都不会乱变色），想换色就点「音色」面板里的小圆点。右键片段、音轨、标尺还有更多。终于不用一个一个点了吧，杂鱼♡ |
 | 🎚️ AI 会编曲，还会「听」 | `copy_bars` 把 4 小节复制成一整首，`quantize` 量化还能加摇摆，`humanize` 让死板的音符像真人弹的。`analyze` 把歌在内存里渲染一遍（不写文件），报响度（LUFS）、限幅器、高中低频比例、每条轨单独有多响，哪里不对还直接给出修正的调用。AI 终于不是捂着耳朵写歌了♡ |
+| 🎙️ 录音 | 「添加乐器」菜单最下面加一条**音频轨**，点轨道头上的小红圈「待录音」，按 `R`：先响一小节嗒嗒声帮你数拍，然后开录，再按 `R` 或空格停。录音存成 24-bit WAV，乖乖待在歌曲旁边的「<歌名> audio」文件夹里，声卡延迟自动补偿，和伴奏严丝合缝。在旧录音上重录，盖住的部分自动让位，`Ctrl+Z` 一下就回来。节拍器、戴耳机监听、输入电平表也都有。唱跑调可不归本小姐管♡ |
+| 🎹 MIDI 键盘 | USB MIDI 键盘插上就能弹（延音踏板也认），弹的是待录音的乐器轨，没有就弹选中的那条；让乐器轨待录音再按 `R`，弹的音符直接录成片段 |
+| 🎧 音频片段 | 点一下录音片段，下面就是波形编辑器：拖两边修剪、拖黄色小方块淡入淡出、调音量。编排区里照样能拖、`S` 切开、`Ctrl+D` 复制。「文件 › 导入音频（WAV）」能把现成的 WAV 放进来。导出 WAV 和 `analyze` 都会带上它们 |
+| 🔌 ASIO（可选） | 有专业声卡（音频接口）想要更低延迟，可以自己编一个带 ASIO 驱动的版本。默认包里故意没带，为什么看「构建」里的 ASIO 一节 |
 | 📈 自动化包络 | 音量、声像、混响、滤波亮度、共振、失真、FM、颤音、Sub、噪声，还有整首歌的总音量和混响房间，都能画成随时间变化的线：淡入淡出、滤波扫频、侧链「泵」感统统安排。AI 用 `automate` 写，你在轨道下面的包络道上点一点、拖一拖就能改。被包络接管的滑块会变灰、跟着播放头动，可不是坏了哦，笨蛋♡ |
 | 💬 聊天 AI 直接粘贴 | 什么都不用装：让随便哪个聊天 AI（ChatGPT、Gemini、DeepSeek…）用 JSON 列出音符，复制它的整段回答，点一个片段按 `Ctrl+V`，音符就进来了。现成的提示词在「问 AI」里 |
-| 🔌 VST®3 插件 | 电脑里装的 VST3 乐器和效果器都能用。「音色」面板的「插件」页挑乐器；效果器每条轨想挂几个挂几个（内置音色的轨也行），开关、换顺序、删掉随你；点「打开窗口」就是插件自己的界面，拧过的旋钮跟着 `.aidaw.json` 一起存。AI 也能挑插件、挂效果器、按名字拧旋钮（`"800 Hz"`、`"-6 dB"` 这种它也看得懂）。扫描插件和 AI 那边的渲染都在单独的进程里跑，坏插件崩了也拖不垮 AIDAW♡ |
+| 🔌 VST®3 插件 | 电脑里装的 VST3 乐器和效果器都能用。「音色」面板的「插件」页挑乐器；效果器每条轨想挂几个挂几个（内置音色的轨、录音的音频轨也行），开关、换顺序、删掉随你；点「打开窗口」就是插件自己的界面，拧过的旋钮跟着 `.aidaw.json` 一起存。AI 也能挑插件、挂效果器、按名字拧旋钮（`"800 Hz"`、`"-6 dB"` 这种它也看得懂）。扫描插件和 AI 那边的渲染都在单独的进程里跑，坏插件崩了也拖不垮 AIDAW♡ |
 | 🔊 主总线限幅器 | 峰值限幅 + 软削波，杂鱼把音量推爆也不会炸耳朵 |
 | ↩ 撤销一切 | AI 的改动、你的改动，全都能 `Ctrl+Z`。AI 自己也能用 `undo` 撤回它写砸的东西，而且你在 GUI 里改过的话它会乖乖收手，绝不顺手把你的改动一起扔掉 |
 
@@ -98,10 +102,33 @@ aidaw.exe examples\demo.aidaw.json
 | 加点 / 移动点 | 在包络道上点一下 / 拖动；按住 `Shift` 只上下动，按住 `Alt` 不吸附网格 |
 | 删除点 | 右键点，或者点一下再按 `Del` |
 | 两点之间怎么走 | 在线上右键：直线 / 平滑曲线 / 阶梯（先不动，到下一个点再跳）。同一个菜单还能清空所有点、删掉整条包络（标题上的垃圾桶也行） |
+| 录音 / 停止 | `R`（或顶栏的 ● 按钮）；停止也可以按空格 |
+| 待录音 | 点轨道头右下角的小红圈，或者左边音轨条上的红点 |
+| 修剪录音 | 点一下录音片段，在下面的波形里拖左右边缘；拖黄色小方块淡入淡出；按住 `Shift` 不吸附网格 |
 | 缩放 | `Ctrl+滚轮` |
 | 撤销 / 重做 | `Ctrl+Z` / `Ctrl+Y` |
 | 保存 | `Ctrl+S`（其实 GUI 改完 300ms 就自动存了） |
 | 导出音频 | File → Export WAV |
+
+### 5. 录音（人声、吉他、MIDI 键盘）
+
+1. **加一条音频轨**：左边「添加乐器」菜单最下面的「音频轨（人声、吉他、WAV 文件）」。
+2. **选麦克风**：顶栏右边的 🔊 按钮打开「声音」窗口，在「录音输入」里点你的麦克风或声卡。音频轨面板里的「录音来源」选「输入 1」（麦克风一般插在这儿），立体声的键盘、调音台选「输入 1+2」。
+3. **待录音**：点轨道头上的小红圈（或者面板里的「把这条音轨设为待录音」）。对着麦克风出点声，电平表会动；变红就是太响了，把声卡上的增益调小。
+4. **录**：按 `R`。先响一小节嗒嗒声（Pro 模式顶栏能关掉「预备拍」），然后开录，编排区里会长出红色的录音块。再按 `R` 或空格停。
+5. **改**：点一下录好的片段，下面就是波形：拖两边修剪、拖黄色小方块淡入淡出、调音量。不满意？`Ctrl+Z` 整条扔掉，或者在原地再录一遍：新录的会把盖住的旧录音挤掉（只挤盖住的那一段）。
+
+要知道的事（不许跳过！）：
+
+- 歌得先存过，录音才有地方放（歌曲旁边的「<歌名> audio」文件夹），没存的话会先弹「另存为」。以后「另存为」到别处，录音也会跟着复制过去。
+- 录音是 24-bit WAV，采样率跟着声卡走；声卡的延迟会自动补偿，录出来的和伴奏对得上。
+- 「待录音时听到输入（监听）」会把麦克风的声音按轨道音量和声像放出来。**戴耳机！** 用音箱的话声音钻回麦克风会啸叫，到时候别哭着来找本小姐。
+- 顶栏的节拍器按钮：播放和录音时每拍响一下。
+- 同一时间能录一条音频轨加一条乐器轨（MIDI）。
+- MIDI 键盘插上就能弹（延音踏板也认），弹的是待录音的乐器轨，没有就弹选中的那条。乐器轨上的小红圈只有插着 MIDI 键盘的时候才出现；点它再按 `R`，弹的音符就录成新片段。键盘是后插的？「声音」窗口里点「刷新列表」。
+- 电平完全不动？Windows 设置 › 隐私和安全性 › 麦克风，打开「允许桌面应用访问你的麦克风」。
+- 「文件 › 导入音频（WAV）…」把现成的 WAV（采样、伴奏、别处录的）放到选中的音频轨（没选就新建一条）上播放头所在的小节，同样会在歌曲旁边留一份副本。
+- 音频轨的音量、声像、混响一样能画自动化包络；合成器那些参数它没有。
 
 ## 让 AI 帮你作曲
 
@@ -163,8 +190,13 @@ Claude Code / Cursor / Windsurf / Cline 等 MCP 客户端配置方式同理。
 - **VST3 插件**（电脑里装了才有）：
   - `list_plugins`：看装了哪些插件乐器和效果器，新装的会自己找到
   - `add_track` `{"name": "Keys", "plugin": "Surge XT"}`：用插件乐器建一条轨（`update_track` 换成插件也行）
-  - `add_effect` `{"track": "Keys", "plugin": "Supermassive"}`：给轨道挂效果器，返回 `fx1` 这样的 id；`update_effect` `{"effect": "fx1", "bypass": true}` 关掉 / `position` 换顺序；`remove_effect` 删掉
+  - `add_effect` `{"track": "Keys", "plugin": "Supermassive"}`：给轨道挂效果器（录音的音频轨也能挂），返回 `fx1` 这样的 id；`update_effect` `{"effect": "fx1", "bypass": true}` 关掉 / `position` 换顺序；`remove_effect` 删掉
   - `plugin_params` `{"track": "Keys", "search": "cutoff"}` 列出插件的旋钮；`set_plugin_params` `{"track": "Keys", "param": "Cutoff", "value": "800 Hz"}` 拧旋钮。数值写 0-1 是旋钮位置，也可以照插件自己显示的写（`"-6 dB"`、`"30%"`），或者直接写选项名（`"Saw"`）
+- **录音 / 音频**（AI 没法替你唱，但能摆 WAV）：
+  - `add_track` `{"name": "Vocals", "instrument": "audio"}` 建一条音频轨
+  - `add_clip` `{"track": "Vocals", "bar": 5, "audio": "vocals.wav"}` 把 WAV 放到第 5 小节（路径相对工程文件夹；`offset` 跳过文件开头几秒，`gain` 调音量，不写长度就放整个文件）
+  - `update_clip` 的 `gain`、`offset`、`fade_in`、`fade_out` 改录音的音量、修剪和淡入淡出（单位：秒）
+  - `get_project` 会列出每段录音用的文件；`render_wav` 和 `analyze` 都会把录音混进去，文件不见了只会警告并当成静音
 - **底层编辑**：`add_track` / `update_track`（`position` 换行、`color` 换颜色）/ `remove_track`、`add_clip` / `update_clip` / `remove_clip`、`add_notes` / `remove_notes` / `transpose_clip`、`apply_ops`（原子批量）
 
 对笨笨的小模型也很宽容：轨道 / clip 可以用名字引用，数字写成字符串也认，乐器可以直接写预设名（`"bass"`、`"Warm Pad"`），位置可以用小节（`bar: 5`）；每个错误都会列出合法值并附一个示例调用。
@@ -186,8 +218,8 @@ Claude Code / Cursor / Windsurf / Cline 等 MCP 客户端配置方式同理。
 
 | crate | 作用 |
 |---|---|
-| `aidaw-core` | 工程数据模型（JSON）、编辑操作 `Op`、自动化包络、内置合成器/鼓机、音序器、主总线限幅、离线渲染 WAV |
-| `aidaw-engine` | 实时播放：cpal → Windows 上走 WASAPI，音频回调里跑同一个音序器；回调不加锁、不分配内存，和界面之间只走无锁命令队列和原子变量 |
+| `aidaw-core` | 工程数据模型（JSON）、编辑操作 `Op`、自动化包络、内置合成器/鼓机、音频片段（WAV 读取和播放）、音序器、主总线限幅、离线渲染 WAV |
+| `aidaw-engine` | 实时播放和录音：cpal → Windows 上走 WASAPI（自己编的话还有 ASIO），音频回调里跑同一个音序器；回调不加锁、不分配内存，和界面之间只走无锁命令队列和原子变量。录音从输入回调经无锁环形缓冲交给写盘线程存成 24-bit WAV，按声卡延迟对齐；MIDI 键盘走 midir |
 | `aidaw-gui` | 桌面编辑器（`aidaw.exe`）：编排时间线、钢琴卷帘、轨道/混音、乐器参数、撤销重做、主题（`theme.rs`）、中英文（`i18n.rs`） |
 | `aidaw-mcp` | MCP 服务器 + CLI（`aidaw-mcp.exe`）：让 AI 新建/打开工程、加轨、写音符、批量编辑、渲染 |
 | `aidaw-plugin` | VST3 宿主：扫描插件文件夹（结果缓存在 `plugins.json`）、加载插件、实时 / 离线跑插件、读写插件的设置、插件窗口。扫描和 AI 那边的渲染都在单独的 worker 进程里跑（就是 exe 自己带上 `--aidaw-plugin-worker` 再启动一次） |
@@ -203,7 +235,7 @@ Claude Code / Cursor / Windsurf / Cline 等 MCP 客户端配置方式同理。
 
 **安全**：MCP 收到的相对路径一律相对于工程所在目录（没打开工程时是 Music 目录），且只会写 `*.aidaw.json` 和 `*.wav`。AI 写错路径也覆盖不了别的文件，哼，本小姐可是考虑周全的。
 
-**单位**：时间一律是**拍**（四分音符）。clip 的 `start` 是绝对拍位置，note 的 `start` 是相对 clip 的拍位置。音高可以写 MIDI 数字或音名（`"C4"` = 60）。拍号默认 4/4，`update_project {"time_signature": "6/8"}` 也认：6/8 的一小节是 3 拍（六个八分音符），12/8 是 6 拍。7/8 这种多出半拍的小节暂时不行，别为难本小姐。
+**单位**：时间一律是**拍**（四分音符）。clip 的 `start` 是绝对拍位置，note 的 `start` 是相对 clip 的拍位置。只有录音例外：音频片段的 `offset`（从文件第几秒开始放）、`fade_in`、`fade_out` 是秒，`gain` 是倍数（1 = 原样）。音高可以写 MIDI 数字或音名（`"C4"` = 60）。拍号默认 4/4，`update_project {"time_signature": "6/8"}` 也认：6/8 的一小节是 3 拍（六个八分音符），12/8 是 6 拍。7/8 这种多出半拍的小节暂时不行，别为难本小姐。
 
 ## 构建（Windows 11）
 
@@ -226,6 +258,21 @@ CI（GitHub Actions）每个 PR 跑两个 job：`ubuntu-latest` 跑上面三条�
 
 加了新的界面文字或音色？记得在 `i18n.rs` 里补中文翻译，不然测试 `every_string_is_translated` 会骂你的♡ 改了 MCP 工具？跑一下 `cargo run -p aidaw-mcp -- docs docs/TOOLS.md` 重新生成工具文档，再在本文件和 `docs/LLM_GUIDE.md` 的工具列表里写上新工具、改对工具的个数，这些测试都会盯着的。
 
+### ASIO（可选，给有专业声卡的）
+
+默认版本走 WASAPI，什么声卡都能用。有 ASIO 驱动的音频接口（Focusrite、Steinberg、RME、MOTU……）想要更低的延迟，可以自己编一个带 ASIO 的版本。Releases 里的包**故意没带**，先把授权看完：
+
+- **授权**：ASIO SDK 是 Steinberg 的，双重授权，二选一：GPLv3，或者 Steinberg 自己的专有协议（按专有协议发布之前，得先拿到 Steinberg 签过字的授权协议）。带 ASIO 编出来的 exe 里有 SDK 的代码，所以自己用随便；**要发给别人，就按 GPLv3 发**（附上源码；AIDAW 本体是 MIT，和 GPLv3 兼容），或者自己去找 Steinberg 签协议。ASIO 是 Steinberg Media Technologies GmbH 的商标。默认构建完全不碰 SDK，所以这个仓库和 Releases 里的包都还是纯 MIT。
+- **在 Windows 上编**（MSVC 工具链）：
+  1. 装 LLVM，bindgen 要用里面的 libclang：`winget install LLVM.LLVM`。还是找不到的话设 `LIBCLANG_PATH=C:\Program Files\LLVM\bin`。
+  2. `cargo build --release -p aidaw-gui --features asio`
+  3. SDK 会被 asio-sys 自动从 steinberg.net 下载到临时目录；想用自己下好的，就把 `CPAL_ASIO_DIR` 设成解压出来的文件夹。
+  4. 打开新编的 `aidaw.exe` →「声音」窗口 →「驱动」选 ASIO，再选你的声卡。用 ASIO 时，录音输入就是同一块声卡的输入。
+- **从 Linux 交叉编译**（MinGW，`x86_64-pc-windows-gnu`）：有两个坑，[`packaging/build-asio-mingw.sh`](packaging/build-asio-mingw.sh) 都替你填好了，产物叫 `aidaw-asio.exe`。需要 `mingw-w64`、`clang` 和 `curl`。
+  - asio-sys 0.4 的 bindgen 布局测试在 MinGW 下会失败：MinGW 摆 C++ 类的内存布局和 MSVC 不一样，而 Rust 其实只用到 SDK 里纯 C 的结构体。脚本用一份只在 MSVC 下跑这些测试的 asio-sys 来编，编完把 `Cargo.lock` 放回原样。
+  - SDK 是 C++ 写的，MinGW 默认会让 exe 依赖 `libstdc++-6.dll`，而别人的 Windows 上没有这个文件。脚本让它静态链接进去，编完还会检查 exe 不缺 DLL。
+- CI 和 Release 都不编 ASIO 版。没带 ASIO 的版本在「声音」窗口里会说一声，不会崩。
+
 ## 发版（给维护者）
 
 1. 把 `Cargo.toml` 里 `[workspace.package]` 的 `version` 改成新版本（比如 `0.2.0`），合进 main。
@@ -235,12 +282,15 @@ CI（GitHub Actions）每个 PR 跑两个 job：`ubuntu-latest` 跑上面三条�
 ## 路线图（本小姐接下来要做的事）
 
 - [x] 插件宿主：VST3 乐器与效果器（扫描、加载、插件自己的窗口、设置存进工程、AI 工具）
+- [x] 音频轨与录音：麦克风 / 吉他 / MIDI 键盘、预备拍、节拍器、监听、延迟补偿、导入 WAV
 - [ ] CLAP 插件
-- [ ] 音频轨与录音、采样器
+- [ ] 采样器
 - [x] 混响：每轨发送量 + 共用房间（大小 / 音色）
 - [x] 自动化包络：音量 / 声像 / 混响 / 合成器参数 / 总音量 / 混响房间，GUI 里画线，AI 用 `automate` 写
-- [ ] 效果器链（EQ / 压缩）
-- [ ] ASIO 低延迟驱动、导出 MIDI
+- [x] 效果器链：每条轨挂任意个 VST3 效果器，开关、换顺序随你
+- [ ] 自带的 EQ / 压缩（不用装插件就有的那种）
+- [x] ASIO 低延迟驱动（可选编译，见上面的 ASIO 一节）
+- [ ] 导出 MIDI
 - [x] 多选、复制粘贴、重复、量化、人性化，还能直接粘贴聊天 AI 写的音符
 - [x] 可自定义循环区（A/B 循环）、切开 clip、`Alt` 拖动复制、音轨排序和固定颜色；AI 也能设循环、挪播放头、撤销自己的改动
 - [x] 音频回调零分配、引擎与 UI 之间改为无锁命令队列
@@ -257,6 +307,7 @@ AIDAW 用 [MIT 许可证](LICENSE)，随便用、随便改、拿去卖钱都行�
 - Noto Sans SC（子集）：[`crates/aidaw-gui/assets/NotoSansSC-LICENSE.txt`](crates/aidaw-gui/assets/NotoSansSC-LICENSE.txt)
 
 插件宿主用的是 [`vst3`](https://crates.io/crates/vst3) crate（MIT 和 Apache-2.0 双许可），它的接口定义是从 Steinberg 的 VST 3 SDK 头文件生成的，SDK 从 3.8 起也是 MIT。VST is a registered trademark of Steinberg Media Technologies GmbH.
+自己编的 ASIO 版另当别论：里面有 Steinberg ASIO SDK，分发时按 GPLv3（或者 Steinberg 的专有协议）来，详见上面的 ASIO 一节。
 
 ---
 

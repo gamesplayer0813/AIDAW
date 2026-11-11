@@ -5,7 +5,9 @@
 
 use std::io::Write;
 
-use aidaw_engine::{output_device_names, Engine};
+use aidaw_engine::{
+    drivers, has_asio, input_devices, output_device_names, output_devices, Engine, MidiProblem,
+};
 use eframe::egui::{self, Color32, RichText};
 
 use crate::app::App;
@@ -74,9 +76,47 @@ pub fn meter(ui: &mut egui::Ui, peak: f32) -> egui::Response {
     resp
 }
 
+/// A row of small level meters, one per input channel.
+pub fn input_meters(ui: &mut egui::Ui, peaks: &[f32]) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (i, p) in peaks.iter().take(8).enumerate() {
+            ui.label(RichText::new(format!("{}", i + 1)).size(10.5).color(crate::theme::TEXT_FAINT));
+            meter(ui, *p).on_hover_text(tr("Input level: sing or play, it should move. Red means too loud: turn the gain down on your audio interface."));
+        }
+        if peaks.is_empty() {
+            ui.weak(tr("no input open"));
+        }
+    });
+}
+
 pub fn show_window(ctx: &egui::Context, app: &mut App, open: &mut bool) {
-    let mut switch_to: Option<String> = None;
-    egui::Window::new(tr("🔊 Sound")).id(egui::Id::new("sound_window")).open(open).resizable(false).default_width(420.0).show(ctx, |ui| {
+    // What to (re)open once the window is drawn: driver and output device.
+    let mut switch_to: Option<(Option<String>, Option<String>)> = None;
+    let mut pick_input: Option<Option<String>> = None;
+    let mut refresh_midi = false;
+    egui::Window::new(tr("🔊 Sound")).id(egui::Id::new("sound_window")).open(open).resizable(false).default_width(440.0).show(ctx, |ui| {
+        let drivers = drivers();
+        let current_driver = app.engine.as_ref().map(|e| e.driver().to_string());
+        if drivers.len() > 1 || app.pro() {
+            ui.horizontal(|ui| {
+                ui.label(tr("Driver"));
+                let shown = current_driver.clone().unwrap_or_else(|| drivers.first().map_or(String::new(), |d| d.to_string()));
+                egui::ComboBox::from_id_salt("driver").selected_text(&shown).show_ui(ui, |ui| {
+                    for d in &drivers {
+                        if ui.selectable_label(shown.eq_ignore_ascii_case(d), *d).clicked() && !shown.eq_ignore_ascii_case(d) {
+                            switch_to = Some((Some(d.to_string()), None));
+                        }
+                    }
+                });
+                if current_driver.as_deref().is_some_and(|d| d.eq_ignore_ascii_case("asio")) {
+                    ui.weak(tr("ASIO: the lowest delay with an audio interface"));
+                }
+            });
+            if cfg!(windows) && !has_asio() {
+                ui.weak(tr("This build has no ASIO. WASAPI works with every sound card; for ASIO see \"ASIO\" in README.txt."));
+            }
+        }
         match &app.engine {
             Some(e) => {
                 let d = e.diagnostics();
@@ -93,6 +133,9 @@ pub fn show_window(ctx: &egui::Context, app: &mut App, open: &mut bool) {
                 ui.horizontal(|ui| {
                     ui.label(tr("Output level"));
                     meter(ui, d.peak);
+                    if !d.latency.is_zero() {
+                        ui.weak(trf("delay {} ms", &[&d.latency.as_millis()])).on_hover_text(tr("How long it takes from AIDAW to your ears. Recordings are lined up with the song automatically."));
+                    }
                 });
                 ui.add_space(4.0);
                 if ui.button(RichText::new(tr("🔔 Play a test beep")).strong()).clicked() {
@@ -109,24 +152,112 @@ pub fn show_window(ctx: &egui::Context, app: &mut App, open: &mut bool) {
         }
         ui.separator();
         ui.label(tr("Choose speakers / headphones:"));
+        let driver = current_driver.clone().or_else(|| app.settings.driver.clone());
         if app.device_names.is_empty() {
-            app.device_names = output_device_names();
+            app.device_names = output_devices(driver.as_deref());
         }
         let current = app.engine.as_ref().map(|e| e.device_name().to_string());
         for (i, name) in app.device_names.iter().enumerate() {
             let label = if i == 0 { trf("{}  (Windows default)", &[name]) } else { name.clone() };
             if ui.selectable_label(current.as_deref() == Some(name.as_str()), label).clicked() {
-                switch_to = Some(name.clone());
+                // The default entry follows Windows when the default changes.
+                switch_to = Some((driver.clone(), (i > 0).then(|| name.clone())));
             }
         }
         if app.device_names.is_empty() {
             ui.weak(tr("No output devices found. Plug in speakers or headphones."));
         }
-        if ui.add(icons::button(Icon::Sync, tr("Refresh list"))).clicked() {
-            app.device_names = output_device_names();
+
+        ui.separator();
+        ui.label(RichText::new(tr("Recording input (microphone, guitar, line in):")).strong());
+        let asio = app.engine.as_ref().is_some_and(|e| e.is_asio());
+        if asio {
+            ui.weak(tr("With ASIO, recording uses the inputs of the same device."));
+        } else {
+            if app.input_names.is_empty() {
+                app.input_names = input_devices(driver.as_deref());
+            }
+            let open_input = app.engine.as_ref().and_then(|e| e.input()).map(|i| i.name().to_string());
+            for (i, name) in app.input_names.iter().enumerate() {
+                let chosen = match &open_input {
+                    Some(n) => n == name,
+                    None => app.settings.input.as_deref().map_or(i == 0, |s| s == name),
+                };
+                let label = if i == 0 { trf("{}  (Windows default)", &[name]) } else { name.clone() };
+                if ui.selectable_label(chosen, label).clicked() && !chosen {
+                    pick_input = Some((i > 0).then(|| name.clone()));
+                }
+            }
+            if app.input_names.is_empty() {
+                ui.weak(tr("No microphone or other input found. Plug one in and click Refresh."));
+            }
+        }
+        match app.engine.as_ref().and_then(|e| e.input()) {
+            Some(input) => {
+                ui.weak(format!("{}: {}", input.name(), input.format()));
+                input_meters(ui, &app.input_peaks);
+                if input.callbacks() == 0 {
+                    ui.weak(tr("Waiting for the input to start…"));
+                }
+                if let Some(err) = input.error() {
+                    ui.colored_label(Color32::LIGHT_RED, trf("Device error: {}", &[&err]));
+                }
+            }
+            None => {
+                if let Some(err) = &app.input_error {
+                    ui.colored_label(Color32::LIGHT_RED, trf("Couldn't open the input: {}", &[err]));
+                }
+            }
+        }
+        if cfg!(windows) && !asio {
+            ui.weak(tr("No level at all? In Windows Settings › Privacy & security › Microphone, turn on \"Let desktop apps access your microphone\"."));
+        }
+
+        ui.separator();
+        ui.label(RichText::new(tr("MIDI keyboards:")).strong());
+        let (ports, problems) = app.engine.as_ref().map(|e| (e.midi_ports(), e.midi_problems())).unwrap_or_default();
+        if ports.is_empty() {
+            ui.weak(tr("No MIDI keyboard found. Plug one in (USB) and click Refresh."));
+        } else {
+            for p in &ports {
+                let fresh = app.midi_seen.is_some_and(|t| t.elapsed().as_millis() < 300);
+                ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                    ui.painter().circle_filled(r.center(), 3.5, if fresh { crate::theme::OK } else { crate::theme::TEXT_FAINT });
+                    ui.label(p);
+                });
+            }
+            ui.weak(tr("Keys play the armed instrument track, or the selected one. Arm it and press Record to record the notes."));
+        }
+        for p in &problems {
+            let text = match p {
+                MidiProblem::Unavailable(e) => trf("MIDI isn't available on this computer: {}", &[e]),
+                MidiProblem::Port { name, error } => trf("Couldn't open {}: {}", &[name, error]),
+                MidiProblem::Missing(name) => trf("MIDI keyboard {} not found", &[name]),
+            };
+            ui.colored_label(Color32::LIGHT_RED, text);
+        }
+        ui.add_space(4.0);
+        if ui.add(icons::button(Icon::Sync, tr("Refresh list"))).on_hover_text(tr("Look again for speakers, inputs and MIDI keyboards")).clicked() {
+            app.device_names = output_devices(driver.as_deref());
+            app.input_names = input_devices(driver.as_deref());
+            refresh_midi = true;
         }
     });
-    if let Some(name) = switch_to {
-        app.open_audio(Some(&name));
+    if let Some((driver, output)) = switch_to {
+        app.device_names.clear();
+        app.input_names.clear();
+        app.open_audio(driver.as_deref(), output.as_deref());
+    }
+    if let Some(input) = pick_input {
+        app.settings.input = input;
+        app.settings.save();
+        app.reopen_input();
+    }
+    if refresh_midi {
+        app.reopen_input();
+        if let Some(e) = &mut app.engine {
+            e.open_midi(None);
+        }
     }
 }

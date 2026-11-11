@@ -21,6 +21,9 @@ use crate::icons::{self, Icon};
 use crate::lanes::{self, Band, LaneKey, LaneMenu, Marks, Row};
 use crate::theme;
 
+/// Radius of the record-arm button on a track header.
+const ARM_R: f32 = 7.0;
+
 const HEADER_W: f32 = 150.0;
 /// The loop strip on top of the ruler.
 const LOOP_H: f32 = 12.0;
@@ -76,6 +79,9 @@ enum Hit {
         key: LaneKey,
         beat: f64,
         value: f32,
+    },
+    Arm {
+        track_id: String,
     },
     Nothing,
 }
@@ -347,6 +353,50 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                             theme::mix(theme::CANVAS, color, 0.72)
                         },
                     );
+                    if let Some(a) = &clip.audio {
+                        let inner = Rect::from_min_max(
+                            pos2(r.left() + 1.0, band.bottom() + 3.0),
+                            pos2(r.right() - 1.0, r.bottom() - 3.0),
+                        );
+                        match app.audio.get(&a.file) {
+                            Some(d) => {
+                                let spb = app.project.seconds_per_beat();
+                                let len = clip.length * spb;
+                                let (mid, half) = (inner.center().y, inner.height() / 2.0);
+                                let ink = theme::mix(color, Color32::WHITE, 0.3);
+                                let visible = painter.clip_rect().intersect(inner);
+                                let mut x = visible.left().floor();
+                                while x < visible.right() {
+                                    let rel0 = (beat_of(x) - clip.start) * spb;
+                                    let rel1 = (beat_of(x + 1.0) - clip.start) * spb;
+                                    let fade = fade_gain(a.fade_in, a.fade_out, len, (rel0 + rel1) / 2.0);
+                                    let p = d.peak_between(a.offset + rel0, a.offset + rel1);
+                                    let h = ((p * a.gain).min(1.0) * fade * half).max(0.5);
+                                    painter.line_segment(
+                                        [pos2(x + 0.5, mid - h), pos2(x + 0.5, mid + h)],
+                                        Stroke::new(1.0_f32, ink),
+                                    );
+                                    x += 1.0;
+                                }
+                            }
+                            None => {
+                                let (text, c) = if app.audio_failed.contains(&a.file) {
+                                    (tr("file missing"), theme::DANGER)
+                                } else {
+                                    (tr("loading…"), theme::TEXT_DIM)
+                                };
+                                painter
+                                    .with_clip_rect(inner.intersect(painter.clip_rect()))
+                                    .text(
+                                        inner.left_center() + vec2(6.0, 0.0),
+                                        Align2::LEFT_CENTER,
+                                        text,
+                                        FontId::proportional(11.0),
+                                        c,
+                                    );
+                            }
+                        }
+                    }
                     // Mini note preview.
                     if !clip.notes.is_empty() {
                         let (lo, hi) = clip.notes.iter().fold((127u8, 0u8), |(lo, hi), n| {
@@ -403,13 +453,68 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 }
                 // Friendly hint in rows that have nothing in them yet.
                 if track.clips.is_empty() {
+                    let recording_here = app.recording.as_ref().is_some_and(|r| {
+                        r.audio_track.as_ref() == Some(&track.id) || r.midi_track.as_ref() == Some(&track.id)
+                    });
+                    if recording_here {
+                        continue;
+                    }
                     painter.text(
                         pos2(x_of(0.0) + 12.0, top + ROW_H / 2.0),
                         Align2::LEFT_CENTER,
-                        tr("Double-click here to add a clip"),
+                        if track.instrument.is_audio() {
+                            tr("Press ● Record (R), or File › Import audio")
+                        } else {
+                            tr("Double-click here to add a clip")
+                        },
                         FontId::proportional(13.0),
                         theme::TEXT_FAINT,
                     );
+                }
+            }
+            // What is being recorded: a red block that grows with the playhead.
+            if let Some(rec) = &app.recording {
+                for row in &rows {
+                    let Band::Track(i) = row.band else {
+                        continue;
+                    };
+                    let id = &app.project.tracks[i].id;
+                    let is_midi = rec.midi_track.as_ref() == Some(id);
+                    if !is_midi && rec.audio_track.as_ref() != Some(id) {
+                        continue;
+                    }
+                    let top = top_of(row);
+                    let r = Rect::from_min_max(
+                        pos2(x_of(rec.punch_in) + 1.0, top + 5.0),
+                        pos2(
+                            x_of(app.playhead.max(rec.punch_in)).max(x_of(rec.punch_in) + 3.0),
+                            top + ROW_H - 5.0,
+                        ),
+                    );
+                    painter.rect_filled(r, 7.0, theme::alpha(theme::DANGER, 70));
+                    painter.rect_stroke(r, 7.0, Stroke::new(1.5_f32, theme::DANGER), StrokeKind::Inside);
+                    if is_midi && !rec.notes.is_empty() {
+                        let (lo, hi) = rec.notes.iter().fold((127u8, 0u8), |(lo, hi), n| (lo.min(n.0), hi.max(n.0)));
+                        let span = (hi - lo).max(1) as f32;
+                        for n in &rec.notes {
+                            let y = r.bottom() - 6.0 - (n.0 - lo) as f32 / span * (r.height() - 12.0);
+                            let (x0, x1) = (x_of(n.2), x_of(n.3).max(x_of(n.2) + 2.0));
+                            painter.rect_filled(
+                                Rect::from_min_max(pos2(x0, y - 1.25), pos2(x1, y + 1.25)),
+                                1.0,
+                                Color32::WHITE,
+                            );
+                        }
+                    }
+                    painter
+                        .with_clip_rect(r.intersect(painter.clip_rect()))
+                        .text(
+                            r.left_top() + vec2(7.0, 3.0),
+                            Align2::LEFT_TOP,
+                            "● REC",
+                            theme::bold_font(10.5),
+                            Color32::WHITE,
+                        );
                 }
             }
             if n_tracks == 0 {
@@ -461,6 +566,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             }
 
             // Headers (drawn last so they cover what is scrolled under them).
+            let midi = app.midi_connected();
             painter.rect_filled(
                 Rect::from_min_max(
                     pos2(origin.x, origin.y + RULER_H),
@@ -554,13 +660,26 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     theme::bold_font(13.0),
                     theme::TEXT,
                 );
-                let sound = match track.instrument.plugin() {
-                    Some(p) => p.name.as_str(),
-                    None => presets::name_of(&track.instrument)
+                let sound = if track.instrument.is_audio() {
+                    tr("Audio track")
+                } else if let Some(p) = track.instrument.plugin() {
+                    p.name.as_str()
+                } else {
+                    presets::name_of(&track.instrument)
                         .map(|n| presets::plain_name(tr(n)))
-                        .unwrap_or(tr("Custom sound")),
+                        .unwrap_or(tr("Custom sound"))
                 };
-                text.text(
+                let armed = app.is_armed(&track.id);
+                let arm_shown = armed || track.instrument.is_audio() || midi;
+                // The sound's name stops short of the arm button.
+                let sub = if arm_shown {
+                    let mut c = card.shrink(2.0);
+                    c.set_right(arm_center(card).x - ARM_R - 3.0);
+                    painter.with_clip_rect(c.intersect(painter.clip_rect()))
+                } else {
+                    text
+                };
+                sub.text(
                     card.left_top() + vec2(19.0, 28.0),
                     Align2::LEFT_TOP,
                     sound,
@@ -574,6 +693,17 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 ] {
                     if on {
                         x = theme::pill(&painter, pos2(x, card.top() + 8.0), flag, c).left() - 4.0;
+                    }
+                }
+                if arm_shown {
+                    let c = arm_center(card);
+                    if armed {
+                        theme::glow(&painter, Rect::from_center_size(c, vec2(14.0, 14.0)), 7, theme::alpha(theme::DANGER, 120), 10);
+                        painter.circle_filled(c, ARM_R, theme::DANGER);
+                        painter.circle_filled(c, 3.0, Color32::WHITE);
+                    } else {
+                        painter.circle_stroke(c, ARM_R, Stroke::new(1.5_f32, theme::alpha(theme::DANGER, 170)));
+                        painter.circle_filled(c, 3.0, theme::alpha(theme::DANGER, 170));
                     }
                 }
             }
@@ -622,6 +752,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             });
 
             // ---- interaction ----
+            let app_armed = app.armed.clone();
             let hit = |project: &Project, p: Pos2| -> Hit {
                 if p.y < origin.y + LOOP_H {
                     let beat = beat_of(p.x).max(0.0);
@@ -657,6 +788,20 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     Band::Track(i) => {
                         let track = &project.tracks[*i];
                         if in_header {
+                            let card = Rect::from_min_size(
+                                pos2(origin.x, top_of(row)),
+                                vec2(HEADER_W, row.h),
+                            )
+                            .shrink2(vec2(6.0, 4.0));
+                            if p.distance(arm_center(card)) <= ARM_R + 3.0
+                                && (track.instrument.is_audio()
+                                    || midi
+                                    || app_armed.contains(&track.id))
+                            {
+                                return Hit::Arm {
+                                    track_id: track.id.clone(),
+                                };
+                            }
                             return Hit::Header {
                                 track_id: track.id.clone(),
                             };
@@ -749,6 +894,10 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     Hit::ClipEdge { .. } => Some(CursorIcon::ResizeHorizontal),
                     Hit::Header { .. } | Hit::Point { .. } => Some(CursorIcon::Grab),
                     Hit::Lane { .. } => Some(CursorIcon::Crosshair),
+                    Hit::Arm { .. } => {
+                        tip = Some(tr("Arm for recording: Record (R) records onto the armed track"));
+                        Some(CursorIcon::PointingHand)
+                    }
                     Hit::Loop { part, .. } => {
                         tip = Some(if part == LoopPart::Outside {
                             tr("Drag here to loop a part of the song (L turns the loop on and off)")
@@ -863,8 +1012,19 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                             } else {
                                 ((beat / bpb).round() * bpb, bpb)
                             };
+                            // A recording can't be stretched past the end of its file.
+                            let spb = app.project.seconds_per_beat();
+                            let longest = app
+                                .project
+                                .clip(&clip_id)
+                                .and_then(|(_, c)| c.audio.as_ref())
+                                .and_then(|a| {
+                                    let d = app.audio.get(&a.file)?;
+                                    Some(((d.seconds() - a.offset) / spb).max(0.01))
+                                });
                             if let Some(c) = app.project.clip_mut(&clip_id) {
-                                c.length = (snapped - c.start).max(snap);
+                                let length = (snapped - c.start).max(snap);
+                                c.length = longest.map_or(length, |l| length.min(l));
                             }
                         }
                         Some(Drag::MoveTrack { track_id }) => {
@@ -988,6 +1148,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                                 app.selected_point = Some((key, index));
                             }
                         }
+                        Hit::Arm { track_id } => app.toggle_arm(&track_id),
                         Hit::LaneHeader { track_id: None } | Hit::Nothing => {}
                     }
                 }
@@ -995,8 +1156,16 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
             if resp.double_clicked() {
                 if let Some(p) = resp.interact_pointer_pos() {
                     if let Hit::Row { track_id, beat } = hit(&app.project, p) {
-                        let start = (beat / bpb).floor() * bpb;
-                        app.add_clip(&track_id, start.max(0.0));
+                        let audio = app
+                            .project
+                            .track(&track_id)
+                            .is_some_and(|t| t.instrument.is_audio());
+                        if audio {
+                            app.status = tr("Audio tracks hold recordings: arm the track and press ● Record (R), or use File › Import audio").into();
+                        } else {
+                            let start = (beat / bpb).floor() * bpb;
+                            app.add_clip(&track_id, start.max(0.0));
+                        }
                     }
                 }
             }
@@ -1018,6 +1187,7 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                             }
                         }
                         Hit::Header { track_id }
+                        | Hit::Arm { track_id }
                         | Hit::LaneHeader {
                             track_id: Some(track_id),
                         } => {
@@ -1269,7 +1439,8 @@ fn context_menu(ui: &mut egui::Ui, app: &mut App, menu: Menu) {
                 ui.close_menu();
                 return;
             };
-            if let Some(beat) = beat {
+            let audio = app.project.tracks[index].instrument.is_audio();
+            if let Some(beat) = beat.filter(|_| !audio) {
                 if ui
                     .add(icons::button(Icon::Plus, tr("New clip here")))
                     .clicked()
@@ -1361,7 +1532,11 @@ fn context_menu(ui: &mut egui::Ui, app: &mut App, menu: Menu) {
 /// Delete and Escape, everything else in the song view the clips.
 fn set_focus(app: &mut App, target: &Hit) {
     match target {
-        Hit::Ruler(_) | Hit::Loop { .. } | Hit::LaneHeader { .. } | Hit::Nothing => {}
+        Hit::Ruler(_)
+        | Hit::Loop { .. }
+        | Hit::LaneHeader { .. }
+        | Hit::Arm { .. }
+        | Hit::Nothing => {}
         Hit::Point { .. } | Hit::Lane { .. } => app.edit_focus = EditFocus::Automation,
         _ => app.edit_focus = EditFocus::Clips,
     }
@@ -1386,4 +1561,22 @@ pub fn changed_lanes(
         .collect();
     let song = lanes::song_has_lanes(after) && before.automation != after.automation;
     (tracks, song)
+}
+
+/// Where the record-arm button sits on a track header card: bottom right,
+/// left of the automation toggle.
+fn arm_center(card: Rect) -> egui::Pos2 {
+    pos2(card.right() - 40.0, card.bottom() - 12.0)
+}
+
+/// An audio clip's fade gain `t` seconds into it (0..1).
+fn fade_gain(fade_in: f64, fade_out: f64, length: f64, t: f64) -> f32 {
+    let mut g = 1.0f64;
+    if fade_in > 0.0 {
+        g = g.min(t / fade_in);
+    }
+    if fade_out > 0.0 {
+        g = g.min((length - t) / fade_out);
+    }
+    g.clamp(0.0, 1.0) as f32
 }

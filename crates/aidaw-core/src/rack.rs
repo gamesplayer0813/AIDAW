@@ -312,6 +312,100 @@ mod tests {
     }
 
     #[test]
+    fn keys_played_live_reach_plugins_and_the_pedal_holds_them() {
+        let p = song(Vec::new());
+        let mut rack = FakeRack::new(vec![(None, false), (Some(5), false)]);
+        let mut seq = Sequencer::new(SR);
+        let block = |seq: &mut Sequencer, rack: &mut FakeRack| {
+            let mut out = vec![0.0; 600];
+            seq.process_voices_with(&p, Some(rack), &mut out);
+        };
+        seq.note_on(&p, 1, 60, 100);
+        // A quick tap: the key is up again before the next block. Its
+        // note-off still comes after its note-on.
+        seq.note_on(&p, 1, 64, 100);
+        seq.note_off(1, 64);
+        block(&mut seq, &mut rack);
+        assert_eq!(
+            rack.events(5),
+            vec![(0, true, 60), (0, true, 64), (1, false, 64)]
+        );
+        assert_eq!(seq.live_notes(), 1);
+
+        // With the pedal down a key let go keeps sounding, until the pedal
+        // comes up.
+        seq.set_pedal(true);
+        seq.note_off(1, 60);
+        block(&mut seq, &mut rack);
+        assert_eq!(rack.events(5).len(), 3, "held by the pedal");
+        seq.set_pedal(false);
+        block(&mut seq, &mut rack);
+        assert_eq!(rack.events(5).last(), Some(&(600, false, 60)));
+        assert_eq!(seq.live_notes(), 0);
+
+        // A seek leaves keys that are still down alone.
+        seq.note_on(&p, 1, 67, 100);
+        seq.seek(8.0);
+        block(&mut seq, &mut rack);
+        assert_eq!(rack.events(5).last(), Some(&(900, true, 67)));
+        seq.all_notes_off();
+        block(&mut seq, &mut rack);
+        assert_eq!(rack.events(5).last(), Some(&(1200, false, 67)));
+    }
+
+    #[test]
+    fn audio_clips_go_through_their_tracks_effects() {
+        use crate::audio::{AudioData, AudioPool};
+        use crate::model::AudioRef;
+        use std::sync::Arc;
+
+        let mut p = Project::new("rack", 120.0);
+        let vox = Op::AddTrack {
+            name: "Vox".into(),
+            instrument: Some(Instrument::Audio),
+            gain: Some(1.0),
+            pan: None,
+            reverb: Some(0.5),
+        };
+        apply_all(&mut p, vec![vox]).unwrap();
+        p.tracks[0].clips.push(crate::Clip {
+            id: "c1".into(),
+            name: String::new(),
+            start: 0.0,
+            length: 4.0,
+            notes: Vec::new(),
+            audio: Some(AudioRef::new("dc.wav")),
+        });
+        let mut pool = AudioPool::new();
+        pool.insert(
+            "dc.wav",
+            Arc::new(AudioData::new(SR, 1, vec![0.5; SR as usize * 2])),
+        );
+        let pool = Arc::new(pool);
+        let frames = 2 * FRAMES_PER_BEAT as usize;
+        let plain = render::render(&p, &pool, SR)[..frames * 2].to_vec();
+        assert!(plain.iter().any(|s| s.abs() > 0.1));
+
+        // A pass-through effect changes nothing.
+        let mut rack = FakeRack::new(vec![(None, true)]);
+        let mut seq = Sequencer::new(SR);
+        seq.set_audio(pool.clone());
+        let through = run(&mut seq, &p, &mut rack, frames);
+        let diff = plain
+            .iter()
+            .zip(&through)
+            .fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+        assert!(diff < 1e-5, "pass-through differs by {diff}");
+
+        // A silencing effect silences the clip, reverb send included.
+        rack.fx_gain = 0.0;
+        let mut seq = Sequencer::new(SR);
+        seq.set_audio(pool.clone());
+        let silenced = run(&mut seq, &p, &mut rack, frames);
+        assert!(silenced.iter().all(|s| *s == 0.0));
+    }
+
+    #[test]
     fn effects_process_built_in_instruments_too() {
         let mut p = song(Vec::new());
         p.tracks[0].clips.push(crate::Clip {
@@ -320,9 +414,10 @@ mod tests {
             start: 0.0,
             length: 4.0,
             notes: vec![note(57, 0.0, 2.0)],
+            audio: None,
         });
         let frames = 2 * FRAMES_PER_BEAT as usize;
-        let plain = render::render(&p, SR)[..frames * 2].to_vec();
+        let plain = render::render(&p, &Default::default(), SR)[..frames * 2].to_vec();
 
         // A pass-through effect on the synth track changes nothing.
         let mut rack = FakeRack::new(vec![(None, true), (Some(1), false)]);
@@ -447,15 +542,15 @@ mod tests {
         assert_eq!(rack.transports.last().unwrap().frames, 1000);
 
         // Offline renders add the plugins' tail.
-        let audio = render::render_with(&p, Some(&mut rack), SR);
-        let plain = render::render(&p, SR);
+        let audio = render::render_with(&p, &Default::default(), Some(&mut rack), SR);
+        let plain = render::render(&p, &Default::default(), SR);
         assert_eq!(audio.len() - plain.len(), 2 * (1.5 * SR as f64) as usize);
     }
 
     #[test]
     fn without_a_rack_plugin_tracks_are_silent() {
         let p = song(vec![note(60, 0.0, 4.0)]);
-        let audio = render::render(&p, SR);
+        let audio = render::render(&p, &Default::default(), SR);
         assert!(audio.iter().all(|s| *s == 0.0));
     }
 }

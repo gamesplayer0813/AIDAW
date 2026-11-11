@@ -14,11 +14,12 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use aidaw_core::analysis;
 use aidaw_core::render;
-use aidaw_core::{PluginRef, Project};
+use aidaw_core::{AudioPool, PluginRef, Project};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -40,14 +41,21 @@ pub enum Job {
     /// List the plugins in one module.
     Scan { path: String },
     /// Render the song to a WAV file. Each plugin's `path` must say where
-    /// it is installed.
+    /// it is installed; `base` is the song's folder, which the files of its
+    /// audio clips are relative to.
     Render {
         project: Box<Project>,
         out: String,
         sample_rate: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base: Option<String>,
     },
     /// Measure the song (see [`analysis::analyze`]).
-    Analyze { project: Box<Project> },
+    Analyze {
+        project: Box<Project>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base: Option<String>,
+    },
     /// List a plugin's parameters, with its settings applied.
     Params { plugin: Box<PluginRef> },
     /// Work out parameter values from what was asked for (see
@@ -211,11 +219,14 @@ pub fn work(job: Job, progress: &mut dyn FnMut(f64)) -> Result<Value> {
             project,
             out,
             sample_rate,
+            base,
         } => {
+            let (audio, missing_audio) = audio_of(&project, base.as_deref());
             let (mut rack, problems) = rack::offline(&project, f64::from(sample_rate), &by_path);
             let mut last = 0.0;
             let seconds = render::render_to_wav_with(
                 &project,
+                &audio,
                 Some(&mut rack),
                 Path::new(&out),
                 sample_rate,
@@ -226,15 +237,20 @@ pub fn work(job: Job, progress: &mut dyn FnMut(f64)) -> Result<Value> {
                     }
                 },
             )?;
-            Ok(json!({ "seconds": seconds, "problems": problems }))
+            Ok(json!({
+                "seconds": seconds,
+                "problems": problems,
+                "missing_audio": missing_audio,
+            }))
         }
-        Job::Analyze { project } => {
+        Job::Analyze { project, base } => {
+            let (audio, missing_audio) = audio_of(&project, base.as_deref());
             let mut problems = Vec::new();
             // The song is played once for the mix and once per track; each
             // pass is a sign of life.
             let passes = 1 + project.tracks.len();
             let mut pass = 0;
-            let measured = analysis::analyze_with(&project, |p| {
+            let measured = analysis::analyze_with(&project, &audio, |p| {
                 progress(pass as f64 / passes as f64);
                 pass += 1;
                 let (rack, mut trouble) =
@@ -243,7 +259,11 @@ pub fn work(job: Job, progress: &mut dyn FnMut(f64)) -> Result<Value> {
                 problems.extend(trouble);
                 Some(Box::new(rack) as Box<dyn aidaw_core::rack::Rack>)
             })?;
-            Ok(json!({ "analysis": measured, "problems": problems }))
+            Ok(json!({
+                "analysis": measured,
+                "problems": problems,
+                "missing_audio": missing_audio,
+            }))
         }
         Job::Params { plugin } => {
             let p = set_up(&plugin)?;
@@ -255,6 +275,13 @@ pub fn work(job: Job, progress: &mut dyn FnMut(f64)) -> Result<Value> {
             Ok(json!({ "name": p.name, "set": set }))
         }
     }
+}
+
+/// The recordings the song's audio clips play, read from `base` (the
+/// song's folder), and the files that could not be read.
+fn audio_of(project: &Project, base: Option<&str>) -> (Arc<AudioPool>, Vec<String>) {
+    let (pool, missing) = AudioPool::load(project, base.map(Path::new));
+    (Arc::new(pool), missing)
 }
 
 /// Load `plugin` as the song has it: its saved settings, then the

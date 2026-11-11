@@ -279,7 +279,7 @@ fn a_song_renders_through_its_plugins() {
     let locate = |p: &PluginRef| Ok(PathBuf::from(&p.path));
     let (mut rack, problems) = rack::offline(&song, SR, &locate);
     assert!(problems.is_empty(), "{problems:?}");
-    let out = render::render_with(&song, Some(&mut rack), SR as u32);
+    let out = render::render_with(&song, &Default::default(), Some(&mut rack), SR as u32);
     let beat = SR as usize / 2;
     let loud = peak(&out[..2 * beat * 2]);
     assert!(loud > 0.2, "the synth is heard: {loud}");
@@ -293,14 +293,14 @@ fn a_song_renders_through_its_plugins() {
         .params
         .insert("0".into(), 0.0);
     let (mut rack, _) = rack::offline(&quiet, SR, &locate);
-    let out = render::render_with(&quiet, Some(&mut rack), SR as u32);
+    let out = render::render_with(&quiet, &Default::default(), Some(&mut rack), SR as u32);
     assert!(peak(&out) < 1e-6, "{}", peak(&out));
 
     // Bypassed, it is left out.
     let mut bypassed = quiet.clone();
     bypassed.tracks[0].effects[0].bypass = true;
     let (mut rack, _) = rack::offline(&bypassed, SR, &locate);
-    let out = render::render_with(&bypassed, Some(&mut rack), SR as u32);
+    let out = render::render_with(&bypassed, &Default::default(), Some(&mut rack), SR as u32);
     assert!(peak(&out) > 0.2);
 }
 
@@ -312,7 +312,7 @@ fn missing_plugins_are_reported_not_fatal() {
     let (mut rack, problems) = rack::offline(&song, SR, &locate);
     assert_eq!(problems.len(), 1, "{problems:?}");
     assert!(problems[0].contains("AIDAW Test Gain"), "{problems:?}");
-    let out = render::render_with(&song, Some(&mut rack), SR as u32);
+    let out = render::render_with(&song, &Default::default(), Some(&mut rack), SR as u32);
     assert!(peak(&out) > 0.2, "the synth still plays");
 }
 
@@ -476,12 +476,41 @@ fn workers_scan_render_and_report_crashes() {
     let classes = scan::scan_module(&w, &bundle()).unwrap();
     assert_eq!(classes.len(), 2);
 
+    // The song also plays a recording, which the worker reads from the
+    // song's folder.
     let dir = scratch("render");
+    let take: Vec<f32> = (0..44_100).map(|i| (i as f32 * 0.05).sin() * 0.3).collect();
+    render::write_wav(&dir.join("take.wav"), &take, 44_100).unwrap();
+    let mut project = song(&bundle());
+    apply_all(
+        &mut project,
+        vec![
+            Op::AddTrack {
+                name: "Take".into(),
+                instrument: Some(Instrument::Audio),
+                gain: None,
+                pan: None,
+                reverb: None,
+            },
+            Op::AddAudioClip {
+                track_id: "t2".into(),
+                start: 0.0,
+                length: 2.0,
+                file: "take.wav".into(),
+                offset: 0.0,
+                gain: None,
+                name: None,
+                replace: false,
+            },
+        ],
+    )
+    .unwrap();
     let wav = dir.join("song.wav");
     let job = Job::Render {
-        project: Box::new(song(&bundle())),
+        project: Box::new(project.clone()),
         out: wav.display().to_string(),
         sample_rate: 44_100,
+        base: Some(dir.display().to_string()),
     };
     let mut progress = Vec::new();
     let done = w
@@ -490,8 +519,22 @@ fn workers_scan_render_and_report_crashes() {
         })
         .unwrap();
     assert!(done["seconds"].as_f64().unwrap() > 1.9, "{done}");
+    assert_eq!(done["missing_audio"], json!([]), "{done}");
     assert!(std::fs::metadata(&wav).unwrap().len() > 100_000);
     assert_eq!(progress.last(), Some(&1.0));
+
+    // Somewhere else the recording is missing: said, and the rest plays.
+    let elsewhere = Job::Analyze {
+        project: Box::new(project),
+        base: Some(scratch("elsewhere").display().to_string()),
+    };
+    let done = w
+        .run(&elsewhere, std::time::Duration::from_secs(60), &mut |_| {})
+        .unwrap();
+    let missing = done["missing_audio"].as_array().unwrap();
+    assert_eq!(missing.len(), 1, "{done}");
+    assert!(missing[0].as_str().unwrap().contains("take.wav"), "{done}");
+    assert!(done["analysis"].is_object(), "{done}");
 
     let params = w
         .run(

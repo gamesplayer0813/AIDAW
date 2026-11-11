@@ -6,7 +6,7 @@ use aidaw_core::{DrumKit, Instrument, Param, PluginRef, Track, Waveform};
 use aidaw_plugin::editor;
 use aidaw_plugin::rack::Key;
 use aidaw_plugin::scan::{Kind, PluginInfo};
-use eframe::egui::{self, RichText, SliderClamping};
+use eframe::egui::{self, Color32, RichText, SliderClamping};
 
 use crate::app::{track_color, App};
 use crate::i18n::{tr, trf};
@@ -56,6 +56,15 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                         }
                     });
                 }
+                ui.separator();
+                if ui
+                    .add(icons::button(Icon::Mic, tr("Audio track (voice, guitar, WAV files)")))
+                    .on_hover_text(tr("A track for recordings instead of notes: record a microphone or an instrument, or import WAV files"))
+                    .clicked()
+                {
+                    app.add_audio_track(tr("Audio track"));
+                    ui.close_menu();
+                }
             })
             .response
             .on_hover_text(tr("Add a new track. Each track plays one instrument."));
@@ -74,9 +83,15 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
         .show(ui, |ui| {
             let mut remove = None;
             let mut preview = None;
+            let mut arm = None;
+            let midi = app.midi_connected();
+            let armed = app.armed.clone();
+            let peaks = app.input_peaks.clone();
             for (i, track) in app.project.tracks.iter_mut().enumerate() {
                 let auto_gain = track.automated(Param::Volume, playhead);
                 let auto_pan = track.automated(Param::Pan, playhead);
+                let is_audio = track.instrument.is_audio();
+                let is_armed = armed.contains(&track.id);
                 let selected = app.selected_track.as_deref() == Some(track.id.as_str());
                 let color = track_color(track);
                 let (fill, stroke) = if selected {
@@ -123,8 +138,16 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                                 ui.toggle_value(&mut track.mute, tr("🔇 Silence"))
                                     .on_hover_text(tr("Turn this instrument off for now"));
                             }
+                            if (is_audio || midi || is_armed)
+                                && arm_button(ui, is_armed, is_audio).clicked()
+                            {
+                                arm = Some(track.id.clone());
+                            }
                         });
                     });
+                    if is_audio && is_armed {
+                        crate::sound::input_meters(ui, &peaks);
+                    }
                     if pro {
                         // Volume and pan share one row when there is room, else one row each.
                         let wide = ui.available_width() >= 420.0;
@@ -179,12 +202,15 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                 });
                 ui.add_space(2.0);
             }
+            if let Some(id) = arm {
+                app.toggle_arm(&id);
+            }
             if let Some((id, name)) = remove {
                 if app.run_op(Op::RemoveTrack { track_id: id }).is_some() {
                     app.status = trf("Deleted {}. Ctrl+Z (or ↩ Undo) brings it back.", &[&name]);
                 }
             }
-            if let Some(i) = preview {
+            if let Some(i) = preview.filter(|&i| !app.project.tracks[i].instrument.is_audio()) {
                 app.preview_note(
                     i,
                     if app.project.tracks[i].instrument.is_drums() {
@@ -248,6 +274,13 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
         ui.weak(tr("Click a track above to change its sound."));
         return;
     };
+    if app.project.tracks[index].instrument.is_audio() {
+        audio_section(ui, app, index);
+        // Recordings run through effect plugins like any other track.
+        ui.add_space(6.0);
+        effects(ui, app, index);
+        return;
+    }
 
     let playhead = app.playhead;
     let auto = |p: Param| app.project.tracks[index].automated(p, playhead);
@@ -868,7 +901,7 @@ fn instrument_settings(
             }
             ui.weak(tr("Each row in the piano roll is a different drum: Kick, Snare, Clap, Hi-hats, Toms, cymbals and percussion (cowbell, shaker, congas...) are labelled on the keyboard."));
         }
-        Instrument::Vst3(_) => {}
+        Instrument::Vst3(_) | Instrument::Audio => {}
     }
 }
 
@@ -922,4 +955,149 @@ fn color_label(name: &str) -> &'static str {
         "violet" => tr("Violet"),
         _ => tr("This track's own colour (picked by the AI)"),
     }
+}
+
+/// The small round record-arm button on a track strip.
+fn arm_button(ui: &mut egui::Ui, armed: bool, audio: bool) -> egui::Response {
+    let button = egui::Button::image(icons::image(
+        Icon::Record,
+        12.0,
+        if armed { Color32::WHITE } else { theme::DANGER },
+    ))
+    .fill(if armed {
+        theme::DANGER
+    } else {
+        theme::SURFACE_HI
+    })
+    .corner_radius(10)
+    .min_size(egui::vec2(20.0, 20.0));
+    ui.add(button).on_hover_text(match (armed, audio) {
+        (true, _) => tr("Armed: Record (R) records onto this track. Click to disarm."),
+        (false, true) => tr("Arm for recording: Record (R) then records the microphone or line input onto this track"),
+        (false, false) => tr("Arm for recording: Record (R) then records what you play on the MIDI keyboard onto this track"),
+    })
+}
+
+/// "Input 1", "Input 1+2" for a track's input channels.
+fn input_label(inputs: &[u16]) -> String {
+    match inputs {
+        [] => trf("Input {}", &[&1]),
+        [one] => trf("Input {}", &[one]),
+        [a, b, ..] => trf("Input {}+{} (stereo)", &[a, b]),
+    }
+}
+
+/// An audio track's settings: what it records from, monitoring, arming.
+fn audio_section(ui: &mut egui::Ui, app: &mut App, index: usize) {
+    let pro = app.pro();
+    let auto_reverb = app.project.tracks[index].automated(Param::Reverb, app.playhead);
+    theme::section(ui, tr("Recording"));
+    let track = &mut app.project.tracks[index];
+    ui.horizontal(|ui| {
+        ui.label(tr("Track name"));
+        ui.add(egui::TextEdit::singleline(&mut track.name).desired_width(f32::INFINITY));
+    });
+    ui.horizontal(|ui| {
+        ui.label(tr("Colour"))
+            .on_hover_text(tr("The colour of this track's row and clips"));
+        color_swatches(ui, track);
+    });
+    ui.horizontal(|ui| {
+        ui.label(tr("Reverb")).on_hover_text(tr(
+            "Echo of a room around this sound: 0 = dry and close, more = farther away and more spacious",
+        ));
+        ui.spacing_mut().slider_width =
+            (ui.available_width() - if pro { 70.0 } else { 8.0 }).clamp(40.0, 200.0);
+        knob(ui, &mut track.reverb, auto_reverb, |v| {
+            egui::Slider::new(v, 0.0..=1.0)
+                .show_value(pro)
+                .fixed_decimals(2)
+        });
+    });
+    let id = track.id.clone();
+    let mut inputs = track.input.clone();
+    ui.add_space(4.0);
+
+    let armed = app.is_armed(&id);
+    let arm = if armed {
+        icons::button_colored(
+            Icon::Record,
+            tr("Armed: press Record (R) to record"),
+            Color32::WHITE,
+        )
+        .fill(theme::DANGER)
+    } else {
+        icons::button_colored(
+            Icon::Record,
+            tr("Arm this track for recording"),
+            theme::DANGER,
+        )
+    };
+    if ui
+        .add(arm.min_size(egui::vec2(ui.available_width(), 30.0)))
+        .on_hover_text(tr(
+            "An armed track records when you press Record. One audio track records at a time.",
+        ))
+        .clicked()
+    {
+        app.toggle_arm(&id);
+    }
+    ui.add_space(4.0);
+
+    let device_channels = app
+        .engine
+        .as_ref()
+        .and_then(|e| e.input())
+        .map_or(2, |i| i.channels().max(1));
+    ui.horizontal(|ui| {
+        icons::label(ui, Icon::Mic);
+        ui.label(tr("Records from"));
+        egui::ComboBox::from_id_salt("track_input")
+            .selected_text(input_label(&inputs))
+            .show_ui(ui, |ui| {
+                for c in 1..=device_channels {
+                    ui.selectable_value(&mut inputs, vec![c], input_label(&[c]));
+                }
+                for c in (1..device_channels).step_by(2) {
+                    ui.selectable_value(&mut inputs, vec![c, c + 1], input_label(&[c, c + 1]));
+                }
+            })
+            .response
+            .on_hover_text(tr("Which input of the sound card: a microphone is usually Input 1, a stereo keyboard or mixer Input 1+2"));
+    });
+    if inputs != app.project.tracks[index].input
+        && !(inputs == [1] && app.project.tracks[index].input.is_empty())
+    {
+        app.project.tracks[index].input = inputs;
+    }
+    let mut monitor = app.settings.monitor;
+    let changed = ui
+        .horizontal(|ui| {
+            icons::label(ui, Icon::Headphones);
+            ui.add(egui::Checkbox::new(&mut monitor, tr("Hear the input while armed (monitoring)")))
+                .on_hover_text(tr("Plays what comes in through the speakers or headphones. Use headphones: speakers feed back into the microphone and howl."))
+                .changed()
+        })
+        .inner;
+    if changed {
+        app.settings.monitor = monitor;
+        app.settings.save();
+    }
+    if armed || app.engine.as_ref().is_some_and(|e| e.input().is_some()) {
+        crate::sound::input_meters(ui, &app.input_peaks);
+    }
+    if let Some(err) = &app.input_error {
+        ui.colored_label(theme::DANGER, trf("Couldn't open the input: {}", &[err]));
+    }
+    ui.add_space(4.0);
+    if ui
+        .add(icons::button(Icon::Volume, tr("Choose the microphone…")))
+        .on_hover_text(tr(
+            "Opens the Sound window, where you pick the input device",
+        ))
+        .clicked()
+    {
+        app.show_sound = true;
+    }
+    ui.weak(tr("Takes are saved as WAV files in the \"<song> audio\" folder next to the song. Click a take to trim it, fade it or change its volume below."));
 }

@@ -10,10 +10,14 @@ use serde_json::{json, Value};
 
 use crate::automation::{self, Lane, Param, Point};
 use crate::model::{
-    Clip, Effect, EffectKind, Instrument, Note, PluginRef, Project, TimeSignature, Track,
+    AudioRef, Clip, Effect, EffectKind, Instrument, Note, PluginRef, Project, TimeSignature, Track,
 };
 use crate::transport::{Cue, LoopRegion, MIN_LOOP_BEATS};
 use crate::{color, transform};
+
+/// Loudest an audio clip can be made: 4 times (+12 dB) as recorded, for a
+/// quiet take.
+pub const MAX_CLIP_GAIN: f32 = 4.0;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -68,6 +72,34 @@ pub enum Op {
     },
     RemoveClip {
         clip_id: String,
+    },
+    /// Put a stretch of a WAV file on an audio track (see [`AudioRef`]).
+    AddAudioClip {
+        track_id: String,
+        start: f64,
+        /// Length in beats. The caller works it out from the file, since
+        /// edits never read files.
+        length: f64,
+        /// The WAV file, relative to the project's folder or absolute.
+        file: String,
+        /// Seconds into the file where the clip begins.
+        #[serde(default)]
+        offset: f64,
+        gain: Option<f32>,
+        name: Option<String>,
+        /// Make way for it: the track's audio clips under it are shortened,
+        /// cut in two or removed, as when a new take is recorded over an
+        /// old one (otherwise both play).
+        #[serde(default)]
+        replace: bool,
+    },
+    /// Change an audio clip's volume, its trim at the start or its fades.
+    UpdateAudio {
+        clip_id: String,
+        gain: Option<f32>,
+        offset: Option<f64>,
+        fade_in: Option<f64>,
+        fade_out: Option<f64>,
     },
     AddNotes {
         clip_id: String,
@@ -235,6 +267,19 @@ fn check_notes(notes: &[Note]) -> Result<()> {
     Ok(())
 }
 
+/// Error for note edits aimed at a recording.
+fn no_notes_in_audio(clip_id: &str) -> anyhow::Error {
+    anyhow!("{clip_id} is an audio clip (a recording); it has no notes to edit")
+}
+
+/// A length of time in seconds: finite and not negative.
+fn seconds(v: f64, what: &str) -> Result<f64> {
+    if !(v.is_finite() && v >= 0.0) {
+        bail!("{what} must be a number of seconds >= 0 (got {v})");
+    }
+    Ok(v)
+}
+
 /// A 0..1 amount such as a reverb send, clamped; NaN is refused.
 fn unit(v: f32, what: &str) -> Result<f32> {
     if v.is_nan() {
@@ -250,6 +295,12 @@ fn clips_mut<'a>(project: &'a mut Project, ids: &[String]) -> Result<Vec<&'a mut
     }
     if let Some(id) = ids.iter().find(|id| project.clip(id).is_none()) {
         bail!("no clip {id}");
+    }
+    if let Some(id) = ids
+        .iter()
+        .find(|id| project.clip(id).is_some_and(|(_, c)| c.is_audio()))
+    {
+        return Err(no_notes_in_audio(id));
     }
     Ok(project
         .tracks
@@ -296,6 +347,12 @@ fn lanes_mut<'a>(
             bail!(
                 "track {id} plays the plugin {}, which has no {} (only the built-in synth does); plugin tracks can automate volume, pan and reverb",
                 plugin.name,
+                param.id()
+            );
+        }
+        if t.instrument.is_audio() {
+            bail!(
+                "track {id} is an audio track, which has no {} (only synths do); audio tracks can automate volume, pan and reverb",
                 param.id()
             );
         }
@@ -384,6 +441,7 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
                 reverb,
                 effects: Vec::new(),
                 color: None,
+                input: Vec::new(),
                 clips: Vec::new(),
                 automation: Vec::new(),
             });
@@ -406,6 +464,23 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
             let t = project
                 .track_mut(&track_id)
                 .ok_or_else(|| anyhow!("no track {track_id}"))?;
+            if let Some(new) = &instrument {
+                if new.is_audio() != t.instrument.is_audio() && !t.clips.is_empty() {
+                    bail!(
+                        "{track_id} already has {}; add a new track for {} instead",
+                        if t.instrument.is_audio() {
+                            "recordings"
+                        } else {
+                            "notes"
+                        },
+                        if new.is_audio() {
+                            "recordings"
+                        } else {
+                            "an instrument"
+                        },
+                    );
+                }
+            }
             if let Some(v) = name {
                 t.name = v;
             }
@@ -452,12 +527,16 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
             let t = project
                 .track_mut(&track_id)
                 .ok_or_else(|| anyhow!("no track {track_id}"))?;
+            if t.instrument.is_audio() {
+                bail!("{track_id} is an audio track: it plays recordings, not notes. Record into it, or add_clip with \"audio\": a WAV file");
+            }
             let mut clip = Clip {
                 id: id.clone(),
                 name: name.unwrap_or_default(),
                 start,
                 length,
                 notes,
+                audio: None,
             };
             sort_notes(&mut clip);
             t.clips.push(clip);
@@ -496,11 +575,96 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
             }
             bail!("no clip {clip_id}")
         }
+        Op::AddAudioClip {
+            track_id,
+            start,
+            length,
+            file,
+            offset,
+            gain,
+            name,
+            replace,
+        } => {
+            if !(start.is_finite() && start >= 0.0 && length.is_finite() && length > 0.0) {
+                bail!("clip needs start >= 0 and length > 0");
+            }
+            let offset = seconds(offset, "offset")?;
+            let gain = match gain {
+                Some(g) if g.is_nan() => bail!("gain must be a number from 0 to 4"),
+                Some(g) => g.clamp(0.0, MAX_CLIP_GAIN),
+                None => 1.0,
+            };
+            if file.trim().is_empty() {
+                bail!("file must name a WAV file, e.g. \"vocals.wav\"");
+            }
+            let t = project
+                .track(&track_id)
+                .ok_or_else(|| anyhow!("no track {track_id}"))?;
+            if !t.instrument.is_audio() {
+                bail!("{track_id} plays an instrument; put recordings on an audio track (add_track with \"instrument\": \"audio\")");
+            }
+            if replace {
+                make_way(project, &track_id, start, start + length);
+            }
+            let id = project.next_id("c");
+            let t = project.track_mut(&track_id).expect("checked above");
+            t.clips.push(Clip {
+                id: id.clone(),
+                name: name.unwrap_or_default(),
+                start,
+                length,
+                notes: Vec::new(),
+                audio: Some(AudioRef {
+                    offset,
+                    gain,
+                    ..AudioRef::new(file)
+                }),
+            });
+            t.clips.sort_by(|a, b| a.start.total_cmp(&b.start));
+            Ok(json!({"clip_id": id}))
+        }
+        Op::UpdateAudio {
+            clip_id,
+            gain,
+            offset,
+            fade_in,
+            fade_out,
+        } => {
+            let offset = offset.map(|v| seconds(v, "offset")).transpose()?;
+            let fade_in = fade_in.map(|v| seconds(v, "fade_in")).transpose()?;
+            let fade_out = fade_out.map(|v| seconds(v, "fade_out")).transpose()?;
+            if gain.is_some_and(f32::is_nan) {
+                bail!("gain must be a number from 0 to 4");
+            }
+            let c = project
+                .clip_mut(&clip_id)
+                .ok_or_else(|| anyhow!("no clip {clip_id}"))?;
+            let a = c
+                .audio
+                .as_mut()
+                .ok_or_else(|| anyhow!("{clip_id} is a clip of notes, not a recording"))?;
+            if let Some(v) = gain {
+                a.gain = v.clamp(0.0, MAX_CLIP_GAIN);
+            }
+            if let Some(v) = offset {
+                a.offset = v;
+            }
+            if let Some(v) = fade_in {
+                a.fade_in = v;
+            }
+            if let Some(v) = fade_out {
+                a.fade_out = v;
+            }
+            Ok(json!({"ok": true}))
+        }
         Op::AddNotes { clip_id, notes } => {
             check_notes(&notes)?;
             let c = project
                 .clip_mut(&clip_id)
                 .ok_or_else(|| anyhow!("no clip {clip_id}"))?;
+            if c.is_audio() {
+                return Err(no_notes_in_audio(&clip_id));
+            }
             let n = notes.len();
             c.notes.extend(notes);
             sort_notes(c);
@@ -527,6 +691,9 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
             let c = project
                 .clip_mut(&clip_id)
                 .ok_or_else(|| anyhow!("no clip {clip_id}"))?;
+            if c.is_audio() {
+                return Err(no_notes_in_audio(&clip_id));
+            }
             for n in &mut c.notes {
                 n.pitch = (n.pitch as i32 + semitones).clamp(0, 127) as u8;
             }
@@ -818,6 +985,7 @@ pub fn apply(project: &mut Project, op: Op) -> Result<Value> {
 pub fn split_clip(project: &mut Project, clip_id: &str, at: f64) -> Result<String> {
     const EPS: f64 = 1e-9;
     let new_id = project.next_id("c");
+    let seconds_per_beat = project.seconds_per_beat();
     let track = project
         .tracks
         .iter_mut()
@@ -862,8 +1030,72 @@ pub fn split_clip(project: &mut Project, clip_id: &str, at: f64) -> Result<Strin
         })
         .collect();
     clip.length = cut;
+    // A recording goes on where the cut is: the right half starts later in
+    // the file. The left half keeps the fade-in, the right one the fade-out.
+    if let (Some(left), Some(r)) = (clip.audio.as_mut(), right.audio.as_mut()) {
+        r.offset = left.offset + cut * seconds_per_beat;
+        r.fade_in = 0.0;
+        r.fade_out = r.fade_out.min(right.length * seconds_per_beat);
+        left.fade_out = 0.0;
+        left.fade_in = left.fade_in.min(cut * seconds_per_beat);
+    }
     track.clips.insert(i + 1, right);
     Ok(new_id)
+}
+
+/// Make room on a track for audio from `from` to `to` beats: its audio clips
+/// there are shortened, cut in two or removed, the way a new take replaces
+/// what it was recorded over. A clip cut in two keeps its id on the left
+/// half; the parts keep playing the same stretch of their file.
+fn make_way(project: &mut Project, track_id: &str, from: f64, to: f64) {
+    const EPS: f64 = 1e-9;
+    let spb = project.seconds_per_beat();
+    // Ids for right halves, from the first one free.
+    let mut fresh = project
+        .next_id("c")
+        .trim_start_matches('c')
+        .parse::<u64>()
+        .unwrap_or(1);
+    let Some(t) = project.track_mut(track_id) else {
+        return;
+    };
+    let mut kept = Vec::with_capacity(t.clips.len() + 1);
+    for clip in std::mem::take(&mut t.clips) {
+        let (s, e) = (clip.start, clip.end());
+        if clip.audio.is_none() || e <= from + EPS || s >= to - EPS {
+            kept.push(clip);
+            continue;
+        }
+        // What plays after the new audio: later in the file.
+        let tail = (e > to + EPS).then(|| {
+            let mut right = clip.clone();
+            right.start = to;
+            right.length = e - to;
+            if let Some(a) = right.audio.as_mut() {
+                a.offset += (to - s) * spb;
+                a.fade_in = 0.0;
+                a.fade_out = a.fade_out.min(right.length * spb);
+            }
+            right
+        });
+        if s < from - EPS {
+            let mut left = clip;
+            left.length = from - s;
+            if let Some(a) = left.audio.as_mut() {
+                a.fade_out = 0.0;
+                a.fade_in = a.fade_in.min(left.length * spb);
+            }
+            kept.push(left);
+            if let Some(mut right) = tail {
+                right.id = format!("c{fresh}");
+                fresh += 1;
+                kept.push(right);
+            }
+        } else if let Some(right) = tail {
+            kept.push(right);
+        }
+    }
+    t.clips = kept;
 }
 
 /// Apply a batch atomically: if any op fails, the project is left untouched.

@@ -4,8 +4,10 @@
 //! text. Errors say what was wrong and show what a valid call looks like.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use aidaw_core::analysis::{self, Analysis, Levels};
+use aidaw_core::audio::{self, AudioPool};
 use aidaw_core::automation;
 use aidaw_core::edit::{self, Op};
 use aidaw_core::music::{self, ChordStyle};
@@ -14,7 +16,7 @@ use aidaw_core::{
     Point, Project, Shape, Synth, TimeSignature, Waveform,
 };
 use aidaw_plugin::scan::Kind;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Map, Value};
 
 use crate::history::{self, History};
@@ -46,6 +48,9 @@ const NUMERIC_KEYS: &[&str] = &[
     "octave",
     "steps_per_beat",
     "sample_rate",
+    "offset",
+    "fade_in",
+    "fade_out",
     "attack",
     "decay",
     "sustain",
@@ -137,6 +142,11 @@ impl Session {
             path,
             plugins: Plugins::default(),
         }
+    }
+
+    /// The open project's folder: where its recordings' paths start.
+    fn folder(&self) -> Option<&Path> {
+        self.path.as_deref().and_then(Path::parent)
     }
 
     fn path(&self) -> Result<&Path> {
@@ -273,22 +283,30 @@ impl Session {
                         })? as u32,
                 };
                 if project.uses_plugins() {
-                    return self.plugins.render(&project, &out, sr);
+                    let folder = path.parent().map(Path::to_path_buf);
+                    return self.plugins.render(&project, folder.as_deref(), &out, sr);
                 }
-                let seconds = render::render_to_wav(&project, &out, sr)?;
-                Ok(format!("rendered {seconds:.1}s to {}", out.display()))
+                let (audio, problems) = load_audio(&project, path);
+                let seconds = render::render_to_wav(&project, &audio, &out, sr)?;
+                Ok(format!(
+                    "rendered {seconds:.1}s to {}{problems}",
+                    out.display()
+                ))
             }
             "analyze" => {
-                let project = pio::load(self.path()?)?;
-                if project.uses_plugins() {
-                    let (measured, problems) = self.plugins.analyze(&project)?;
-                    return Ok(format!(
-                        "{}{problems}",
-                        analysis_report(&project, &measured)
-                    ));
-                }
-                let measured = analysis::analyze(&project)?;
-                Ok(analysis_report(&project, &measured))
+                let path = self.path()?;
+                let project = pio::load(path)?;
+                let (measured, problems) = if project.uses_plugins() {
+                    let folder = path.parent().map(Path::to_path_buf);
+                    self.plugins.analyze(&project, folder.as_deref())?
+                } else {
+                    let (audio, problems) = load_audio(&project, path);
+                    (analysis::analyze(&project, &audio)?, problems)
+                };
+                Ok(format!(
+                    "{}{problems}",
+                    analysis_report(&project, &measured)
+                ))
             }
             "list_plugins" => self.plugins.list(&args),
             "plugin_params" => {
@@ -303,7 +321,7 @@ impl Session {
                 let project = pio::load(self.path()?)?;
                 let set = self.plugins.prepare_params(&project, &mut args)?;
                 let out = self.edit(&what, |work| {
-                    Ok(vec![apply_tool(work, tool, args.clone())?])
+                    Ok(vec![apply_tool(work, tool, args.clone(), self.folder())?])
                 })?;
                 Ok(match set {
                     Some(set) => {
@@ -392,7 +410,7 @@ impl Session {
                         coerce(&mut item);
                         implied_args(&name, &mut item);
                         results.push(
-                            apply_tool(work, tool, item)
+                            apply_tool(work, tool, item, self.folder())
                                 .map_err(|e| anyhow!("op #{i} ({}): {e:#}", tool.name))?,
                         );
                     }
@@ -403,7 +421,7 @@ impl Session {
                 let what = short(&format!("{name} {}", Value::Object(args.clone())));
                 self.prepare(name, &mut args)?;
                 self.edit(&what, |work| {
-                    Ok(vec![apply_tool(work, tool, args.clone())?])
+                    Ok(vec![apply_tool(work, tool, args.clone(), self.folder())?])
                 })
             }
             other => bail!("tool {other} is not implemented"),
@@ -673,7 +691,12 @@ fn not_heard(work: &Project, tool: &str, args: &Args) -> Option<String> {
 }
 
 /// Apply one editing tool to `work`.
-fn apply_tool(work: &mut Project, tool: &Tool, mut args: Args) -> Result<Value> {
+fn apply_tool(
+    work: &mut Project,
+    tool: &Tool,
+    mut args: Args,
+    folder: Option<&Path>,
+) -> Result<Value> {
     let bpb = work.beats_per_bar as f64;
     let mut warnings = Vec::new();
     for (key, lo, hi) in [
@@ -812,7 +835,11 @@ fn apply_tool(work: &mut Project, tool: &Tool, mut args: Args) -> Result<Value> 
         }
         "add_clip" => {
             let id = resolve_track(work, &mut args)?;
-            let drums = work.track(&id).expect("resolved").instrument.is_drums();
+            let inst = &work.track(&id).expect("resolved").instrument;
+            if inst.is_audio() || args.contains_key("audio") {
+                return add_audio_clip(work, &id, args, folder);
+            }
+            let drums = inst.is_drums();
             position(work, &mut args)?;
             if !args.contains_key("start") {
                 args.insert("start".into(), json!(append_position(work, &id)));
@@ -830,6 +857,27 @@ fn apply_tool(work: &mut Project, tool: &Tool, mut args: Args) -> Result<Value> 
             let id = resolve_clip(work, &mut args)?;
             position(work, &mut args)?;
             bars_to_length(&mut args, bpb)?;
+            if AUDIO_CLIP_KEYS.iter().any(|k| args.contains_key(*k)) {
+                let mut num = |k: &str| -> Result<Option<f64>> {
+                    match args.remove(k) {
+                        None | Some(Value::Null) => Ok(None),
+                        Some(v) => v
+                            .as_f64()
+                            .map(Some)
+                            .ok_or_else(|| anyhow!("{k} must be a number (got {v})")),
+                    }
+                };
+                let op = Op::UpdateAudio {
+                    clip_id: id.clone(),
+                    gain: num("gain")?.map(|g| g as f32),
+                    offset: num("offset")?,
+                    fade_in: num("fade_in")?,
+                    fade_out: num("fade_out")?,
+                };
+                edit::apply(work, op).map_err(|e| {
+                    anyhow!("{e:#}; gain, offset, fade_in and fade_out are for audio clips (recordings)")
+                })?;
+            }
             let clip = work.clip(&id).expect("resolved").1;
             let get = |k: &str, d: f64| args.get(k).and_then(Value::as_f64).unwrap_or(d);
             check_end(get("start", clip.start) + get("length", clip.length), bpb)?;
@@ -1707,6 +1755,15 @@ fn resolve_param(
                 param_choices(work, Some(id))
             );
         }
+        if t.instrument.is_audio() {
+            bail!(
+                "track {} \"{}\" is an audio track, which has no {} (only synth tracks do); audio tracks can automate {}",
+                t.id,
+                t.name,
+                param.id(),
+                param_choices(work, Some(id))
+            );
+        }
         bail!(
             "track {} \"{}\" plays drums, which have no {} (only synth tracks do); drum tracks can automate {}",
             t.id,
@@ -1973,7 +2030,7 @@ fn lane_points_text(lane: &Lane, bpb: f64) -> String {
 fn fixed_setting(work: &Project, track_id: Option<&str>, param: Param) -> Option<String> {
     let synth = |f: fn(&Synth) -> f32| match &work.track(track_id?)?.instrument {
         Instrument::Synth(s) => Some(f(s)),
-        Instrument::Drums { .. } | Instrument::Vst3(_) => None,
+        Instrument::Drums { .. } | Instrument::Vst3(_) | Instrument::Audio => None,
     };
     let t = || work.track(track_id?);
     let (name, v) = match param {
@@ -3068,6 +3125,9 @@ fn resolve_instrument(args: &mut Args, existing: Option<Instrument>) -> Result<(
         )
     };
     let from_name = |s: &str| -> Result<Instrument> {
+        if is_audio_name(s) {
+            return Ok(Instrument::Audio);
+        }
         if let Some(p) = presets::find(s) {
             return Ok(p.instrument.clone());
         }
@@ -3082,12 +3142,12 @@ fn resolve_instrument(args: &mut Args, existing: Option<Instrument>) -> Result<(
                 Some(from_name(p)?)
             } else {
                 match m.get("type").and_then(Value::as_str) {
-                    Some("synth" | "drums") => Some(
+                    Some("synth" | "drums" | "audio") => Some(
                         serde_json::from_value(Value::Object(m))
                             .map_err(|e| anyhow!("invalid instrument object: {e}"))?,
                     ),
                     Some(other) => Some(from_name(other)?),
-                    None => bail!("instrument object needs \"type\": \"synth\" or \"drums\"; simpler: pass a preset id string like \"bass\""),
+                    None => bail!("instrument object needs \"type\": \"synth\", \"drums\" or \"audio\"; simpler: pass a preset id string like \"bass\""),
                 }
             }
         }
@@ -3100,6 +3160,9 @@ fn resolve_instrument(args: &mut Args, existing: Option<Instrument>) -> Result<(
             .find(|d| norm(d.label()) == name || format!("tr{}", d.label()) == name)
             .ok_or_else(|| anyhow!("unknown drum kit {k}; kits: {}", kit_names()))?;
         let base = inst.as_ref().or(existing.as_ref());
+        if base.is_some_and(Instrument::is_audio) {
+            bail!("audio tracks play recordings, so they have no drum kit");
+        }
         if base.is_some_and(|b| !b.is_drums()) && inst.is_some() {
             bail!(
                 "\"kit\" is for drum tracks, but the instrument given is a synth; drop one of them"
@@ -3129,6 +3192,9 @@ fn resolve_instrument(args: &mut Args, existing: Option<Instrument>) -> Result<(
             );
         }
         let mut v = serde_json::to_value(base)?;
+        if v.get("type").and_then(Value::as_str) == Some("audio") {
+            bail!("audio tracks play recordings, so they have no synth settings (waveform, attack, ...); change the volume with gain or a clip's sound with update_clip gain/fade_in/fade_out");
+        }
         if v.get("type").and_then(Value::as_str) == Some("drums") {
             bail!("drum kits have no synth settings (waveform, attack, ...); pick another kit with \"kit\" ({}) or change the instrument to a synth preset first", kit_names());
         }
@@ -3196,7 +3262,94 @@ fn instrument_label(inst: &Instrument) -> String {
             p.name,
             plugins::count(p.params.len(), "param")
         ),
+        Instrument::Audio => "audio (recordings)".into(),
     }
+}
+
+/// Instrument names that mean "a track for recordings and WAV files".
+fn is_audio_name(s: &str) -> bool {
+    matches!(
+        norm(s).as_str(),
+        "audio" | "audiotrack" | "recording" | "recordings" | "wav" | "sample" | "samples"
+    )
+}
+
+/// update_clip settings that only audio clips have.
+const AUDIO_CLIP_KEYS: [&str; 4] = ["gain", "offset", "fade_in", "fade_out"];
+
+/// The sound files the project plays, read from its folder, and a line for
+/// each that couldn't be read.
+fn load_audio(project: &Project, path: &Path) -> (Arc<AudioPool>, String) {
+    let (pool, problems) = AudioPool::load(project, path.parent());
+    (Arc::new(pool), audio_warnings(&problems))
+}
+
+/// "\nwarning: ..." for each recording that could not be read.
+pub fn audio_warnings(problems: &[String]) -> String {
+    problems
+        .iter()
+        .map(|p| format!("\nwarning: {p} (that clip stays silent)"))
+        .collect()
+}
+
+/// add_clip on an audio track: put (part of) a WAV file on the timeline.
+fn add_audio_clip(
+    work: &mut Project,
+    track_id: &str,
+    mut args: Args,
+    folder: Option<&Path>,
+) -> Result<Value> {
+    let bpb = work.beats_per_bar as f64;
+    let track = work.track(track_id).expect("resolved");
+    if !track.instrument.is_audio() {
+        bail!(
+            "track {:?} plays an instrument; WAV files go on an audio track. Add one first: add_track {{\"name\": \"Vocals\", \"instrument\": \"audio\"}}",
+            track.name
+        );
+    }
+    if args.contains_key("notes") {
+        bail!("audio tracks play recordings, not notes; put notes on an instrument track");
+    }
+    let file = match args.remove("audio") {
+        Some(Value::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
+        _ => bail!(
+            "an audio track plays WAV files: pass \"audio\": \"take1.wav\" (a path relative to the project's folder, or absolute)"
+        ),
+    };
+    let path = audio::resolve(folder, &file);
+    let seconds = audio::wav_seconds(&path)
+        .with_context(|| format!("can't use {} as a recording", path.display()))?;
+    let num = |args: &Args, k: &str| args.get(k).and_then(Value::as_f64);
+    let offset = num(&args, "offset").unwrap_or(0.0);
+    if !(0.0..seconds).contains(&offset) {
+        bail!(
+            "offset must be a number of seconds from 0 to {seconds:.2} (the file's length), got {offset}"
+        );
+    }
+    position(work, &mut args)?;
+    bars_to_length(&mut args, bpb)?;
+    let start = num(&args, "start").unwrap_or_else(|| append_position(work, track_id));
+    let beats_per_second = 1.0 / work.seconds_per_beat();
+    let length = num(&args, "length").unwrap_or((seconds - offset) * beats_per_second);
+    check_end(start + length, bpb)?;
+    let name = args
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()));
+    let op = Op::AddAudioClip {
+        track_id: track_id.to_string(),
+        start,
+        length,
+        file: audio::file_name_for(folder, &path),
+        offset,
+        gain: num(&args, "gain").map(|g| g as f32),
+        name,
+        replace: false,
+    };
+    let mut result = edit::apply(work, op)?;
+    result["seconds"] = json!((seconds * 100.0).round() / 100.0);
+    Ok(result)
 }
 
 // ---------------------------------------------------------------------------
@@ -3334,6 +3487,36 @@ fn overview(p: &Project, only: Option<&str>, with_notes: bool) -> String {
             "\n    automation",
         );
         for c in &t.clips {
+            if let Some(a) = &c.audio {
+                let mut extra = String::new();
+                if a.offset > 0.0 {
+                    extra.push_str(&format!(" from {}s", fmt_num(a.offset)));
+                }
+                if a.gain != 1.0 {
+                    extra.push_str(&format!(" gain {:.2}", a.gain));
+                }
+                if a.fade_in > 0.0 || a.fade_out > 0.0 {
+                    extra.push_str(&format!(
+                        " fades {}s/{}s",
+                        fmt_num(a.fade_in),
+                        fmt_num(a.fade_out)
+                    ));
+                }
+                s.push_str(&format!(
+                    "\n    - {}{} {} (beats {}..{}) audio \"{}\"{extra}",
+                    c.id,
+                    if c.name.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" \"{}\"", c.name)
+                    },
+                    bar_range(c.start, c.end(), bpb),
+                    fmt_num(c.start),
+                    fmt_num(c.end()),
+                    a.file,
+                ));
+                continue;
+            }
             let (lo, hi) = c.notes.iter().fold((127u8, 0u8), |(lo, hi), n| {
                 (lo.min(n.pitch), hi.max(n.pitch))
             });
@@ -3381,6 +3564,9 @@ fn automation_overview(
         .filter(|l| !l.points.is_empty() && l.param != Param::Unknown)
         .collect();
     let silent = |l: &Lane| match inst {
+        Some(inst) if !l.param.suits_track(inst) && inst.is_audio() => {
+            " (does nothing: audio tracks have no such setting)"
+        }
         Some(inst) if !l.param.suits_track(inst) => match inst.plugin() {
             Some(_) => " (does nothing: the plugin has no such setting)",
             None => " (does nothing: drums have no such setting)",
@@ -3428,6 +3614,7 @@ mod tests {
             reverb: 0.0,
             effects: Vec::new(),
             color: None,
+            input: Vec::new(),
             clips: Vec::new(),
             automation: Vec::new(),
         }
@@ -3438,7 +3625,7 @@ mod tests {
             panic!("args must be an object")
         };
         coerce(&mut args);
-        apply_tool(work, tools::find(name).unwrap(), args)
+        apply_tool(work, tools::find(name).unwrap(), args, None)
     }
 
     /// A plugin as `prepare` hands it to the edit (no plugin is installed

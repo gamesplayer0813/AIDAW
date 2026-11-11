@@ -19,7 +19,7 @@ use aidaw_plugin::worker::{Job, Worker};
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 
-use crate::session::{find_track, fmt_num, norm, Args};
+use crate::session::{audio_warnings, find_track, fmt_num, norm, Args};
 
 /// How long a worker may stay silent while it loads a plugin (big sample
 /// libraries take a while).
@@ -330,33 +330,68 @@ impl Plugins {
         Ok(found.display().to_string())
     }
 
-    /// render_wav for a song with plugins.
-    pub fn render(&mut self, project: &Project, out: &Path, sample_rate: u32) -> Result<String> {
+    /// render_wav for a song with plugins. `base` is the song's folder,
+    /// where the files of its audio clips are.
+    pub fn render(
+        &mut self,
+        project: &Project,
+        base: Option<&Path>,
+        out: &Path,
+        sample_rate: u32,
+    ) -> Result<String> {
         let job = Job::Render {
             project: Box::new(self.located(project)?),
             out: out.display().to_string(),
             sample_rate,
+            base: base.map(|b| b.display().to_string()),
         };
         let done = self.run(&job, RENDER_QUIET)?;
         let seconds = done["seconds"].as_f64().unwrap_or(0.0);
         Ok(format!(
-            "rendered {seconds:.1}s to {}{}",
+            "rendered {seconds:.1}s to {}{}{}",
             out.display(),
+            missing_audio_note(&done["missing_audio"]),
             problems_note(&done["problems"])
         ))
     }
 
     /// analyze for a song with plugins: the measurements, and what went
-    /// wrong with which plugin.
-    pub fn analyze(&mut self, project: &Project) -> Result<(Analysis, String)> {
+    /// wrong with which plugin or recording.
+    pub fn analyze(
+        &mut self,
+        project: &Project,
+        base: Option<&Path>,
+    ) -> Result<(Analysis, String)> {
         let job = Job::Analyze {
             project: Box::new(self.located(project)?),
+            base: base.map(|b| b.display().to_string()),
         };
         let done = self.run(&job, RENDER_QUIET)?;
         let analysis = serde_json::from_value(done["analysis"].clone())
             .map_err(|e| anyhow!("the plugin worker sent a broken analysis: {e}"))?;
-        Ok((analysis, problems_note(&done["problems"])))
+        Ok((
+            analysis,
+            format!(
+                "{}{}",
+                missing_audio_note(&done["missing_audio"]),
+                problems_note(&done["problems"])
+            ),
+        ))
     }
+}
+
+/// The warnings for recordings the worker could not read.
+fn missing_audio_note(missing: &Value) -> String {
+    let list: Vec<String> = missing
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    audio_warnings(&list)
 }
 
 /// The installed instrument plugin called exactly `name` (case aside), if

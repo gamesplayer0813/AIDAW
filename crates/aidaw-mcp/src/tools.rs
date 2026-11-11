@@ -77,6 +77,14 @@ PLACEMENT (add_chords, add_melody, add_drum_pattern)
   if its name is a preset ("Drums", "Bass", "Piano", "Pad", "Lead"...) or you pass "instrument".
   Tracks can also be given by position: "2" or "Track 2". Songs are at most 4096 bars.
 
+AUDIO  Recordings (vocals, guitar...) live on audio tracks: add_track {"name": "Vocals", "instrument": "audio"}.
+       The human records them in the app (files land in "<song> audio/" next to the project);
+       you can also place any WAV: add_clip {"track": "Vocals", "bar": 5, "audio": "My Song audio/Take 1.wav"}.
+       Audio clips play at their own speed (no time-stretch); a clip's length defaults to the whole
+       file, "offset" skips seconds at its start. update_clip {"clip": "c7", "gain": 0.8, "fade_in": 0.5}.
+       Notes tools, copy_bars, quantize and humanize leave recordings alone. analyze and render_wav
+       include them; get_project lists them with their file.
+
 LOW-LEVEL TOOLS
   add_clip {"track": "Lead", "bar": 5, "bars": 2, "notes": "C5/1 E5/1"}  (notes may also be objects:
            [{"pitch": "C5", "start": 0, "duration": 1, "velocity": 100}])
@@ -217,7 +225,9 @@ const INSTRUMENT: &str = "preset id (78 of them, see list_presets), e.g. soft_ke
                           bass_808, acid_bass, bright_lead, supersaw, warm_pad, lush_pad, choir, pluck, \
                           nylon_guitar, rock_guitar, marimba, bell, strings, brass, flute, saxophone, \
                           chiptune, riser, drum_kit, drums_808, drums_909, drums_acoustic, drums_lofi, \
-                          drums_trap. Loose names work too (\"rhodes\", \"violin\")";
+                          drums_trap. Loose names work too (\"rhodes\", \"violin\"). \"audio\" makes a track \
+                          for recordings and WAV files instead of an instrument";
+const AUDIO: &str = "audio tracks only: a WAV file to play, relative to the project's folder (e.g. \"My Song audio/Take 1.wav\") or absolute";
 const KIT: &str = "drum tracks only: standard | 808 | 909 | acoustic | lofi | trap | electro";
 const REVERB: &str = "0-1 how much of this track goes to the shared reverb: 0 dry, 0.2-0.35 typical for keys, \
                       pads and leads, 0.1 drums, 0 bass. New tracks start with their preset's usual amount";
@@ -357,7 +367,7 @@ pub const TOOLS: &[Tool] = &[
     },
     Tool {
         name: "add_clip",
-        description: "Add a clip (a block of notes) to a track at a bar or beat, optionally with notes. Returns clip_id. Length defaults to fit the notes.",
+        description: "Add a clip to a track at a bar or beat: a block of notes, or on an audio track a WAV file (\"audio\"). Returns clip_id. Length defaults to fit the notes, or the whole file.",
         example: r#"{"track": "Lead", "bar": 1, "bars": 2, "notes": "C5/1 E5/1 G5/2"}"#,
         params: &[
             req("track", Str, TRACK),
@@ -367,11 +377,14 @@ pub const TOOLS: &[Tool] = &[
             p("length", Num, "length in beats (alternative to bars)"),
             p("name", Str, "clip name"),
             p("notes", Notes, NOTES),
+            p("audio", Str, AUDIO),
+            p("offset", Num, "audio clips: seconds to skip at the start of the file"),
+            p("gain", Num, "audio clips: volume 0-4, 1 = as recorded, 2 = +6 dB, 4 = +12 dB"),
         ],
     },
     Tool {
         name: "update_clip",
-        description: "Move, resize or rename a clip.",
+        description: "Move, resize or rename a clip; for audio clips (recordings) also change the volume, the trim at the start and the fades.",
         example: r#"{"clip": "c2", "bar": 5, "bars": 4}"#,
         params: &[
             req("clip", Str, CLIP),
@@ -380,6 +393,10 @@ pub const TOOLS: &[Tool] = &[
             p("start", Num, "move to this absolute beat"),
             p("bars", Num, "new length in bars"),
             p("length", Num, "new length in beats"),
+            p("gain", Num, "audio clips: volume 0-4, 1 = as recorded, 2 = +6 dB, 4 = +12 dB"),
+            p("offset", Num, "audio clips: seconds of the file skipped at the clip's start"),
+            p("fade_in", Num, "audio clips: fade-in in seconds"),
+            p("fade_out", Num, "audio clips: fade-out in seconds"),
         ],
     },
     Tool {

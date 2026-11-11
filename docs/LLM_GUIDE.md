@@ -26,8 +26,8 @@ still write notes for you: see [4. Plain chat](#4-plain-chat-paste-the-answer).
 | `add_chords` | Chord symbols, e.g. `"Am F C G"`, one per bar. Styles: block, arpeggio, pulse |
 | `add_drum_pattern` | Step strings, e.g. `{"kick": "x...x...x...x...", "snare": "....x.......x..."}` |
 | `add_melody` | Compact text, e.g. `"C4/1 D4/0.5 E4/0.5 r/1 G4/2"` (pitch/beats, `r` = rest) |
-| `add_track`, `update_track`, `remove_track` | Tracks, instruments, volume, pan, reverb, mute and solo, row order and colour, plus synth tweaks |
-| `add_clip`, `update_clip`, `remove_clip` | Clips (blocks of notes on a track) |
+| `add_track`, `update_track`, `remove_track` | Tracks, instruments, volume, pan, reverb, mute and solo, row order and colour, plus synth tweaks; `"instrument": "audio"` makes a track for recordings |
+| `add_clip`, `update_clip`, `remove_clip` | Clips: blocks of notes on a track, or on an audio track a stretch of a WAV file (see [Recordings](#recordings)) |
 | `add_notes`, `remove_notes`, `transpose_clip` | Note-level edits |
 | `update_project` | Name, tempo, time signature, master volume, reverb room |
 | `apply_ops` | Several edits as one all-or-nothing step |
@@ -159,9 +159,9 @@ opens the pad's filter over 8 bars. Points can also be written as text, `"1:300 
 
 | `param` | On | Values |
 |---|---|---|
-| `volume` | any track | 0-2 like `update_track`'s `gain` (0.8 default, 1 unity); `"-6dB"` works too |
-| `pan` | any track | -1 left .. 0 centre .. 1 right |
-| `reverb` | any track | 0-1, the send to the shared reverb |
+| `volume` | any track, audio tracks too | 0-2 like `update_track`'s `gain` (0.8 default, 1 unity); `"-6dB"` works too |
+| `pan` | any track, audio tracks too | -1 left .. 0 centre .. 1 right |
+| `reverb` | any track, audio tracks too | 0-1, the send to the shared reverb |
 | `cutoff` | synth tracks | Hz, 20-20000; it glides evenly in pitch, so 200 -> 3200 passes 800 half way |
 | `resonance`, `drive`, `sub`, `noise` | synth tracks | 0-1 |
 | `fm` | synth tracks | 0-10; only sine and triangle waves have FM |
@@ -215,7 +215,7 @@ a track played by Surge XT; `update_track {"track": "Keys", "plugin": "Vital"}` 
 existing track to another plugin, and `"instrument": "e_piano"` back to a preset. The musical
 tools work on plugin tracks like on any other.
 
-**Effects run on any track**, built-in sounds included. `add_effect {"track": "Keys", "plugin":
+**Effects run on any track**, built-in sounds and recordings included. `add_effect {"track": "Keys", "plugin":
 "Supermassive"}` puts an effect at the end of the track's chain and returns its id (`fx1`);
 `"position": 1` puts it first. The sound runs through the effects in order, then the track's
 volume, pan and reverb send. `update_effect {"effect": "fx1", "bypass": true}` switches it off
@@ -253,6 +253,38 @@ installed here. Their tracks are silent (a missing effect is skipped), and `rend
 `analyze` say which ones were left out. Plugins run in a separate process for `plugin_params`,
 `set_plugin_params`, `render_wav` and `analyze`, so a plugin that crashes or hangs makes that
 one call fail and nothing else.
+
+## Recordings
+
+The human records vocals, guitar or a MIDI keyboard in the AIDAW app. The takes are WAV files in
+a folder next to the song (`"<song> audio"`), played by clips on **audio tracks**. You can't
+record, but you can put WAV files on the timeline, trim them, fade them and mix them:
+
+```
+add_track  {"name": "Vocals", "instrument": "audio"}
+add_clip   {"track": "Vocals", "bar": 5, "audio": "Song audio/Vocals 1.wav"}
+update_clip {"clip": "Vocals 1", "gain": 0.7, "fade_in": 0.05, "fade_out": 1.5}
+```
+
+- `audio` is the file: relative to the project's folder (as the app saves takes) or absolute.
+  The server reads it only to learn its length; it never writes or moves recordings.
+- Without `bars`/`length` the clip plays the whole file. `offset` skips seconds at the start of
+  the file, `gain` is the clip's volume (0-4: 1 = as recorded, 2 = +6 dB, 4 = +12 dB).
+- `update_clip` moves and resizes audio clips like note clips; `offset` (trim the start),
+  `gain`, `fade_in` and `fade_out` are in seconds and only apply to audio clips. A clip longer
+  than what is left of its file is silent after the file ends.
+- `split_clip` works on recordings too: the right half plays on from the cut.
+- `get_project` shows each audio clip's file; `render_wav` and `analyze` mix the recordings in
+  (a file that is missing plays as silence, with a warning). `analyze`'s per-track levels include
+  audio tracks, so you can balance the instruments around a vocal.
+- Audio tracks have no notes and no synth settings: `add_notes`, `add_melody`, `quantize`,
+  `humanize` and `transpose_clip` don't apply, and `copy_bars` copies notes only. To repeat a
+  recording, `add_clip` the same file again at another bar.
+- Automate an audio track's `volume`, `pan` and `reverb` like any other track's (a vocal ride, a
+  fade); the synth settings don't exist there.
+- A track can't switch between audio and an instrument while it has clips.
+- Effect plugins work on audio tracks too, e.g. a compressor or reverb on a vocal:
+  `add_effect {"track": "Vocals", "plugin": "<an effect list_plugins found>"}` (see Plugins).
 
 ## Sounds
 

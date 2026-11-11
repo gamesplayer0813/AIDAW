@@ -33,6 +33,13 @@
 //!   [`crate::rack`]): plugin instruments get their notes as sample-accurate
 //!   note-on/off events, and a track with plugins renders into its own bus,
 //!   through its effects, before its volume, pan and reverb send.
+//! - Audio clips (recordings, imported WAVs) play from an [`AudioPool`] at
+//!   their own speed, resampled with Hermite interpolation when the file's
+//!   rate differs from the output's. Their edges are faded by a few
+//!   milliseconds, and a jump of the playhead fades the old sound out while
+//!   the new one fades in, so seeking, looping and stopping never click.
+//! - An optional metronome clicks on every beat (accented on the bar); it is
+//!   for live playback and recording only, renders never include it.
 //! - [`Sequencer::process`] does not allocate (state buffers are reserved up
 //!   front), so it is safe to call from a real-time audio callback.
 //! - Each block looks up the notes that start in it with a binary search
@@ -42,9 +49,11 @@
 use std::borrow::Cow;
 use std::f32::consts::{PI, TAU};
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
+use crate::audio::AudioPool;
 use crate::automation::{self, Param};
 use crate::model::{DrumKit, Instrument, Project, Reverb, Synth, Track, Waveform};
 use crate::pitch;
@@ -95,6 +104,16 @@ const REVERB_OUT: f32 = 1.0;
 const REVERB_HP_HZ: f32 = 150.0;
 /// Below this output level the reverb tail counts as gone.
 const REVERB_SILENCE: f32 = 1e-5;
+/// Shortest fade at the start and end of an audio clip, so its edges never click.
+const AUDIO_EDGE_SECONDS: f64 = 0.003;
+/// Cross-fade of audio clips when the playhead jumps (seek, loop, stop).
+const AUDIO_JUMP_SECONDS: f32 = 0.005;
+/// Metronome: click pitch (accent on the first beat of a bar), level, decay.
+const CLICK_HZ: f32 = 1000.0;
+const CLICK_ACCENT_HZ: f32 = 1600.0;
+const CLICK_LEVEL: f32 = 0.28;
+const CLICK_ACCENT_LEVEL: f32 = 0.4;
+const CLICK_DECAY_SECONDS: f32 = 0.02;
 
 /// Synth notes pick up automated settings this often, in frames.
 const CONTROL_FRAMES: usize = 16;
@@ -729,6 +748,12 @@ struct Voice {
     done: bool,
     /// A preview note that sounds until [`Sequencer::release_held`].
     held: bool,
+    /// The note number, for matching live note-offs.
+    pitch: u8,
+    /// Played live (a MIDI keyboard): sounds until [`Sequencer::note_off`].
+    live: bool,
+    /// A live note whose key is up, kept sounding by the sustain pedal.
+    pedal_held: bool,
     /// Gain of the anti-click fade-out; 1.0 unless `fading`.
     fade: f32,
     fading: bool,
@@ -770,6 +795,21 @@ struct PluginNote {
     done: bool,
     /// Its plugin was found this block (else the plugin is gone).
     seen: bool,
+    /// Played on a MIDI keyboard: it sounds until the key goes up.
+    live: bool,
+    /// Its key went up while the sustain pedal was down.
+    pedal_held: bool,
+}
+
+/// What [`Sequencer::spawn`] started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Started {
+    /// Nothing: an audio track, or every plugin note slot is taken.
+    Nothing,
+    /// A voice of a built-in instrument, the last of the voices.
+    Voice,
+    /// A note on a plugin instrument, the last of the plugin notes.
+    PluginNote,
 }
 
 impl PluginNote {
@@ -794,6 +834,7 @@ impl PluginNote {
             return;
         }
         let mut at = 0;
+        let mut starts = false;
         if !self.started {
             if self.delay >= frames {
                 self.delay -= frames;
@@ -806,6 +847,7 @@ impl PluginNote {
             at = self.delay;
             self.delay = 0;
             self.started = true;
+            starts = true;
             events.push(NoteEvent {
                 offset: at,
                 pitch: self.pitch,
@@ -816,6 +858,9 @@ impl PluginNote {
         }
         let left = u64::from(frames - at);
         let remain = self.gate.saturating_sub(self.age);
+        // Let go before it started (a quick tap): it still ends a frame
+        // after its note-on, as note-offs come first within a frame.
+        let remain = if starts { remain.max(1) } else { remain };
         if remain < left {
             if events.len() < events.capacity() {
                 events.push(off(at + remain as u32));
@@ -915,6 +960,57 @@ pub struct Sequencer {
     /// Master volume reached at the end of the previous block (NaN before
     /// the first block).
     master: f32,
+    /// The sound files audio clips play.
+    audio: Arc<AudioPool>,
+    /// Gain of the audio clips' fade-in after the playhead jumped (1 = none).
+    audio_fade: f32,
+    /// What audio played before a jump, fading out: the beat it carries on
+    /// from and the frames of fade left.
+    audio_tail: Option<(f64, u32)>,
+    /// Whether the last block played audio clips along the timeline.
+    audio_live: bool,
+    /// The sustain pedal for live notes is down.
+    pedal: bool,
+    metronome: bool,
+    click: Click,
+}
+
+/// The metronome's click: a short decaying sine.
+#[derive(Clone, Copy, Default)]
+struct Click {
+    phase: f32,
+    step: f32,
+    env: f32,
+    decay: f32,
+    /// Beat number of the last click, `None` after a jump.
+    last: Option<i64>,
+}
+
+impl Click {
+    fn start(&mut self, accent: bool, sr: f32) {
+        let hz = if accent { CLICK_ACCENT_HZ } else { CLICK_HZ };
+        self.step = hz / sr;
+        self.phase = 0.0;
+        self.env = if accent {
+            CLICK_ACCENT_LEVEL
+        } else {
+            CLICK_LEVEL
+        };
+        self.decay = (-1.0 / (CLICK_DECAY_SECONDS * sr)).exp();
+    }
+
+    #[inline]
+    fn next(&mut self) -> f32 {
+        if self.env < 1e-4 {
+            self.env = 0.0;
+            return 0.0;
+        }
+        // Starts at a zero crossing and decays smoothly: no click of its own.
+        let s = (self.phase * TAU).sin() * self.env;
+        self.phase = (self.phase + self.step).fract();
+        self.env *= self.decay;
+        s
+    }
 }
 
 impl Sequencer {
@@ -941,7 +1037,29 @@ impl Sequencer {
             notes_started: 0,
             auto: Vec::with_capacity(RESERVED_TRACKS),
             master: f32::NAN,
+            audio: Arc::new(AudioPool::new()),
+            audio_fade: 1.0,
+            audio_tail: None,
+            audio_live: false,
+            pedal: false,
+            metronome: false,
+            click: Click::default(),
         }
+    }
+
+    /// Give the sequencer the sound files the audio clips play. Returns the
+    /// pool it had, so a real-time caller can free it on another thread.
+    pub fn set_audio(&mut self, audio: Arc<AudioPool>) -> Arc<AudioPool> {
+        std::mem::replace(&mut self.audio, audio)
+    }
+
+    /// Click on every beat while playing. Off by default; renders never click.
+    pub fn set_metronome(&mut self, on: bool) {
+        self.metronome = on;
+    }
+
+    pub fn metronome(&self) -> bool {
+        self.metronome
     }
 
     pub fn position(&self) -> f64 {
@@ -953,9 +1071,14 @@ impl Sequencer {
     /// continues, synth notes that are held across the new position start
     /// sounding right away, part-way through, like in other DAWs.
     pub fn seek(&mut self, beat: f64) {
+        self.audio_jump();
         self.position = beat.max(0.0);
         self.chase = true;
         for v in &mut self.voices {
+            if v.live {
+                // Keys still held on the MIDI keyboard keep sounding.
+                continue;
+            }
             if v.delay > 0 {
                 // Not started yet: drop silently.
                 v.done = true;
@@ -964,12 +1087,26 @@ impl Sequencer {
             v.held = false;
         }
         self.voices.retain(|v| !v.done);
-        // Plugin notes that are sounding end at once; waiting ones never start.
-        for n in &mut self.plugin_notes {
+        // Plugin notes that are sounding end at once; waiting ones never
+        // start. Keys still held on the MIDI keyboard keep sounding.
+        for n in self.plugin_notes.iter_mut().filter(|n| !n.live) {
             n.cut = true;
             n.held = false;
         }
-        self.plugin_notes.retain(|n| n.started);
+        self.plugin_notes.retain(|n| n.started || n.live);
+    }
+
+    /// The playhead jumps: fade out the audio clips heard so far (they
+    /// carry on from the old position for a few milliseconds) and fade in
+    /// what plays from the new one. The metronome starts counting afresh.
+    fn audio_jump(&mut self) {
+        if self.audio_live {
+            let frames = (AUDIO_JUMP_SECONDS * self.sample_rate).max(1.0) as u32;
+            self.audio_tail = Some((self.position, frames));
+        }
+        self.audio_live = false;
+        self.audio_fade = 0.0;
+        self.click.last = None;
     }
 
     /// How far the master limiter turned the sound down at most since the
@@ -995,7 +1132,11 @@ impl Sequencer {
     /// Whether anything is still audible: a voice, a plugin note, or the
     /// reverb's tail. (Plugins may ring on by themselves; see the engine.)
     pub fn is_sounding(&self) -> bool {
-        !self.voices.is_empty() || !self.plugin_notes.is_empty() || !self.room.asleep
+        !self.voices.is_empty()
+            || !self.plugin_notes.is_empty()
+            || !self.room.asleep
+            || self.audio_tail.is_some()
+            || self.click.env > 0.0
     }
 
     /// Render `out.len() / 2` stereo frames (interleaved L/R) and advance the playhead.
@@ -1082,6 +1223,7 @@ impl Sequencer {
                 n.gate = n.age;
             }
         }
+        self.audio_jump();
         self.position = beat;
         self.chase = true;
     }
@@ -1119,12 +1261,18 @@ impl Sequencer {
         let Some(t) = project.tracks.get(track) else {
             return;
         };
-        if self.spawn(track, t, pitch_, 100, 0, u64::MAX) {
-            if let Some(n) = self.plugin_notes.last_mut() {
-                n.held = true;
+        match self.spawn(track, t, pitch_, 100, 0, u64::MAX) {
+            Started::Voice => {
+                if let Some(v) = self.voices.last_mut() {
+                    v.held = true;
+                }
             }
-        } else if let Some(v) = self.voices.last_mut() {
-            v.held = true;
+            Started::PluginNote => {
+                if let Some(n) = self.plugin_notes.last_mut() {
+                    n.held = true;
+                }
+            }
+            Started::Nothing => {}
         }
     }
 
@@ -1137,6 +1285,142 @@ impl Sequencer {
         for n in self.plugin_notes.iter_mut().filter(|n| n.held) {
             n.held = false;
             n.gate = n.age;
+        }
+    }
+
+    /// A key went down on a MIDI keyboard: start `pitch` on `track`'s
+    /// instrument; it sounds until [`Self::note_off`] for the same key.
+    /// Works while stopped and while playing. Audio tracks have no sound
+    /// of their own and ignore it.
+    pub fn note_on(&mut self, project: &Project, track: usize, pitch_: u8, velocity: u8) {
+        let Some(t) = project.tracks.get(track) else {
+            return;
+        };
+        if t.instrument.is_audio() {
+            return;
+        }
+        // Striking a key that still rings (held by the pedal) starts it anew.
+        self.release_live(|t, p, _| t == track && p == pitch_);
+        match self.spawn(track, t, pitch_.min(127), velocity, 0, u64::MAX) {
+            Started::Voice => {
+                if let Some(v) = self.voices.last_mut() {
+                    v.live = true;
+                }
+            }
+            Started::PluginNote => {
+                if let Some(n) = self.plugin_notes.last_mut() {
+                    n.live = true;
+                }
+            }
+            Started::Nothing => {}
+        }
+    }
+
+    /// The key went up: the note fades with its release time, or keeps
+    /// sounding until the sustain pedal is let go.
+    pub fn note_off(&mut self, track: usize, pitch_: u8) {
+        if self.pedal {
+            for v in self
+                .voices
+                .iter_mut()
+                .filter(|v| v.live && v.track == track && v.pitch == pitch_)
+            {
+                v.pedal_held = true;
+            }
+            for n in self
+                .plugin_notes
+                .iter_mut()
+                .filter(|n| n.live && n.track == track && n.pitch == pitch_)
+            {
+                n.pedal_held = true;
+            }
+        } else {
+            self.release_live(|t, p, _| t == track && p == pitch_);
+        }
+    }
+
+    /// The sustain pedal: while it is down, released keys keep sounding.
+    pub fn set_pedal(&mut self, down: bool) {
+        self.pedal = down;
+        if !down {
+            self.release_live(|_, _, held| held);
+        }
+    }
+
+    /// Release every live note (a keyboard was unplugged, recording stopped).
+    pub fn all_notes_off(&mut self) {
+        self.pedal = false;
+        self.release_live(|_, _, _| true);
+    }
+
+    /// Notes played live that are sounding.
+    pub fn live_notes(&self) -> usize {
+        self.voices.iter().filter(|v| v.live).count()
+            + self.plugin_notes.iter().filter(|n| n.live).count()
+    }
+
+    /// Let go of the live notes (built-in and plugin ones) that
+    /// `which(track, pitch, held by the pedal)` picks.
+    fn release_live(&mut self, which: impl Fn(usize, u8, bool) -> bool) {
+        for v in self
+            .voices
+            .iter_mut()
+            .filter(|v| v.live && which(v.track, v.pitch, v.pedal_held))
+        {
+            v.live = false;
+            v.pedal_held = false;
+            v.gate = v.age;
+        }
+        for n in self
+            .plugin_notes
+            .iter_mut()
+            .filter(|n| n.live && which(n.track, n.pitch, n.pedal_held))
+        {
+            n.live = false;
+            n.pedal_held = false;
+            n.gate = n.age;
+        }
+    }
+
+    /// One block of a count-in before recording: metronome clicks for the
+    /// beats from `beat` (which may lie before the song's start), plus
+    /// whatever is still sounding. The playhead does not move.
+    pub fn count_in(&mut self, project: &Project, beat: f64, out: &mut [f32]) {
+        self.count_in_with(project, None, beat, out);
+    }
+
+    /// [`Self::count_in`] with the project's plugins in `rack`.
+    pub fn count_in_with(
+        &mut self,
+        project: &Project,
+        rack: Option<&mut (dyn Rack + '_)>,
+        beat: f64,
+        out: &mut [f32],
+    ) {
+        self.render_block(project, rack, out, false);
+        let fpb = self.sample_rate as f64 * project.seconds_per_beat();
+        self.clicks(beat, fpb, project.beats_per_bar, out);
+    }
+
+    /// Add metronome clicks for the beats that start in this block.
+    fn clicks(&mut self, beat: f64, frames_per_beat: f64, beats_per_bar: u32, out: &mut [f32]) {
+        let bar = i64::from(beats_per_bar.max(1));
+        let inv = 1.0 / frames_per_beat;
+        for (k, f) in out.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+            let b = beat + k as f64 * inv;
+            let n = b.floor() as i64;
+            let fresh = match self.click.last {
+                Some(last) => n > last,
+                // After a jump only a beat that starts right here clicks.
+                None => b - (n as f64) < inv,
+            };
+            if fresh {
+                self.click.start(n.rem_euclid(bar) == 0, self.sample_rate);
+            }
+            self.click.last = Some(n);
+            let s = self.click.next();
+            f[0] += s;
+            f[1] += s;
         }
     }
 
@@ -1265,6 +1549,41 @@ impl Sequencer {
         }
         self.voices.retain(|v| !v.done);
 
+        // Audio clips: what plays from here (fading in after a jump), and
+        // the fade-out of what played before the jump. On tracks with
+        // plugins they go into the track's bus, like the voices.
+        if !self.audio.is_empty() {
+            let mix = AudioMix {
+                pool: &self.audio,
+                project,
+                gains: &self.gains[..old_len.min(self.gains.len())],
+                auto: &self.auto,
+                any_solo,
+                sample_rate: sr,
+            };
+            if let Some((beat, left)) = self.audio_tail {
+                let total = (AUDIO_JUMP_SECONDS * sr).max(1.0);
+                mix.add(beat, out, send, rack.as_deref_mut(), |k| {
+                    (left as f32 - k as f32).max(0.0) / total
+                });
+                self.audio_tail = (left as usize > frames)
+                    .then(|| (beat + frames as f64 / frames_per_beat, left - frames as u32));
+            }
+            if advance {
+                let from = self.audio_fade;
+                let step = 1.0 / (AUDIO_JUMP_SECONDS * sr).max(1.0);
+                mix.add(b0, out, send, rack.as_deref_mut(), |k| {
+                    (from + k as f32 * step).min(1.0)
+                });
+                self.audio_fade = (from + frames as f32 * step).min(1.0);
+            }
+        } else {
+            self.audio_tail = None;
+        }
+        if advance {
+            self.audio_live = true;
+        }
+
         match rack {
             Some(rack) => {
                 let meter = project.time_signature();
@@ -1374,6 +1693,9 @@ impl Sequencer {
             f[0] = soft_clip(l * g);
             f[1] = soft_clip(r * g);
         }
+        if advance && self.metronome {
+            self.clicks(b0, frames_per_beat, project.beats_per_bar, out);
+        }
         if advance {
             self.position = b1;
         }
@@ -1407,18 +1729,20 @@ impl Sequencer {
                     }
                     let gate = (held * frames_per_beat).max(1.0) as u64;
                     let age = ((beat - at) * frames_per_beat) as u64;
-                    let plugin_notes = self.plugin_notes.len();
-                    if self.spawn(ti, track, note.pitch, note.velocity, 0, gate) {
-                        // A plugin starts the note now, for what is left of
-                        // it (unless all its note slots are taken).
-                        if self.plugin_notes.len() > plugin_notes {
+                    match self.spawn(ti, track, note.pitch, note.velocity, 0, gate) {
+                        // It starts now, for what is left of it.
+                        Started::Voice => {
+                            if let Some(v) = self.voices.last_mut() {
+                                v.age = age;
+                                v.fade_in = 0.0;
+                            }
+                        }
+                        Started::PluginNote => {
                             if let Some(n) = self.plugin_notes.last_mut() {
                                 n.age = age;
                             }
                         }
-                    } else if let Some(v) = self.voices.last_mut() {
-                        v.age = age;
-                        v.fade_in = 0.0;
+                        Started::Nothing => {}
                     }
                 }
             }
@@ -1456,8 +1780,8 @@ impl Sequencer {
         }
     }
 
-    /// Start a note on track `t`: a voice of a built-in instrument, or
-    /// (returns true) a note on a plugin instrument.
+    /// Start a note on track `t`: a voice of a built-in instrument or a note
+    /// on a plugin instrument (audio tracks play no notes).
     fn spawn(
         &mut self,
         track: usize,
@@ -1466,7 +1790,7 @@ impl Sequencer {
         vel: u8,
         delay: u32,
         gate: u64,
-    ) -> bool {
+    ) -> Started {
         let sr = self.sample_rate;
         let kind = match &t.instrument {
             Instrument::Vst3(_) => {
@@ -1486,10 +1810,15 @@ impl Sequencer {
                         cut: false,
                         done: false,
                         seen: false,
+                        live: false,
+                        pedal_held: false,
                     });
+                    return Started::PluginNote;
                 }
-                return true;
+                return Started::Nothing;
             }
+            // Audio tracks play their clips' sound files, not notes.
+            Instrument::Audio => return Started::Nothing,
             Instrument::Synth(p) => {
                 let mut sv = SynthVoice::new(p, sr);
                 sv.svf |= filter_moves(t);
@@ -1555,13 +1884,16 @@ impl Sequencer {
             z: [0.0; 4],
             done: false,
             held: false,
+            pitch: pitch_,
+            live: false,
+            pedal_held: false,
             fade: 1.0,
             fading: false,
             fade_in: 1.0,
             fade_at: None,
             followed: false,
         });
-        false
+        Started::Voice
     }
 
     /// Make room for a new voice. Prefers voices that are already fading or
@@ -1623,6 +1955,132 @@ fn track_gains(t: &Track, any_solo: bool, auto: [Option<f32>; 3]) -> [f32; 3] {
     let g = gain * std::f32::consts::SQRT_2;
     let send = gain * finite_or(auto[2].unwrap_or(t.reverb), 0.0).clamp(0.0, 1.0);
     [angle.cos() * g, angle.sin() * g, send]
+}
+
+/// A track's left and right gain and its reverb send at `beat`, as the
+/// mixer uses them: automation included, all 0 when the track is muted or
+/// another one is soloed.
+pub fn track_gains_at(t: &Track, any_solo: bool, beat: f64) -> [f32; 3] {
+    let auto = [Param::Volume, Param::Pan, Param::Reverb].map(|p| t.automated(p, beat));
+    track_gains(t, any_solo, auto)
+}
+
+/// Everything needed to mix the audio clips of one block.
+struct AudioMix<'a> {
+    pool: &'a AudioPool,
+    project: &'a Project,
+    /// Track gains at the end of the previous block (shorter than the
+    /// track list when tracks were just added: those start at their target).
+    gains: &'a [TrackGain],
+    /// Each track's automation in the block.
+    auto: &'a [TrackAuto],
+    any_solo: bool,
+    sample_rate: f32,
+}
+
+impl AudioMix<'_> {
+    /// Add the audio clips heard from `beat` on to `out` (stereo) and the
+    /// reverb `send` (mono), scaled per frame by `env(frame)`. Track gains
+    /// ramp over the block like the voices' do. A track with plugins in
+    /// `rack` takes its clips into its bus instead, without its gains (they
+    /// are applied when the bus is mixed).
+    fn add(
+        &self,
+        beat: f64,
+        out: &mut [f32],
+        send: &mut [f32],
+        mut rack: Option<&mut (dyn Rack + '_)>,
+        env: impl Fn(usize) -> f32,
+    ) {
+        let frames = out.len() / 2;
+        if frames == 0 {
+            return;
+        }
+        let sr = self.sample_rate as f64;
+        let spb = self.project.seconds_per_beat();
+        let block_end = beat + frames as f64 / (sr * spb);
+        let dt = 1.0 / sr;
+        let inv_frames = 1.0 / frames as f32;
+        for (ti, track) in self.project.tracks.iter().enumerate() {
+            let mut bus = rack
+                .as_deref_mut()
+                .filter(|r| r.routes(ti))
+                .and_then(|r| r.bus(ti));
+            let auto = self.auto.get(ti).map_or([None; 3], |a| a.mix);
+            let target = track_gains(track, self.any_solo, auto);
+            let from = self.gains.get(ti).map_or(target, |g| g.cur);
+            if bus.is_none() && from == [0.0; 3] && target == [0.0; 3] {
+                continue;
+            }
+            let step = [
+                (target[0] - from[0]) * inv_frames,
+                (target[1] - from[1]) * inv_frames,
+                (target[2] - from[2]) * inv_frames,
+            ];
+            for clip in &track.clips {
+                let Some(a) = &clip.audio else { continue };
+                if clip.length.is_nan()
+                    || clip.length <= 0.0
+                    || clip.end() <= beat
+                    || clip.start >= block_end
+                {
+                    continue;
+                }
+                let Some(data) = self.pool.get(&a.file) else {
+                    continue;
+                };
+                let offset = finite_or64(a.offset, 0.0).max(0.0);
+                // Seconds into the clip at the block's first frame, and where
+                // its sound ends (the clip's end, or the file's).
+                let t0 = (beat - clip.start) * spb;
+                let end = (clip.length * spb).min(data.seconds() - offset);
+                if end <= 0.0 {
+                    continue;
+                }
+                let first = if t0 < 0.0 {
+                    ((-t0) * sr).ceil() as usize
+                } else {
+                    0
+                };
+                let last = (((end - t0) * sr).ceil().max(0.0) as usize).min(frames);
+                if first >= last {
+                    continue;
+                }
+                let fade_in = finite_or64(a.fade_in, 0.0).max(AUDIO_EDGE_SECONDS);
+                let fade_out = finite_or64(a.fade_out, 0.0).max(AUDIO_EDGE_SECONDS);
+                let gain = finite_or(a.gain, 1.0).clamp(0.0, crate::edit::MAX_CLIP_GAIN);
+                let rate = data.sample_rate() as f64;
+                let advance = rate / sr;
+                let mut pos = (offset + t0 + first as f64 * dt) * rate;
+                let whole = pos.round();
+                if (pos - whole).abs() < 1e-6 {
+                    pos = whole;
+                }
+                // Same rate and on a frame: read the samples as they are.
+                let exact = advance == 1.0 && pos.fract() == 0.0;
+                for k in first..last {
+                    let t = t0 + k as f64 * dt;
+                    let edge = (t / fade_in).min((end - t) / fade_out).clamp(0.0, 1.0) as f32;
+                    let g = edge * gain * env(k);
+                    let (l, r) = if exact {
+                        data.frame(pos as isize)
+                    } else {
+                        data.frame_at(pos)
+                    };
+                    pos += advance;
+                    if let Some([bl, br]) = &mut bus {
+                        bl[k] += l * g;
+                        br[k] += r * g;
+                        continue;
+                    }
+                    let kf = k as f32;
+                    out[2 * k] += l * g * (from[0] + step[0] * kf);
+                    out[2 * k + 1] += r * g * (from[1] + step[1] * kf);
+                    send[k] += 0.5 * (l + r) * g * (from[2] + step[2] * kf);
+                }
+            }
+        }
+    }
 }
 
 /// Comb feedback, damping and input level for the reverb settings: size
@@ -1805,6 +2263,14 @@ fn finite_or(x: f32, default: f32) -> f32 {
 }
 
 /// Coefficient of a one-pole low-pass with corner `hz` (clamped below Nyquist).
+fn finite_or64(x: f64, default: f64) -> f64 {
+    if x.is_finite() {
+        x
+    } else {
+        default
+    }
+}
+
 fn one_pole_coef(hz: f32, sr: f32) -> f32 {
     1.0 - (-TAU * hz.clamp(1.0, 0.45 * sr) / sr).exp()
 }
@@ -2221,14 +2687,16 @@ pub fn tail_seconds_with(project: &Project, rack: Option<&(dyn Rack + '_)>) -> f
         }
 }
 
-/// Render the whole project (plus a tail for releases) to interleaved stereo.
-pub fn render(project: &Project, sample_rate: u32) -> Vec<f32> {
-    render_with(project, None, sample_rate)
+/// Render the whole project (plus a tail for releases) to interleaved
+/// stereo. `audio` holds the files its audio clips play.
+pub fn render(project: &Project, audio: &Arc<AudioPool>, sample_rate: u32) -> Vec<f32> {
+    render_with(project, audio, None, sample_rate)
 }
 
 /// [`render`] with the project's plugins in `rack`.
 pub fn render_with(
     project: &Project,
+    audio: &Arc<AudioPool>,
     mut rack: Option<&mut (dyn Rack + '_)>,
     sample_rate: u32,
 ) -> Vec<f32> {
@@ -2237,6 +2705,7 @@ pub fn render_with(
     let total_seconds = project.length_beats() * project.seconds_per_beat() + tail;
     let total_frames = (total_seconds * sample_rate as f64) as usize;
     let mut seq = Sequencer::new(sample_rate);
+    seq.set_audio(audio.clone());
     let mut out = vec![0.0f32; total_frames * 2];
     for chunk in out.chunks_mut(512 * 2) {
         seq.process_with(project, rack.as_deref_mut(), chunk);
@@ -2286,26 +2755,34 @@ pub(crate) fn check_render_args(project: &Project, sample_rate: u32) -> Result<(
 
 /// Render the song straight into a 16-bit stereo WAV file, block by block,
 /// so even an hour-long song needs only a few kilobytes of memory. Returns
-/// the duration written in seconds.
-pub fn render_to_wav(project: &Project, path: &Path, sample_rate: u32) -> Result<f64> {
-    render_to_wav_with_progress(project, path, sample_rate, |_| {})
+/// the duration written in seconds. `audio` holds the files its audio clips
+/// play.
+pub fn render_to_wav(
+    project: &Project,
+    audio: &Arc<AudioPool>,
+    path: &Path,
+    sample_rate: u32,
+) -> Result<f64> {
+    render_to_wav_with_progress(project, audio, path, sample_rate, |_| {})
 }
 
 /// Like [`render_to_wav`], calling `progress` with a value from 0.0 to 1.0
 /// as the render advances (handy for a progress bar on another thread).
 pub fn render_to_wav_with_progress(
     project: &Project,
+    audio: &Arc<AudioPool>,
     path: &Path,
     sample_rate: u32,
     progress: impl FnMut(f64),
 ) -> Result<f64> {
-    render_to_wav_with(project, None, path, sample_rate, progress)
+    render_to_wav_with(project, audio, None, path, sample_rate, progress)
 }
 
 /// [`render_to_wav_with_progress`] with the project's plugins in `rack`
 /// (prepared for `sample_rate`, ideally for offline processing).
 pub fn render_to_wav_with(
     project: &Project,
+    audio: &Arc<AudioPool>,
     mut rack: Option<&mut (dyn Rack + '_)>,
     path: &Path,
     sample_rate: u32,
@@ -2325,6 +2802,7 @@ pub fn render_to_wav_with(
     let mut w = hound::WavWriter::create(path, spec)
         .with_context(|| format!("creating {}", path.display()))?;
     let mut seq = Sequencer::new(sample_rate);
+    seq.set_audio(audio.clone());
     let mut block = vec![0.0f32; 512 * 2];
     let mut done = 0usize;
     let mut next_report = 0usize;
@@ -2381,6 +2859,7 @@ mod tests {
                     velocity: 100,
                 })
                 .collect(),
+            audio: None,
         }];
         p
     }
@@ -2411,13 +2890,17 @@ mod tests {
         assert!(!shuffled.notes_sorted());
         assert!(matches!(playable(&sorted), Cow::Borrowed(_)));
         assert_eq!(*playable(&shuffled), sorted);
-        assert_eq!(render(&shuffled, 22_050), render(&sorted, 22_050));
+        let none = Arc::new(AudioPool::new());
+        assert_eq!(
+            render(&shuffled, &none, 22_050),
+            render(&sorted, &none, 22_050)
+        );
     }
 
     #[test]
     fn demo_render_is_finite_and_never_clips() {
         let p = demo_project();
-        let audio = render(&p, 44_100);
+        let audio = render(&p, &Default::default(), 44_100);
         assert!(audio.iter().all(|s| s.is_finite()));
         let pk = peak(&audio);
         assert!(pk > 0.05 && pk < 1.0, "peak {pk}");
@@ -2437,7 +2920,7 @@ mod tests {
                 p.tracks.push(t);
             }
         }
-        let audio = render(&p, 22_050);
+        let audio = render(&p, &Default::default(), 22_050);
         assert!(audio.iter().all(|s| s.is_finite() && s.abs() < 1.0));
     }
 
@@ -2447,7 +2930,7 @@ mod tests {
         p.master_gain = f32::NAN;
         p.tracks[0].gain = f32::INFINITY;
         p.tracks[0].pan = f32::NAN;
-        let audio = render(&p, 22_050);
+        let audio = render(&p, &Default::default(), 22_050);
         assert!(audio.iter().all(|s| s.is_finite() && s.abs() < 1.0));
 
         let mut p = demo_project();
@@ -2455,7 +2938,7 @@ mod tests {
         p.tracks[1].reverb = f32::INFINITY;
         p.reverb.size = f32::NAN;
         p.reverb.tone = f32::NEG_INFINITY;
-        let audio = render(&p, 22_050);
+        let audio = render(&p, &Default::default(), 22_050);
         assert!(audio.iter().all(|s| s.is_finite() && s.abs() < 1.0));
         assert!(peak(&audio) > 0.05);
     }
@@ -2468,7 +2951,7 @@ mod tests {
             t.reverb = 0.0;
         }
         let sr = 22_050;
-        let audio = render(&p, sr);
+        let audio = render(&p, &Default::default(), sr);
         // The demo's longest release is 1.2 s; the last 0.5 s of the 2 s tail
         // must be completely silent and no voices may linger.
         let tail = &audio[audio.len() - sr as usize..];
@@ -2494,6 +2977,7 @@ mod tests {
                 duration: 1.5,
                 velocity: 100,
             }],
+            audio: None,
         });
         // Note ends at beat 6.5 -> wraps at the end of bar 2 (beat 8),
         // even though the clip itself runs on to beat 20.
@@ -2529,8 +3013,10 @@ mod tests {
         let sr = 22_050;
         let path = std::env::temp_dir().join(format!("aidaw-render-{}.wav", std::process::id()));
         let mut reports = Vec::new();
-        let secs = render_to_wav_with_progress(&p, &path, sr, |x| reports.push(x)).unwrap();
-        let expected = render(&p, sr);
+        let secs =
+            render_to_wav_with_progress(&p, &Default::default(), &path, sr, |x| reports.push(x))
+                .unwrap();
+        let expected = render(&p, &Default::default(), sr);
         assert!((secs - expected.len() as f64 / 2.0 / sr as f64).abs() < 1e-9);
         let got: Vec<i16> = hound::WavReader::open(&path)
             .unwrap()
@@ -2580,6 +3066,7 @@ mod tests {
                 duration: 8.0,
                 velocity: 100,
             }],
+            audio: None,
         }];
         p
     }
@@ -2769,7 +3256,7 @@ mod tests {
         p.tracks[0].reverb = 0.3;
         assert_eq!(tail_seconds(&p), RENDER_TAIL_SECONDS + b);
         // By the end of the render the tail has faded to nothing audible.
-        let audio = render(&p, 22_050);
+        let audio = render(&p, &Default::default(), 22_050);
         let end = peak(&audio[audio.len() - 2000..]);
         assert!(end < 2e-3, "{end}");
     }
@@ -2912,7 +3399,10 @@ mod tests {
         let mut faded = dry_note();
         let fade = lane(Param::Volume, &[(0.0, 1.0), (2.0, 0.0)]);
         faded.tracks[0].automation = vec![fade.clone()];
-        let (a, b) = (render(&plain, sr), render(&faded, sr));
+        let (a, b) = (
+            render(&plain, &Default::default(), sr),
+            render(&faded, &Default::default(), sr),
+        );
         // Gain along the way follows the lane (beats are half seconds).
         for beat in [0.25, 0.5, 1.0, 1.5] {
             let t = beat * 0.5;
@@ -2937,7 +3427,7 @@ mod tests {
         let mut p = dry_note();
         // Hard left for two beats, then a jump to hard right.
         p.tracks[0].automation = vec![lane(Param::Pan, &[(0.0, -1.0), (2.0, -1.0), (2.0, 1.0)])];
-        let audio = render(&p, sr);
+        let audio = render(&p, &Default::default(), sr);
         let side = |buf: &[f32], ch: usize| {
             peak(&buf.iter().skip(ch).step_by(2).copied().collect::<Vec<_>>())
         };
@@ -2962,7 +3452,7 @@ mod tests {
         let sr = 22_050;
         let mut p = dry_note();
         p.tracks[0].automation = vec![lane(Param::Cutoff, &[(0.0, 150.0), (8.0, 8_000.0)])];
-        let audio = render(&p, sr);
+        let audio = render(&p, &Default::default(), sr);
         assert!(audio.iter().all(|s| s.is_finite() && s.abs() < 1.0));
         let at = |t: f64| brightness(secs(&audio, sr, t, t + 0.1));
         let (dark, mid, bright) = (at(0.4), at(2.0), at(3.8));
@@ -2974,7 +3464,7 @@ mod tests {
             .windows(2)
             .map(|w| (w[1] - w[0]).abs())
             .fold(0.0, f32::max);
-        let plain = render(&dry_note(), sr);
+        let plain = render(&dry_note(), &Default::default(), sr);
         let plain_left: Vec<f32> = plain.iter().step_by(2).copied().collect();
         let plain_biggest = plain_left
             .windows(2)
@@ -2989,7 +3479,7 @@ mod tests {
     #[test]
     fn synth_lanes_change_the_sound_and_drums_ignore_them() {
         let sr = 22_050;
-        let plain = render(&dry_note(), sr);
+        let plain = render(&dry_note(), &Default::default(), sr);
         for param in [
             Param::Drive,
             Param::Fm,
@@ -3006,10 +3496,10 @@ mod tests {
                 };
                 s.waveform = Waveform::Sine;
             }
-            let before = render(&p, sr);
+            let before = render(&p, &Default::default(), sr);
             let max = param.info().max;
             p.tracks[0].automation = vec![lane(param, &[(0.0, max * 0.8)])];
-            let audio = render(&p, sr);
+            let audio = render(&p, &Default::default(), sr);
             assert!(
                 audio.iter().all(|s| s.is_finite() && s.abs() < 1.0),
                 "{param:?}"
@@ -3022,18 +3512,18 @@ mod tests {
             lane(Param::Drive, &[(0.0, 0.0)]),
             lane(Param::Sub, &[(0.0, 0.0)]),
         ];
-        assert!(render(&same, sr) == plain);
+        assert!(render(&same, &Default::default(), sr) == plain);
         // Drums have no filter or oscillators to move (a hand-edited file
         // could still ask): they play on unchanged.
         let mut drums = held_note(Instrument::Drums {
             kit: DrumKit::Standard,
         });
-        let plain_drums = render(&drums, sr);
+        let plain_drums = render(&drums, &Default::default(), sr);
         drums.tracks[0].automation = vec![
             lane(Param::Cutoff, &[(0.0, 100.0)]),
             lane(Param::Fm, &[(0.0, 9.0)]),
         ];
-        assert!(render(&drums, sr) == plain_drums);
+        assert!(render(&drums, &Default::default(), sr) == plain_drums);
     }
 
     #[test]
@@ -3042,9 +3532,9 @@ mod tests {
         let level = |drive: f32| {
             let mut p = dry_note();
             p.tracks[0].automation = vec![lane(Param::Drive, &[(0.0, drive)])];
-            render(&p, sr)
+            render(&p, &Default::default(), sr)
         };
-        let plain = render(&dry_note(), sr);
+        let plain = render(&dry_note(), &Default::default(), sr);
         let diff = |a: &[f32]| {
             a.iter()
                 .zip(&plain)
@@ -3060,7 +3550,7 @@ mod tests {
     #[test]
     fn empty_or_constant_lanes_change_nothing() {
         let sr = 22_050;
-        let plain = render(&dry_note(), sr);
+        let plain = render(&dry_note(), &Default::default(), sr);
         let mut p = dry_note();
         p.tracks[0].automation = vec![
             lane(Param::Volume, &[]),
@@ -3068,13 +3558,13 @@ mod tests {
             lane(Param::Reverb, &[(1.0, 0.0), (3.0, 0.0)]),
         ];
         p.automation = vec![lane(Param::MasterVolume, &[(0.0, 1.0)])];
-        assert!(render(&p, sr) == plain);
+        assert!(render(&p, &Default::default(), sr) == plain);
         // With two lanes for one setting, the first one with points counts.
         p.tracks[0].automation = vec![
             lane(Param::Volume, &[(0.0, 1.0)]),
             lane(Param::Volume, &[(0.0, 0.0)]),
         ];
-        assert!(render(&p, sr) == plain);
+        assert!(render(&p, &Default::default(), sr) == plain);
     }
 
     #[test]
@@ -3085,7 +3575,7 @@ mod tests {
             Param::MasterVolume,
             &[(0.0, 1.0), (2.0, 1.0), (2.0, 0.0)],
         )];
-        let audio = render(&p, sr);
+        let audio = render(&p, &Default::default(), sr);
         assert!(peak(secs(&audio, sr, 0.2, 0.9)) > 0.05);
         assert_eq!(peak(secs(&audio, sr, 1.1, 6.0)), 0.0);
 
@@ -3095,14 +3585,17 @@ mod tests {
         let mut grown = small.clone();
         grown.automation = vec![lane(Param::ReverbSize, &[(0.0, 1.0)])];
         assert!(tail_seconds(&grown) > tail_seconds(&small) + 2.0);
-        let (s, g) = (render(&small, sr), render(&grown, sr));
+        let (s, g) = (
+            render(&small, &Default::default(), sr),
+            render(&grown, &Default::default(), sr),
+        );
         let tail = |a: &[f32]| rms(secs(a, sr, 2.0, 3.0));
         assert!(tail(&g) > tail(&s) * 5.0, "{} {}", tail(&s), tail(&g));
         // Automating the send works too: no send, no tail.
         let mut dry = blip(0.5);
         dry.tracks[0].automation = vec![lane(Param::Reverb, &[(0.0, 0.0)])];
         assert_eq!(tail_seconds(&dry), RENDER_TAIL_SECONDS);
-        let d = render(&dry, sr);
+        let d = render(&dry, &Default::default(), sr);
         assert_eq!(peak(secs(&d, sr, 1.0, 2.0)), 0.0);
     }
 
@@ -3121,5 +3614,363 @@ mod tests {
         seq.process_voices(&p, &mut buf);
         assert!(peak(&buf) > 0.05);
         assert_eq!(seq.position(), 5.0, "previews do not move the playhead");
+    }
+}
+
+#[cfg(test)]
+mod audio_tests {
+    use super::*;
+    use crate::audio::AudioData;
+    use crate::model::{AudioRef, Clip, Note, Track};
+
+    const SR: u32 = 22_050;
+
+    fn track(name: &str, instrument: Instrument) -> Track {
+        Track {
+            id: format!("t-{name}"),
+            name: name.into(),
+            instrument,
+            gain: 0.8,
+            pan: 0.0,
+            mute: false,
+            solo: false,
+            reverb: 0.0,
+            color: None,
+            input: Vec::new(),
+            clips: Vec::new(),
+            automation: Vec::new(),
+            effects: Vec::new(),
+        }
+    }
+
+    fn audio_clip(start: f64, length: f64, file: &str) -> Clip {
+        Clip {
+            id: "c1".into(),
+            name: String::new(),
+            start,
+            length,
+            notes: Vec::new(),
+            audio: Some(AudioRef::new(file)),
+        }
+    }
+
+    /// 120 BPM (a beat is half a second) with one audio track.
+    fn song(clip: Clip) -> Project {
+        let mut p = Project::new("audio", 120.0);
+        let mut t = track("Vocals", Instrument::Audio);
+        t.clips.push(clip);
+        p.tracks.push(t);
+        p
+    }
+
+    fn pool(file: &str, data: AudioData) -> Arc<AudioPool> {
+        let mut pool = AudioPool::new();
+        pool.insert(file, Arc::new(data));
+        Arc::new(pool)
+    }
+
+    fn sine(hz: f32, sr: u32, seconds: f32) -> AudioData {
+        let n = (seconds * sr as f32) as usize;
+        let s = (0..n)
+            .map(|i| 0.5 * (TAU * hz * i as f32 / sr as f32).sin())
+            .collect();
+        AudioData::new(sr, 1, s)
+    }
+
+    fn play(p: &Project, pool: &Arc<AudioPool>, seconds: f32) -> Vec<f32> {
+        let mut seq = Sequencer::new(SR);
+        seq.set_audio(pool.clone());
+        let mut out = vec![0.0; 2 * (seconds * SR as f32) as usize];
+        for block in out.chunks_mut(2 * 256) {
+            seq.process(p, block);
+        }
+        out
+    }
+
+    fn peak(buf: &[f32]) -> f32 {
+        buf.iter().fold(0.0f32, |m, s| m.max(s.abs()))
+    }
+
+    /// Positive-going zero crossings of the left channel per second.
+    fn pitch_hz(stereo: &[f32]) -> f32 {
+        let left: Vec<f32> = stereo.iter().step_by(2).copied().collect();
+        let ups = left
+            .windows(2)
+            .filter(|w| w[0] < 0.0 && w[1] >= 0.0)
+            .count();
+        ups as f32 / (left.len() as f32 / SR as f32)
+    }
+
+    #[test]
+    fn an_audio_clip_plays_its_file_at_its_place_on_the_timeline() {
+        // One second of a steady level, placed at beat 2 (= 1 s).
+        let p = song(audio_clip(2.0, 2.0, "dc.wav"));
+        let pool = pool("dc.wav", AudioData::new(SR, 1, vec![0.5; SR as usize]));
+        let out = play(&p, &pool, 3.0);
+        let at = |sec: f32| out[2 * (sec * SR as f32) as usize];
+        assert_eq!(peak(&out[..2 * SR as usize]), 0.0, "silent before the clip");
+        // Level 0.5 x track gain 0.8 x master 0.8, centre pan.
+        assert!((at(1.5) - 0.32).abs() < 1e-3, "{}", at(1.5));
+        assert_eq!(
+            at(1.5),
+            out[2 * (1.5 * SR as f32) as usize + 1],
+            "mono in both ears"
+        );
+        // The first few milliseconds fade in rather than jump.
+        assert!(at(1.0).abs() < 0.01, "{}", at(1.0));
+        // The file is one second long: the clip goes quiet after it.
+        assert!(peak(&out[2 * (2.01 * SR as f32) as usize..]) < 1e-4);
+    }
+
+    #[test]
+    fn recordings_follow_volume_and_pan_automation() {
+        use crate::automation::{Lane, Point};
+        // Four seconds of a steady level; the volume lane fades the track
+        // out from beat 2 to beat 6 (1 s to 3 s).
+        let plain = song(audio_clip(0.0, 8.0, "dc.wav"));
+        let pool = pool("dc.wav", AudioData::new(SR, 1, vec![0.5; 4 * SR as usize]));
+        let mut p = plain.clone();
+        p.tracks[0].automation.push(Lane {
+            param: Param::Volume,
+            points: vec![Point::new(2.0, 0.8), Point::new(6.0, 0.0)],
+        });
+        let out = play(&p, &pool, 4.0);
+        let at = |sec: f32| out[2 * (sec * SR as f32) as usize];
+        // Before the fade: as loud as without the lane (0.5 x 0.8 x master 0.8).
+        assert!((at(0.5) - 0.32).abs() < 1e-3, "{}", at(0.5));
+        // On the way down it follows the lane, the way notes do.
+        for sec in [1.5, 2.0, 2.5] {
+            let beat = sec as f64 * 2.0;
+            let [l, _, _] = track_gains_at(&p.tracks[0], false, beat);
+            let want = 0.5 * l * 0.8;
+            assert!(
+                (at(sec) - want).abs() < 3e-3,
+                "{sec}s: {} vs {want}",
+                at(sec)
+            );
+        }
+        assert!(at(1.5) > at(2.0) && at(2.0) > at(2.5) && at(2.5) > 0.0);
+        assert!(
+            peak(&out[2 * (3.05 * SR as f32) as usize..]) < 1e-3,
+            "silent after"
+        );
+
+        // A pan lane moves it to the left speaker.
+        let mut p = plain;
+        p.tracks[0].automation.push(Lane {
+            param: Param::Pan,
+            points: vec![Point::new(0.0, -1.0)],
+        });
+        let out = play(&p, &pool, 1.0);
+        let (l, r) = (out[SR as usize], out[SR as usize + 1]);
+        assert!(l > 0.4 && r.abs() < 1e-3, "{l} {r}");
+    }
+
+    #[test]
+    fn offset_trims_the_start_and_other_sample_rates_keep_their_pitch() {
+        // A 441 Hz tone recorded at 44.1 kHz, then 882 Hz from 0.5 s on.
+        let sr = 44_100;
+        let mut s: Vec<f32> = Vec::new();
+        for i in 0..sr {
+            let hz = if i < sr / 2 { 441.0 } else { 882.0 };
+            s.push(0.5 * (TAU * hz * i as f32 / sr as f32).sin());
+        }
+        let data = AudioData::new(sr, 1, s);
+        let mut clip = audio_clip(0.0, 4.0, "tone.wav");
+        let p = song(clip.clone());
+        let out = play(&p, &pool("tone.wav", data), 1.0);
+        let hz = pitch_hz(&out[..SR as usize]);
+        assert!((hz - 441.0).abs() < 5.0, "{hz}");
+        // Starting half a second into the file skips the low tone.
+        clip.audio.as_mut().unwrap().offset = 0.5;
+        let p = song(clip);
+        let data = AudioData::new(
+            sr,
+            1,
+            (0..sr)
+                .map(|i| {
+                    let hz = if i < sr / 2 { 441.0 } else { 882.0 };
+                    0.5 * (TAU * hz * i as f32 / sr as f32).sin()
+                })
+                .collect(),
+        );
+        let out = play(&p, &pool("tone.wav", data), 0.5);
+        let hz = pitch_hz(&out[..SR as usize / 2 * 2]);
+        assert!((hz - 882.0).abs() < 8.0, "{hz}");
+    }
+
+    #[test]
+    fn clip_gain_fades_and_stereo_files() {
+        let mut clip = audio_clip(0.0, 4.0, "st.wav");
+        {
+            let a = clip.audio.as_mut().unwrap();
+            a.gain = 0.5;
+            a.fade_in = 0.5;
+        }
+        let p = song(clip);
+        // Left loud, right silent.
+        let s = (0..SR).flat_map(|_| [0.8, 0.0]).collect();
+        let out = play(&p, &pool("st.wav", AudioData::new(SR, 2, s)), 1.0);
+        let at = |sec: f32, ch: usize| out[2 * (sec * SR as f32) as usize + ch];
+        // 0.8 x clip gain 0.5 x 0.8 x 0.8, halfway through a 0.5 s fade-in.
+        assert!((at(0.25, 0) - 0.128).abs() < 2e-3, "{}", at(0.25, 0));
+        assert!((at(0.75, 0) - 0.256).abs() < 1e-3, "{}", at(0.75, 0));
+        assert_eq!(at(0.75, 1), 0.0, "stereo stays stereo");
+    }
+
+    #[test]
+    fn a_missing_file_is_silent_and_audio_tracks_ignore_notes() {
+        let mut p = song(audio_clip(0.0, 4.0, "missing.wav"));
+        p.tracks[0].clips.push(Clip {
+            id: "c2".into(),
+            name: String::new(),
+            start: 0.0,
+            length: 4.0,
+            notes: vec![Note {
+                pitch: 60,
+                start: 0.0,
+                duration: 2.0,
+                velocity: 100,
+            }],
+            audio: None,
+        });
+        let out = play(&p, &Arc::new(AudioPool::new()), 1.0);
+        assert_eq!(peak(&out), 0.0);
+        let mut seq = Sequencer::new(SR);
+        seq.note_on(&p, 0, 60, 100);
+        seq.preview(&p, 0, 60);
+        assert_eq!(seq.active_voices(), 0, "nothing to play on an audio track");
+    }
+
+    #[test]
+    fn jumping_around_inside_a_recording_never_clicks() {
+        let p = song(audio_clip(0.0, 16.0, "tone.wav"));
+        let pool = pool("tone.wav", sine(220.0, SR, 8.0));
+        let mut seq = Sequencer::new(SR);
+        seq.set_audio(pool);
+        let mut out = Vec::new();
+        let mut block = vec![0.0; 2 * 300];
+        for i in 0..60 {
+            if i % 10 == 9 {
+                seq.seek(i as f64 * 0.37);
+            }
+            seq.process(&p, &mut block);
+            out.extend_from_slice(&block);
+        }
+        // Stop: the sound fades out instead of being cut.
+        seq.seek(seq.position());
+        for _ in 0..4 {
+            seq.process_voices(&p, &mut block);
+            out.extend_from_slice(&block);
+        }
+        assert!(!seq.is_sounding(), "the fade-out finished");
+        let left: Vec<f32> = out.iter().step_by(2).copied().collect();
+        let biggest = left
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0, f32::max);
+        // A 220 Hz sine at 0.32 moves at most 0.02 per sample at 22 kHz.
+        assert!(biggest < 0.025, "jump of {biggest}");
+        assert!(peak(&left) > 0.3);
+    }
+
+    #[test]
+    fn looping_wraps_the_audio_cleanly() {
+        let p = song(audio_clip(0.0, 3.0, "tone.wav"));
+        assert_eq!(
+            p.loop_end_beats(),
+            Some(4.0),
+            "audio clips count for the loop"
+        );
+        let pool = pool("tone.wav", sine(220.0, SR, 4.0));
+        let mut seq = Sequencer::new(SR);
+        seq.set_audio(pool);
+        let mut out = vec![0.0; 2 * 3 * SR as usize];
+        for block in out.chunks_mut(2 * 512) {
+            seq.process_looping(&p, block, p.playback_loop());
+        }
+        let left: Vec<f32> = out.iter().step_by(2).copied().collect();
+        let biggest = left
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0, f32::max);
+        assert!(biggest < 0.025, "jump of {biggest}");
+        // Two seconds in, playback wrapped and the clip plays again.
+        assert!(peak(&left[(2.1 * SR as f32) as usize..(2.4 * SR as f32) as usize]) > 0.3);
+    }
+
+    #[test]
+    fn the_metronome_clicks_every_beat_louder_on_the_one() {
+        let p = Project::new("click", 120.0);
+        let mut seq = Sequencer::new(SR);
+        seq.set_metronome(true);
+        let mut out = vec![0.0; 2 * SR as usize * 2]; // 2 s = 4 beats at 120 BPM
+        for block in out.chunks_mut(2 * 256) {
+            seq.process(&p, block);
+        }
+        let beat = SR as usize / 2;
+        let loudness: Vec<f32> = (0..4)
+            .map(|b| peak(&out[2 * b * beat..2 * (b * beat + 500)]))
+            .collect();
+        assert!(loudness.iter().all(|l| *l > 0.1), "{loudness:?}");
+        assert!(loudness[0] > loudness[1] * 1.2, "accent: {loudness:?}");
+        // Quiet between the clicks.
+        assert!(peak(&out[2 * (beat / 2)..2 * (beat - 10)]) < 0.01);
+        // Renders never click.
+        assert_eq!(peak(&render(&p, &Default::default(), SR)), 0.0);
+    }
+
+    #[test]
+    fn a_count_in_clicks_the_bar_before_the_start() {
+        let p = Project::new("count", 120.0);
+        let mut seq = Sequencer::new(SR);
+        let beat = SR as usize / 2;
+        let mut pre = vec![0.0; 2 * 4 * beat];
+        // Four beats counting from -4 (one bar before the song starts).
+        for (i, block) in pre.chunks_mut(2 * beat).enumerate() {
+            seq.count_in(&p, -4.0 + i as f64, block);
+        }
+        assert_eq!(seq.position(), 0.0, "the playhead waits");
+        let clicks = (0..4)
+            .filter(|b| peak(&pre[2 * b * beat..2 * (b * beat + 300)]) > 0.1)
+            .count();
+        assert_eq!(clicks, 4);
+        // Accent on beat -4, the first of its bar.
+        assert!(peak(&pre[..600]) > peak(&pre[2 * beat..2 * beat + 600]) * 1.2);
+    }
+
+    #[test]
+    fn live_notes_sound_until_released_and_the_pedal_holds_them() {
+        let mut p = Project::new("live", 120.0);
+        p.tracks.push(track("Keys", Instrument::Synth(Synth::BASE)));
+        let mut seq = Sequencer::new(SR);
+        let mut buf = vec![0.0; 2 * SR as usize];
+        seq.note_on(&p, 0, 60, 100);
+        seq.note_on(&p, 0, 64, 90);
+        seq.process_voices(&p, &mut buf);
+        assert_eq!(seq.live_notes(), 2);
+        assert!(
+            peak(&buf[buf.len() - 400..]) > 0.01,
+            "held for a whole second"
+        );
+        seq.note_off(0, 60);
+        seq.process_voices(&p, &mut buf);
+        assert_eq!(seq.live_notes(), 1);
+        // With the pedal down a released key keeps ringing.
+        seq.set_pedal(true);
+        seq.note_off(0, 64);
+        seq.process_voices(&p, &mut buf);
+        assert_eq!(seq.active_voices(), 1);
+        seq.set_pedal(false);
+        seq.process_voices(&p, &mut buf);
+        assert_eq!(seq.active_voices(), 0);
+        // Seeking doesn't cut keys that are held down.
+        seq.note_on(&p, 0, 67, 100);
+        seq.seek(3.0);
+        seq.process_voices(&p, &mut buf);
+        assert_eq!(seq.live_notes(), 1);
+        seq.all_notes_off();
+        seq.process_voices(&p, &mut buf);
+        assert_eq!(seq.active_voices(), 0);
     }
 }

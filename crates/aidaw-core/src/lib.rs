@@ -2,6 +2,7 @@
 //! instruments and the renderer shared by real-time playback and export.
 
 pub mod analysis;
+pub mod audio;
 pub mod automation;
 pub mod color;
 pub mod edit;
@@ -16,10 +17,11 @@ pub mod render;
 pub mod transform;
 pub mod transport;
 
+pub use audio::{AudioData, AudioPool};
 pub use automation::{Lane, Param, Point, Shape};
 pub use model::{
-    Blob, Clip, DrumKit, Effect, EffectKind, Instrument, Note, PluginRef, Project, Reverb, Synth,
-    TimeSignature, Track, Waveform,
+    AudioRef, Blob, Clip, DrumKit, Effect, EffectKind, Instrument, Note, PluginRef, Project,
+    Reverb, Synth, TimeSignature, Track, Waveform,
 };
 pub use transport::{Cue, LoopRegion, Transport};
 
@@ -181,6 +183,134 @@ mod tests {
         )
         .is_err());
         assert_eq!(p, before);
+    }
+
+    #[test]
+    fn splitting_a_recording_keeps_it_in_time() {
+        let mut p = Project::new("x", 120.0);
+        apply_all(
+            &mut p,
+            ops(json!([
+                {"op": "add_track", "name": "Vox", "instrument": {"type": "audio"}},
+                {"op": "add_audio_clip", "track_id": "t1", "start": 4.0, "length": 8.0,
+                 "file": "take.wav", "offset": 1.0},
+                {"op": "update_audio", "clip_id": "c1", "fade_in": 0.5, "fade_out": 0.25},
+                {"op": "split_clip", "clip_id": "c1", "at": 6.0}
+            ])),
+        )
+        .unwrap();
+        let clips = &p.tracks[0].clips;
+        let (left, right) = (
+            clips[0].audio.as_ref().unwrap(),
+            clips[1].audio.as_ref().unwrap(),
+        );
+        // 2 beats at 120 bpm = 1 s further into the file.
+        assert_eq!(
+            (clips[1].start, clips[1].length, right.offset),
+            (6.0, 6.0, 2.0)
+        );
+        assert_eq!((clips[0].length, left.offset), (2.0, 1.0));
+        assert_eq!(right.file, "take.wav");
+        assert_eq!((left.fade_in, left.fade_out), (0.5, 0.0));
+        assert_eq!((right.fade_in, right.fade_out), (0.0, 0.25));
+    }
+
+    #[test]
+    fn a_new_take_replaces_what_it_covers() {
+        let mut p = Project::new("x", 120.0);
+        apply_all(
+            &mut p,
+            ops(json!([
+                {"op": "add_track", "name": "Vox", "instrument": {"type": "audio"}},
+                {"op": "add_audio_clip", "track_id": "t1", "start": 0.0, "length": 4.0, "file": "a.wav"},
+                {"op": "add_audio_clip", "track_id": "t1", "start": 6.0, "length": 4.0, "file": "b.wav"},
+                {"op": "add_audio_clip", "track_id": "t1", "start": 12.0, "length": 8.0,
+                 "file": "c.wav", "offset": 1.0},
+                {"op": "update_audio", "clip_id": "c1", "fade_out": 0.3},
+                {"op": "update_audio", "clip_id": "c3", "fade_in": 0.2, "fade_out": 0.4}
+            ])),
+        )
+        .unwrap();
+        let layered = {
+            let mut q = p.clone();
+            apply_all(
+                &mut q,
+                ops(
+                    json!([{"op": "add_audio_clip", "track_id": "t1", "start": 2.0,
+                            "length": 12.0, "file": "new.wav"}]),
+                ),
+            )
+            .unwrap();
+            q
+        };
+        assert_eq!(
+            layered.tracks[0].clips.len(),
+            4,
+            "without replace both play"
+        );
+
+        // A take over beats 2..14: the first clip ends where it starts, the
+        // second goes, the third starts where it ends, 1 s later in its file.
+        let r = apply_all(
+            &mut p,
+            ops(
+                json!([{"op": "add_audio_clip", "track_id": "t1", "start": 2.0,
+                        "length": 12.0, "file": "new.wav", "replace": true}]),
+            ),
+        )
+        .unwrap();
+        let clips = &p.tracks[0].clips;
+        let view: Vec<(&str, f64, f64, &str, f64)> = clips
+            .iter()
+            .map(|c| {
+                let a = c.audio.as_ref().unwrap();
+                (c.id.as_str(), c.start, c.length, a.file.as_str(), a.offset)
+            })
+            .collect();
+        assert_eq!(
+            view,
+            [
+                ("c1", 0.0, 2.0, "a.wav", 0.0),
+                ("c4", 2.0, 12.0, "new.wav", 0.0),
+                ("c3", 14.0, 6.0, "c.wav", 2.0),
+            ]
+        );
+        assert_eq!(r[0]["clip_id"], "c4");
+        let fades = |i: usize| {
+            let a = clips[i].audio.as_ref().unwrap();
+            (a.fade_in, a.fade_out)
+        };
+        assert_eq!(fades(0), (0.0, 0.0), "the cut end of the first clip");
+        assert_eq!(fades(2), (0.0, 0.4), "the cut start of the last one");
+
+        // A short take in the middle of a clip cuts it in two.
+        apply_all(
+            &mut p,
+            ops(
+                json!([{"op": "add_audio_clip", "track_id": "t1", "start": 16.0,
+                        "length": 1.0, "file": "fix.wav", "replace": true}]),
+            ),
+        )
+        .unwrap();
+        let view: Vec<(&str, f64, f64, f64)> = p.tracks[0].clips[2..]
+            .iter()
+            .map(|c| {
+                (
+                    c.id.as_str(),
+                    c.start,
+                    c.length,
+                    c.audio.as_ref().unwrap().offset,
+                )
+            })
+            .collect();
+        assert_eq!(
+            view,
+            [
+                ("c3", 14.0, 2.0, 2.0),
+                ("c6", 16.0, 1.0, 0.0),
+                ("c5", 17.0, 3.0, 3.5),
+            ]
+        );
     }
 
     #[test]
@@ -398,14 +528,16 @@ mod tests {
     #[test]
     fn render_produces_sound_and_silence_when_muted() {
         let mut p = demo();
-        let audio = render::render(&p, 44_100);
+        let audio = render::render(&p, &Default::default(), 44_100);
         assert_eq!(audio.len(), ((2.0 + 2.0) * 44_100.0) as usize * 2);
         let peak = audio.iter().fold(0.0f32, |m, s| m.max(s.abs()));
         assert!(peak > 0.05 && peak <= 1.0, "peak {peak}");
         for t in &mut p.tracks {
             t.mute = true;
         }
-        assert!(render::render(&p, 44_100).iter().all(|s| *s == 0.0));
+        assert!(render::render(&p, &Default::default(), 44_100)
+            .iter()
+            .all(|s| *s == 0.0));
     }
 
     #[test]
@@ -440,6 +572,8 @@ mod tests {
         let mut p = demo();
         p.tracks[1].solo = true;
         p.tracks[1].clips.clear();
-        assert!(render::render(&p, 22_050).iter().all(|s| *s == 0.0));
+        assert!(render::render(&p, &Default::default(), 22_050)
+            .iter()
+            .all(|s| *s == 0.0));
     }
 }

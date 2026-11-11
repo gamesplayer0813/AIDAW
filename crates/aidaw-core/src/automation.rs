@@ -309,7 +309,7 @@ impl Param {
 
     /// Whether a lane for this setting does anything on a track that plays
     /// `inst` (master settings never do; synth settings only on the built-in
-    /// synth, not on drum kits or plugins).
+    /// synth, not on drums, plugins or audio tracks).
     pub fn suits_track(self, inst: &crate::model::Instrument) -> bool {
         match self.scope() {
             Scope::Track => self != Param::Unknown,
