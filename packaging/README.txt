@@ -46,8 +46,22 @@ AIDAW —— 哼，给杂鱼的使用说明
    回来点一个片段按 Ctrl+V，音符就进来了。
    AI 只能写 .aidaw.json 和 .wav，乱写路径也伤不到别的文件。它改的东西 Ctrl+Z 就能撤回。
 
-3) 设置和日志在哪
+3) VST®3 插件
+   电脑里装的 VST3 乐器和效果器都能用。AIDAW 会自己去这两个地方找：
+     C:\Program Files\Common Files\VST3
+     %LOCALAPPDATA%\Programs\Common\VST3
+   装在别处的？点顶栏的「插件」（英文界面叫 Plugins）→「添加文件夹…」，选好就会自己重新扫描。
+   挑乐器：点一条音轨，在「音色」的「插件」页里点一个（专业模式在音色下拉框的最下面）。
+   挂效果器：同一个面板往下翻，「效果器」→「添加效果器」。每一行都能开关、上下挪、删掉，
+   「打开窗口」就是插件自己的界面，拧过的旋钮会跟着歌一起存进 .aidaw.json，Ctrl+Z 也认。
+   插件本身不会存进歌里：把歌发给别人，对方也得装同一个插件才有声音，没装的那条轨会安静，
+   别的照常响。这种事情都不知道的话……哼，现在知道了吧，笨蛋。
+   扫描插件、导出用了插件的歌、AI 那边用插件，都在单独的进程里跑，坏插件最多让那一次失败。
+   VST is a registered trademark of Steinberg Media Technologies GmbH.
+
+4) 设置和日志在哪
    %APPDATA%\AIDAW\settings.json   界面设置（Easy / Pro、语言……）
+   %APPDATA%\AIDAW\plugins.json    找到的插件和你加的插件文件夹
    %APPDATA%\AIDAW\aidaw.log       出问题就看这个，报 bug 的时候记得附上
    不想要了？删掉这个文件夹和 %APPDATA%\AIDAW 就干干净净。才、才不会舍不得你呢！
 

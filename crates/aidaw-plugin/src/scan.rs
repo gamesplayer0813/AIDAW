@@ -10,7 +10,7 @@ use std::sync::mpsc;
 use std::sync::Mutex;
 use std::time::{Duration, UNIX_EPOCH};
 
-use aidaw_core::PluginRef;
+use aidaw_core::{PluginRef, Project};
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -393,6 +393,30 @@ impl Store {
                 many.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ")
             ),
         }
+    }
+
+    /// Note in every plugin of `project` where it is installed (its
+    /// `path`), or clear that for plugins that are not. Returns whether any
+    /// is missing.
+    pub fn locate_all(&self, project: &mut Project) -> bool {
+        let mut missing = false;
+        for t in &mut project.tracks {
+            let plugins = t
+                .instrument
+                .plugin_mut()
+                .into_iter()
+                .chain(t.effects.iter_mut().map(|e| e.plugin_mut()));
+            for p in plugins {
+                match self.locate(p) {
+                    Ok(path) => p.path = path.display().to_string(),
+                    Err(_) => {
+                        p.path.clear();
+                        missing = true;
+                    }
+                }
+            }
+        }
+        missing
     }
 
     /// Where the plugin a song asks for is installed on this computer.

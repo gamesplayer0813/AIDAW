@@ -188,7 +188,7 @@ Claude Code / Cursor / Windsurf / Cline 等 MCP 客户端配置方式同理。
 - GUI 里的修改 300ms 后自动保存，AI 下次调用就能读到；若保存时发现 AI 刚写过，保留你的版本并把 AI 的版本放进撤销栈。谁的改动都不会悄悄丢，放心啦。
 - 工程文件带格式版本号（`version`）。更新版的 AIDAW 存出来的文件，旧版本只会拒绝打开、绝不覆盖，免得把它看不懂的东西弄丢；旧格式的文件则会自动升级。
 
-**插件**：AIDAW 会在 `C:\Program Files\Common Files\VST3`、`%LOCALAPPDATA%\Programs\Common\VST3`、「插件」窗口里加的文件夹，以及环境变量 `AIDAW_VST3_PATH` 列出的文件夹里找 `.vst3`，找到的东西记在 `%APPDATA%\AIDAW\plugins.json`，只有新装或者更新过的插件才会重新扫。工程文件里存的是插件的名字、id 和它自己的设置（base64），不存插件本身：换台电脑只要装了同一个插件就能原样打开，没装的话那条轨不出声，别的照常，AI 渲染的时候也会告诉你缺了哪个。插件在 GUI 里播放时就跑在 `aidaw.exe` 里面（不然延迟太大）；扫描、AI 的 `render_wav` / `analyze` 和 GUI 导出 WAV 都在单独的进程里，坏插件最多让那一次失败。
+**插件**：AIDAW 会在 `C:\Program Files\Common Files\VST3`、`%LOCALAPPDATA%\Programs\Common\VST3`、「插件」窗口里加的文件夹，以及环境变量 `AIDAW_VST3_PATH` 列出的文件夹里找 `.vst3`，找到的东西记在 `%APPDATA%\AIDAW\plugins.json`，只有新装或者更新过的插件才会重新扫。工程文件里存的是插件的名字、id 和它自己的设置（base64），不存插件本身：换台电脑只要装了同一个插件就能原样打开，没装的话那条轨不出声，别的照常，AI 渲染的时候也会告诉你缺了哪个。插件在 GUI 里播放时就跑在 `aidaw.exe` 里面（不然延迟太大）；扫描、AI 的 `render_wav` / `analyze` / `plugin_params` / `set_plugin_params`，还有 GUI 导出用了插件的歌，都在单独的进程里，坏插件最多让那一次失败。插件窗口里拧的旋钮停手 0.7 秒左右就记进歌里，算一步撤销，`Ctrl+Z` 能拧回去。
 
 **安全**：MCP 收到的相对路径一律相对于工程所在目录（没打开工程时是 Music 目录），且只会写 `*.aidaw.json` 和 `*.wav`。AI 写错路径也覆盖不了别的文件，哼，本小姐可是考虑周全的。
 

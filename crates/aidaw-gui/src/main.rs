@@ -10,6 +10,7 @@ mod inspector;
 mod mode;
 mod onboarding;
 mod piano_roll;
+mod plugins;
 mod scale;
 mod settings;
 mod sound;
@@ -20,6 +21,10 @@ use std::path::PathBuf;
 use eframe::egui;
 
 fn main() -> eframe::Result {
+    // Started again to look at or render plugins (see aidaw_plugin::worker).
+    if let Some(code) = aidaw_plugin::worker::run_if_worker() {
+        std::process::exit(code);
+    }
     let path = std::env::args().nth(1).map(PathBuf::from);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

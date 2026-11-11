@@ -91,11 +91,11 @@ impl Plugins {
     /// it as missing and renders without it).
     fn located(&mut self, project: &Project) -> Result<Project> {
         let mut out = project.clone();
-        if locate_all(&Store::load(), &mut out) {
+        if Store::load().locate_all(&mut out) {
             // Something is missing: maybe it was installed since the last scan.
             let (store, _) = self.scan(false)?;
             out = project.clone();
-            locate_all(&store, &mut out);
+            store.locate_all(&mut out);
         }
         Ok(out)
     }
@@ -368,32 +368,6 @@ pub fn known_instrument(name: &str) -> Option<PluginInfo> {
         .plugins()
         .into_iter()
         .find(|p| p.kind == Kind::Instrument && p.name.eq_ignore_ascii_case(name))
-}
-
-/// Set every plugin's path in `project` from `store`; true if any is missing.
-fn locate_all(store: &Store, project: &mut Project) -> bool {
-    let mut missing = false;
-    for t in &mut project.tracks {
-        let Track {
-            instrument,
-            effects,
-            ..
-        } = t;
-        let plugins = instrument
-            .plugin_mut()
-            .into_iter()
-            .chain(effects.iter_mut().map(|e| e.plugin_mut()));
-        for p in plugins {
-            match store.locate(p) {
-                Ok(path) => p.path = path.display().to_string(),
-                Err(_) => {
-                    p.path.clear();
-                    missing = true;
-                }
-            }
-        }
-    }
-    missing
 }
 
 /// "\nwarning: ..." for plugins that could not play, or nothing.

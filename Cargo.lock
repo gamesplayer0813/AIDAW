@@ -163,6 +163,7 @@ version = "0.1.0"
 dependencies = [
  "aidaw-core",
  "aidaw-engine",
+ "aidaw-plugin",
  "anyhow",
  "eframe",
  "egui_extras",

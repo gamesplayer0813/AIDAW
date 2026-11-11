@@ -282,6 +282,116 @@ struct Live {
     applied_at: u64,
     /// When its editor's changes were first noticed, and its block count then.
     dirty_since: Option<(Instant, u64)>,
+    /// The settings the song has for it, which it was started with, last
+    /// given or last read back from it (its own, its editor half's).
+    synced: (Option<Blob>, Option<Blob>),
+}
+
+impl Live {
+    /// Bring the running plugin in line with the song's entry for it: the
+    /// song's settings when they are not the ones it has (undo, redo and
+    /// reloads bring older ones back), then its parameter overrides. False
+    /// when only a fresh start can do that: the song went back to before
+    /// the plugin had settings of its own.
+    fn follow(&mut self, p: &PluginRef) -> bool {
+        let plugin = &self.slot.plugin;
+        let other = p.state != self.synced.0 || p.controller_state != self.synced.1;
+        let dropped = self.applied.keys().any(|id| !p.params.contains_key(id));
+        if other || dropped {
+            let Some(state) = &p.state else {
+                return false;
+            };
+            if let Err(e) = plugin.set_state(
+                state.as_bytes(),
+                p.controller_state.as_ref().map(Blob::as_bytes),
+            ) {
+                // It keeps what it has; don't ask again every edit.
+                eprintln!("{e:#}");
+            }
+            self.synced = (p.state.clone(), p.controller_state.clone());
+            // Its parameters are all as the settings have them now.
+            self.applied.clear();
+            self.dirty_since = None;
+            plugin.edits.dirty.store(false, Ordering::Release);
+        }
+        let mut sent = false;
+        for (id, v) in &p.params {
+            if self.applied.get(id) != Some(v) {
+                if let Ok(n) = id.parse() {
+                    plugin.set_param(n, *v);
+                    sent = true;
+                }
+                self.applied.insert(id.clone(), *v);
+            }
+        }
+        if sent {
+            self.applied_at = self.slot.blocks();
+        }
+        true
+    }
+}
+
+/// Settings read back from a running plugin, for the song (see
+/// [`LiveRack::capture`] and [`apply`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Captured {
+    pub key: Key,
+    pub uid: String,
+    pub state: Blob,
+    pub controller_state: Option<Blob>,
+    /// The plugin's parameter overrides are part of `state` now: they go.
+    pub clear_params: bool,
+}
+
+/// Which plugins [`LiveRack::capture`] reads back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Capture {
+    /// Those changed in their own window, a moment after the last knob
+    /// move: edits, worth an undo step each.
+    Edited,
+    /// Those that took on the parameter overrides the AI set: the overrides
+    /// become part of their settings. The sound stays the same, so this is
+    /// no edit.
+    Folded,
+    /// Every change not read back yet, right away (before saving or
+    /// exporting the song).
+    Pending,
+    /// Every plugin (when the editor closes).
+    All,
+}
+
+/// Put settings read back from plugins into `project`, where the same
+/// plugins still are. Returns whether `project` changed.
+pub fn apply(project: &mut Project, captured: &[Captured]) -> bool {
+    let mut changed = false;
+    for c in captured {
+        let Some(t) = project.tracks.iter_mut().find(|t| t.id == c.key.track) else {
+            continue;
+        };
+        let p = match &c.key.effect {
+            None => match &mut t.instrument {
+                Instrument::Vst3(p) => p,
+                _ => continue,
+            },
+            Some(fx) => match t.effects.iter_mut().find(|e| &e.id == fx) {
+                Some(e) => e.plugin_mut(),
+                None => continue,
+            },
+        };
+        if !p.uid.eq_ignore_ascii_case(&c.uid) {
+            continue;
+        }
+        if p.state.as_ref() != Some(&c.state) || p.controller_state != c.controller_state {
+            p.state = Some(c.state.clone());
+            p.controller_state = c.controller_state.clone();
+            changed = true;
+        }
+        if c.clear_params && !p.params.is_empty() {
+            p.params.clear();
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// Settings read from a plugin that is being restarted.
@@ -442,23 +552,10 @@ impl LiveRack {
     /// The running plugin for `key`, starting it if needed.
     fn ensure(&mut self, key: &Key, p: &PluginRef, locate: Locate) -> Option<Arc<Slot>> {
         if let Some(l) = self.live.get_mut(key) {
-            if l.uid.eq_ignore_ascii_case(&p.uid) {
-                let mut sent = false;
-                for (id, v) in &p.params {
-                    if l.applied.get(id) != Some(v) {
-                        if let Ok(n) = id.parse() {
-                            l.slot.plugin.set_param(n, *v);
-                            sent = true;
-                        }
-                        l.applied.insert(id.clone(), *v);
-                    }
-                }
-                if sent {
-                    l.applied_at = l.slot.blocks();
-                }
+            if l.uid.eq_ignore_ascii_case(&p.uid) && l.follow(p) {
                 return Some(l.slot.clone());
             }
-            // Another plugin took this place.
+            // Another plugin took this place, or this one starts afresh.
             self.retire(key);
         }
         if self
@@ -473,12 +570,16 @@ impl LiveRack {
             .remove(key)
             .filter(|c| c.uid.eq_ignore_ascii_case(&p.uid));
         let mut from = p.clone();
+        // Settings it had that the song does not have yet are an edit.
+        let mut unsaved = false;
         if let Some(c) = carried {
+            unsaved = Some(&c.state) != p.state.as_ref() || c.controller != p.controller_state;
             from.state = Some(c.state);
             from.controller_state = c.controller;
         }
         match locate(p).and_then(|path| load(&from, &path, self.setup)) {
             Ok(slot) => {
+                slot.plugin.edits.dirty.store(unsaved, Ordering::Release);
                 let slot = Arc::new(slot);
                 self.live.insert(
                     key.clone(),
@@ -488,6 +589,7 @@ impl LiveRack {
                         applied: p.params.clone(),
                         applied_at: 0,
                         dirty_since: None,
+                        synced: (p.state.clone(), p.controller_state.clone()),
                     },
                 );
                 Some(slot)
@@ -539,32 +641,32 @@ impl LiveRack {
         }
     }
 
-    /// Read plugin settings back into `project`: those an editor changed (a
-    /// moment after the last knob move), or every plugin's when `all` (when
-    /// saving). Parameter overrides the plugin has taken on are folded into
-    /// its settings and cleared. Returns whether `project` changed.
-    pub fn capture(&mut self, project: &mut Project, all: bool) -> bool {
-        let mut changed = false;
+    /// Read settings back from the running plugins of `project` (see
+    /// [`Capture`] for which). Put them in the song with [`apply`].
+    pub fn capture(&mut self, project: &Project, what: Capture) -> Vec<Captured> {
         let now = Instant::now();
-        for t in &mut project.tracks {
-            let id = t.id.clone();
-            if let Instrument::Vst3(p) = &mut t.instrument {
-                changed |= self.capture_one(&Key::instrument(&id), p, all, now);
+        let mut out = Vec::new();
+        for t in &project.tracks {
+            if let Instrument::Vst3(p) = &t.instrument {
+                out.extend(self.capture_one(Key::instrument(&t.id), p, what, now));
             }
-            for e in &mut t.effects {
-                let key = Key::effect(&id, &e.id);
-                changed |= self.capture_one(&key, e.plugin_mut(), all, now);
+            for e in &t.effects {
+                out.extend(self.capture_one(Key::effect(&t.id, &e.id), e.plugin(), what, now));
             }
         }
-        changed
+        out
     }
 
-    fn capture_one(&mut self, key: &Key, p: &mut PluginRef, all: bool, now: Instant) -> bool {
-        let Some(l) = self.live.get_mut(key) else {
-            return false;
-        };
+    fn capture_one(
+        &mut self,
+        key: Key,
+        p: &PluginRef,
+        what: Capture,
+        now: Instant,
+    ) -> Option<Captured> {
+        let l = self.live.get_mut(&key)?;
         if !l.uid.eq_ignore_ascii_case(&p.uid) {
-            return false;
+            return None;
         }
         let blocks = l.slot.blocks();
         let edits = &l.slot.plugin.edits;
@@ -577,32 +679,41 @@ impl LiveRack {
                 && waited >= CAPTURE_DELAY
                 && (blocks > b + 1 || waited >= CAPTURE_LATEST)
         });
+        let edited = l.dirty_since.is_some();
         let fold = !p.params.is_empty()
             && p.params.iter().all(|(id, v)| l.applied.get(id) == Some(v))
             && blocks > l.applied_at + 1;
-        if !(all || settled || fold) {
-            return false;
-        }
-        let Ok((state, controller)) = l.slot.plugin.state() else {
-            return false;
+        let wanted = match what {
+            Capture::Edited => settled,
+            // A change in its window comes first: it is read back with it.
+            Capture::Folded => fold && !edited,
+            Capture::Pending => edited || fold,
+            Capture::All => true,
         };
-        if settled || all {
-            l.dirty_since = None;
+        if !wanted {
+            return None;
         }
+        let (state, controller) = l.slot.plugin.state().ok()?;
         let state = Blob::new(state);
         let controller = controller.map(Blob::new);
-        let mut changed = false;
-        if p.state.as_ref() != Some(&state) || p.controller_state != controller {
-            p.state = Some(state);
-            p.controller_state = controller;
-            changed = true;
+        if what != Capture::Folded {
+            l.dirty_since = None;
         }
         if fold {
-            p.params.clear();
             l.applied.clear();
-            changed = true;
         }
-        changed
+        l.synced = (Some(state.clone()), controller.clone());
+        let same = p.state.as_ref() == Some(&state) && p.controller_state == controller;
+        if same && !fold {
+            return None;
+        }
+        Some(Captured {
+            key,
+            uid: p.uid.clone(),
+            state,
+            controller_state: controller,
+            clear_params: fold,
+        })
     }
 
     /// Whether a plugin's editor has changes not yet read back.

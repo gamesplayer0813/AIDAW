@@ -13,7 +13,7 @@ use aidaw_core::render::{self, Sequencer};
 use aidaw_core::{Instrument, Note, PluginRef, Project};
 use aidaw_plugin::instance::{Plugin, Role, Setup};
 use aidaw_plugin::module::Module;
-use aidaw_plugin::rack::{self, Key, LiveRack};
+use aidaw_plugin::rack::{self, Capture, Key, LiveRack};
 use aidaw_plugin::scan::{self, Kind, Store};
 use aidaw_plugin::worker::{Job, Worker};
 use serde_json::{json, Value};
@@ -351,29 +351,51 @@ fn the_live_rack_keeps_plugins_running_across_edits() {
     for chunk in out.chunks_mut(1024) {
         seq.process_with(&song, Some(&mut rack3), chunk);
     }
-    assert!(live.capture(&mut song, true));
+    assert!(
+        live.capture(&song, Capture::Edited).is_empty(),
+        "nobody turned a knob in its window"
+    );
+    let folded = live.capture(&song, Capture::Folded);
+    assert_eq!(folded.len(), 1);
+    assert!(rack::apply(&mut song, &folded));
     let fx_ref = song.tracks[0].effects[0].plugin();
     assert!(fx_ref.params.is_empty(), "folded into its settings");
     assert_eq!(f64s(fx_ref.state.as_ref().unwrap().as_bytes()), [0.25]);
+    // The synth's settings were never read back: the song has none yet.
+    let all = live.capture(&song, Capture::All);
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].key, Key::instrument("t1"));
+    assert!(rack::apply(&mut song, &all));
     assert!(
-        !live.capture(&mut song, true),
+        live.capture(&song, Capture::All).is_empty(),
         "nothing new the second time"
     );
 
-    // Settings that differ in the file do not reload a running plugin
-    // (the running one is newer: only AIDAW's editor writes them).
+    // Other settings in the song (undo, redo, a reload) go to the running
+    // plugin, which keeps running.
     song.tracks[0].effects[0].plugin_mut().state = Some(Blob::new(1.0f64.to_le_bytes().to_vec()));
     let _rack4 = live.build(&song, &locate);
-    assert_eq!(live.slot(&Key::effect("t1", "fx1")).unwrap().id, fx);
+    let slot = live.slot(&Key::effect("t1", "fx1")).unwrap().clone();
+    assert_eq!(slot.id, fx);
+    assert_eq!(f64s(&slot.plugin.state().unwrap().0), [1.0]);
 
-    // Another plugin in its place does.
-    song.tracks[0].effects[0].kind = aidaw_core::plugin::EffectKind::Vst3(synth_ref(&path));
+    // Back to before it had settings of its own: it starts afresh, with
+    // its defaults.
+    song.tracks[0].effects[0].plugin_mut().state = None;
     let _rack5 = live.build(&song, &locate);
-    assert_ne!(live.slot(&Key::effect("t1", "fx1")).unwrap().id, fx);
+    let fresh = live.slot(&Key::effect("t1", "fx1")).unwrap().clone();
+    assert_ne!(fresh.id, fx);
+    assert!(slot.is_retired());
+    assert_eq!(f64s(&fresh.plugin.state().unwrap().0), [0.5]);
+
+    // Another plugin in its place starts too.
+    song.tracks[0].effects[0].kind = aidaw_core::plugin::EffectKind::Vst3(synth_ref(&path));
+    let _rack6 = live.build(&song, &locate);
+    assert_ne!(live.slot(&Key::effect("t1", "fx1")).unwrap().id, fresh.id);
 
     // A track that goes takes its plugins with it.
     song.tracks.clear();
-    let _rack6 = live.build(&song, &locate);
+    let _rack7 = live.build(&song, &locate);
     assert_eq!(live.slots().count(), 0);
 }
 

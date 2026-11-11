@@ -26,7 +26,9 @@ pub enum Icon {
     Mute,
     Pause,
     Play,
+    Plug,
     Plus,
+    Power,
     Redo,
     Repeat,
     Save,
@@ -40,6 +42,7 @@ pub enum Icon {
     Undo,
     Volume,
     Wave,
+    Window,
 }
 
 impl Icon {
@@ -62,7 +65,9 @@ impl Icon {
             Icon::Mute => include_image!("../assets/icons/mute.svg"),
             Icon::Pause => include_image!("../assets/icons/pause.svg"),
             Icon::Play => include_image!("../assets/icons/play.svg"),
+            Icon::Plug => include_image!("../assets/icons/plug.svg"),
             Icon::Plus => include_image!("../assets/icons/plus.svg"),
+            Icon::Power => include_image!("../assets/icons/power.svg"),
             Icon::Redo => include_image!("../assets/icons/redo.svg"),
             Icon::Repeat => include_image!("../assets/icons/repeat.svg"),
             Icon::Save => include_image!("../assets/icons/save.svg"),
@@ -76,6 +81,7 @@ impl Icon {
             Icon::Undo => include_image!("../assets/icons/undo.svg"),
             Icon::Volume => include_image!("../assets/icons/volume.svg"),
             Icon::Wave => include_image!("../assets/icons/wave.svg"),
+            Icon::Window => include_image!("../assets/icons/window.svg"),
         }
     }
 }

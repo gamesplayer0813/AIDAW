@@ -7,7 +7,7 @@
 
 use std::path::Path;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::ThreadId;
@@ -345,8 +345,30 @@ impl Plugin {
         Ok((s.bytes(), controller))
     }
 
+    /// Give the running plugin other settings (when undo, redo or a song
+    /// read from disk brings back older ones): its own, and its editor
+    /// half's when it keeps them apart. Plugins take this while they play.
+    pub fn set_state(&self, state: &[u8], controller_state: Option<&[u8]>) -> Result<()> {
+        let s = MemoryStream::with_bytes(state);
+        if unsafe { self.component.setState(host::stream_ptr(&s)) } != kResultOk {
+            bail!("{} would not take its settings back", self.name);
+        }
+        if let Some(c) = &self.controller {
+            unsafe {
+                s.rewind();
+                c.setComponentState(host::stream_ptr(&s));
+                if let (Some(bytes), true) = (controller_state, self.separate) {
+                    let cs = MemoryStream::with_bytes(bytes);
+                    c.setState(host::stream_ptr(&cs));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Set parameter `id` to `value` (0..1), in the editor half now and in
-    /// the audio half from the next block.
+    /// the audio half from the next block. Unlike a knob turned in the
+    /// plugin's window, this does not count as an edit (see [`Edits`]).
     pub fn set_param(&self, id: u32, value: f64) {
         if !value.is_finite() {
             return;
@@ -356,7 +378,6 @@ impl Plugin {
             unsafe { c.setParamNormalized(id, value) };
         }
         let _ = self.edits.to_processor.try_send((id, value));
-        self.edits.dirty.store(true, Ordering::Release);
     }
 
     /// Show the editor half what the audio half reported (meters, values

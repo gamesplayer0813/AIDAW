@@ -2,7 +2,10 @@
 //! track's sound, chosen from friendly presets with the raw knobs tucked away.
 
 use aidaw_core::edit::Op;
-use aidaw_core::{DrumKit, Instrument, Waveform};
+use aidaw_core::{DrumKit, Instrument, PluginRef, Track, Waveform};
+use aidaw_plugin::editor;
+use aidaw_plugin::rack::Key;
+use aidaw_plugin::scan::{Kind, PluginInfo};
 use eframe::egui::{self, RichText};
 
 use crate::app::{track_color, App};
@@ -228,28 +231,73 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
                     .fixed_decimals(2),
             );
         });
-        let current = presets::name_of(&track.instrument).map_or(tr("⚙ Custom"), tr);
+        let current = match track.instrument.plugin() {
+            Some(p) => p.name.clone(),
+            None => presets::name_of(&track.instrument)
+                .map_or(tr("⚙ Custom"), tr)
+                .to_string(),
+        };
         let mut picked = false;
+        let instruments: Vec<&PluginInfo> = app.plugins.installed(Kind::Instrument).collect();
         if !pro {
             ui.label(RichText::new(tr("Pick a sound (click to hear it):")).color(theme::TEXT_DIM));
             // Which category tab is open; starts on the current sound's.
+            // The last tab holds the instrument plugins, when there are any.
+            let plugin_tab = Category::ALL.len();
+            let with_plugins = !instruments.is_empty() || track.instrument.plugin().is_some();
             let tab_id = ui.id().with("sound_tab").with(index);
             let mut tab = ui
                 .data(|d| d.get_temp::<usize>(tab_id))
                 .or_else(|| {
+                    if track.instrument.plugin().is_some() {
+                        return Some(plugin_tab);
+                    }
                     let c = presets::of(&track.instrument)?.category;
                     Category::ALL.iter().position(|x| *x == c)
                 })
                 .unwrap_or(0);
+            if tab == plugin_tab && !with_plugins {
+                tab = 0;
+            }
             ui.horizontal_wrapped(|ui| {
                 for (i, c) in Category::ALL.into_iter().enumerate() {
                     if ui.selectable_label(tab == i, tr(c.label())).clicked() {
                         tab = i;
                     }
                 }
+                if with_plugins
+                    && ui
+                        .selectable_label(tab == plugin_tab, tr("Plugins"))
+                        .on_hover_text(tr("VST3 instruments installed on this computer"))
+                        .clicked()
+                {
+                    tab = plugin_tab;
+                }
             });
             ui.data_mut(|d| d.insert_temp(tab_id, tab));
             ui.add_space(4.0);
+            if tab == plugin_tab {
+                if instruments.is_empty() {
+                    ui.weak(tr("No VST3 instruments found on this computer."));
+                }
+                for info in &instruments {
+                    let is = uses(&track.instrument, info);
+                    let b = egui::Button::new(RichText::new(&info.name).size(14.5))
+                        .truncate()
+                        .selected(is)
+                        .corner_radius(10);
+                    if ui
+                        .add_sized([ui.available_width(), 36.0], b)
+                        .on_hover_text(about(info))
+                        .clicked()
+                        && !is
+                    {
+                        track.instrument = Instrument::Vst3(info.to_ref());
+                        picked = true;
+                    }
+                }
+                return picked;
+            }
             let cell = ((ui.available_width() - 6.0) / 2.0).clamp(90.0, 160.0);
             egui::Grid::new("preset_grid")
                 .num_columns(2)
@@ -297,6 +345,21 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
                             picked = true;
                         }
                     }
+                    if !instruments.is_empty() {
+                        ui.label(RichText::new(tr("Plugins")).small().color(theme::TEXT_DIM));
+                    }
+                    for info in &instruments {
+                        let is = uses(&track.instrument, info);
+                        if ui
+                            .add(egui::SelectableLabel::new(is, &info.name))
+                            .on_hover_text(about(info))
+                            .clicked()
+                            && !is
+                        {
+                            track.instrument = Instrument::Vst3(info.to_ref());
+                            picked = true;
+                        }
+                    }
                 });
             if ui
                 .button(tr("🔊 Try"))
@@ -317,8 +380,262 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
         app.preview_note(index, if drums { 38 } else { 60 });
     }
 
-    let track = &mut app.project.tracks[index];
     ui.add_space(6.0);
+    plugin_card(ui, app, index);
+    instrument_settings(ui, &mut app.project.tracks[index], pro);
+    effects(ui, app, index);
+}
+
+/// Whether `instrument` is the plugin `info`.
+fn uses(instrument: &Instrument, info: &PluginInfo) -> bool {
+    instrument
+        .plugin()
+        .is_some_and(|p| p.uid.eq_ignore_ascii_case(&info.uid))
+}
+
+/// Who makes a plugin of the song, for its tooltip.
+fn about_ref(p: &PluginRef) -> String {
+    if p.vendor.is_empty() {
+        p.name.clone()
+    } else {
+        format!("{}  ·  {}", p.name, p.vendor)
+    }
+}
+
+/// What a plugin is, for its tooltip: "Surge Synth Team · Instrument|Synth".
+fn about(info: &PluginInfo) -> String {
+    [info.vendor.as_str(), info.category.as_str()]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("  ·  ")
+}
+
+/// Why a plugin of the song is not playing, if it is not, with a way to
+/// the Plugins window.
+fn plugin_problem(ui: &mut egui::Ui, app: &App, key: &Key, p: &PluginRef) {
+    let Some(f) = app.plugins.rack.failure(key) else {
+        return;
+    };
+    let why = if app.plugins.store.locate(p).is_err() {
+        tr("⚠ Not installed on this computer, so it is silent").to_string()
+    } else {
+        trf("⚠ Not playing: {}", &[&f.error])
+    };
+    ui.add(egui::Label::new(RichText::new(why).small().color(theme::DANGER)).wrap());
+    if ui
+        .small_button(tr("Plugins…"))
+        .on_hover_text(tr(
+            "Installed it in another folder? Add that folder in the Plugins window.",
+        ))
+        .clicked()
+    {
+        // Opened by the caller, which may borrow the app mutably.
+        ui.data_mut(|d| d.insert_temp(egui::Id::new("open_plugins_window"), true));
+    }
+}
+
+/// The button that shows a running plugin's own window. True if clicked.
+fn window_button(ui: &mut egui::Ui, app: &App, key: &Key) -> bool {
+    let running = app.plugins.rack.slot(key).is_some();
+    let shown = app.plugins.editor_open(key);
+    let button = icons::button(
+        Icon::Window,
+        if shown {
+            tr("Window is open")
+        } else {
+            tr("Open window")
+        },
+    )
+    .selected(shown);
+    let resp = ui.add_enabled(running && editor::SUPPORTED, button);
+    let resp = if editor::SUPPORTED {
+        resp.on_hover_text(tr("Show the plugin's own controls in a window of its own"))
+    } else {
+        resp.on_disabled_hover_text(tr("Plugin windows open on Windows only"))
+    };
+    resp.clicked()
+}
+
+/// The plugin playing the track, when it is one.
+fn plugin_card(ui: &mut egui::Ui, app: &mut App, index: usize) {
+    let track = &app.project.tracks[index];
+    let Some(p) = track.instrument.plugin() else {
+        return;
+    };
+    let key = Key::instrument(&track.id);
+    let mut open = false;
+    theme::card(theme::SURFACE, egui::Stroke::new(1.0_f32, theme::BORDER)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            icons::label(ui, Icon::Plug);
+            ui.add(egui::Label::new(RichText::new(&p.name).strong()).truncate());
+        });
+        if !p.vendor.is_empty() {
+            ui.weak(&p.vendor);
+        }
+        plugin_problem(ui, app, &key, p);
+        open = window_button(ui, app, &key);
+    });
+    take_plugins_window_request(ui, app);
+    if open {
+        app.open_plugin_window(&key);
+    }
+}
+
+/// A "Plugins…" button inside a borrowed part of the inspector asked for
+/// the Plugins window.
+fn take_plugins_window_request(ui: &mut egui::Ui, app: &mut App) {
+    let id = egui::Id::new("open_plugins_window");
+    if ui.data_mut(|d| d.remove_temp::<bool>(id)).unwrap_or(false) {
+        app.plugins.show_window = true;
+    }
+}
+
+/// What can be done to an effect, from its row.
+enum FxAction {
+    Switch(String, bool),
+    Move(String, usize),
+    Remove(String),
+    Open(Key),
+    Add(PluginInfo),
+}
+
+/// The track's effect plugins, in the order its sound goes through them.
+fn effects(ui: &mut egui::Ui, app: &mut App, index: usize) {
+    let track = &app.project.tracks[index];
+    let installed: Vec<&PluginInfo> = app.plugins.installed(Kind::Effect).collect();
+    if track.effects.is_empty() && installed.is_empty() {
+        return;
+    }
+    ui.add_space(8.0);
+    theme::section(ui, tr("Effects"));
+    if track.effects.is_empty() {
+        ui.weak(tr(
+            "Effects change this track's sound: echo, reverb, distortion, EQ…",
+        ));
+    }
+    let mut action = None;
+    let last = track.effects.len().saturating_sub(1);
+    for (i, e) in track.effects.iter().enumerate() {
+        let key = Key::effect(&track.id, &e.id);
+        let p = e.plugin();
+        theme::card(theme::SURFACE, egui::Stroke::new(1.0_f32, theme::BORDER)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let on = !e.bypass;
+                let color = if on { theme::OK } else { theme::TEXT_FAINT };
+                if ui
+                    .add(egui::Button::image(icons::image(Icon::Power, 15.0, color)))
+                    .on_hover_text(if on {
+                        tr("On: click to switch this effect off")
+                    } else {
+                        tr("Off: click to switch this effect on")
+                    })
+                    .clicked()
+                {
+                    action = Some(FxAction::Switch(e.id.clone(), !e.bypass));
+                }
+                let name = RichText::new(&p.name).strong();
+                let name = if on {
+                    name
+                } else {
+                    name.color(theme::TEXT_FAINT)
+                };
+                ui.add(egui::Label::new(name).truncate())
+                    .on_hover_text(about_ref(p));
+            });
+            plugin_problem(ui, app, &key, p);
+            ui.horizontal(|ui| {
+                if window_button(ui, app, &key) {
+                    action = Some(FxAction::Open(key.clone()));
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add(icons::icon_button(Icon::Trash, 14.0).small())
+                        .on_hover_text(tr("Remove this effect (Ctrl+Z brings it back)"))
+                        .clicked()
+                    {
+                        action = Some(FxAction::Remove(e.id.clone()));
+                    }
+                    if ui
+                        .add_enabled(i < last, icons::icon_button(Icon::ArrowDown, 14.0).small())
+                        .on_hover_text(tr("Later in the chain"))
+                        .clicked()
+                    {
+                        action = Some(FxAction::Move(e.id.clone(), i + 1));
+                    }
+                    if ui
+                        .add_enabled(i > 0, icons::icon_button(Icon::ArrowUp, 14.0).small())
+                        .on_hover_text(tr("Earlier in the chain"))
+                        .clicked()
+                    {
+                        action = Some(FxAction::Move(e.id.clone(), i - 1));
+                    }
+                });
+            });
+        });
+        ui.add_space(2.0);
+    }
+    let plus = icons::image(Icon::Plus, 16.0, theme::TEXT);
+    ui.menu_image_text_button(plus, tr("Add effect"), |ui| {
+        if installed.is_empty() {
+            ui.weak(tr("No VST3 effects found on this computer."));
+        }
+        for info in &installed {
+            if ui
+                .add(egui::Button::new(&info.name).truncate())
+                .on_hover_text(about(info))
+                .clicked()
+            {
+                action = Some(FxAction::Add((*info).clone()));
+                ui.close_menu();
+            }
+        }
+    })
+    .response
+    .on_hover_text(tr("Run this track's sound through an effect plugin"));
+    let track_id = track.id.clone();
+    take_plugins_window_request(ui, app);
+    match action {
+        None => {}
+        Some(FxAction::Switch(effect_id, bypass)) => {
+            app.run_op(Op::UpdateEffect {
+                effect_id,
+                bypass: Some(bypass),
+                index: None,
+            });
+        }
+        Some(FxAction::Move(effect_id, to)) => {
+            app.run_op(Op::UpdateEffect {
+                effect_id,
+                bypass: None,
+                index: Some(to),
+            });
+        }
+        Some(FxAction::Remove(effect_id)) => {
+            if app.run_op(Op::RemoveEffect { effect_id }).is_some() {
+                app.status = tr("Effect removed. Ctrl+Z brings it back.").into();
+            }
+        }
+        Some(FxAction::Open(key)) => app.open_plugin_window(&key),
+        Some(FxAction::Add(info)) => {
+            let added = app.run_op(Op::AddEffect {
+                track_id,
+                plugin: info.to_ref(),
+                index: None,
+                bypass: false,
+            });
+            if added.is_some() {
+                app.status = trf("Added {}", &[&info.name]);
+            }
+        }
+    }
+}
+
+/// The settings of a built-in instrument: synth knobs (Pro mode) or the
+/// drum kit.
+fn instrument_settings(ui: &mut egui::Ui, track: &mut Track, pro: bool) {
     match &mut track.instrument {
         Instrument::Synth(synth) => {
             if !pro {

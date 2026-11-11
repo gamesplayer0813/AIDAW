@@ -420,9 +420,12 @@ pub fn show(ui: &mut egui::Ui, app: &mut App) {
                     theme::bold_font(13.0),
                     theme::TEXT,
                 );
-                let sound = presets::name_of(&track.instrument)
-                    .map(|n| presets::plain_name(tr(n)))
-                    .unwrap_or(tr("Custom sound"));
+                let sound = match track.instrument.plugin() {
+                    Some(p) => p.name.as_str(),
+                    None => presets::name_of(&track.instrument)
+                        .map(|n| presets::plain_name(tr(n)))
+                        .unwrap_or(tr("Custom sound")),
+                };
                 text.text(
                     card.left_top() + vec2(19.0, 28.0),
                     Align2::LEFT_TOP,
