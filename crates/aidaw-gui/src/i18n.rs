@@ -937,11 +937,9 @@ mod tests {
     }
 
     /// Every `tr("…")` / `trf("…")` in the GUI, plus the tutorial and preset
-    /// text that is translated where it is shown, has a Chinese entry.
-    #[test]
-    fn every_string_is_translated() {
+    /// text that is translated where it is shown.
+    fn ui_texts() -> Vec<String> {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
-        let mut missing = Vec::new();
         let mut texts = Vec::new();
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
@@ -968,12 +966,58 @@ mod tests {
             texts.push(p.name.to_string());
             texts.push(p.hint.to_string());
         }
-        for t in &texts {
-            if zh(t).is_none() {
-                missing.push(t.clone());
-            }
-        }
+        texts
+    }
+
+    #[test]
+    fn every_string_is_translated() {
+        let texts = ui_texts();
+        let missing: Vec<&String> = texts.iter().filter(|t| zh(t).is_none()).collect();
         assert!(texts.len() > 200, "found only {} strings", texts.len());
         assert!(missing.is_empty(), "no Chinese for: {missing:#?}");
+    }
+
+    /// Every character of the interface, in English and in Chinese, is in
+    /// the fonts AIDAW ships (a system font is not counted), so none shows
+    /// up as an empty box on a PC that lacks some font.
+    #[test]
+    fn every_character_has_a_glyph() {
+        use eframe::egui::{Context, FontFamily, FontId};
+        let ctx = Context::default();
+        ctx.set_fonts(crate::theme::font_definitions(None));
+        let _ = ctx.run(Default::default(), |_| {});
+        let has = |c| ctx.fonts(|f| f.has_glyph(&FontId::proportional(14.0), c));
+        assert!(
+            has('中') && has('🔊') && !has('한'),
+            "the check itself works"
+        );
+        // Text shown without `tr`, such as emoji in labels, is in the code
+        // too (comments aside).
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+        let mut code = String::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let src = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+            let src = src.split("#[cfg(test)]").next().unwrap();
+            for line in src.lines().filter(|l| !l.trim_start().starts_with("//")) {
+                code.push_str(line);
+            }
+        }
+        let mut missing = std::collections::BTreeMap::new();
+        for en in ui_texts().into_iter().chain([code]) {
+            let zh = zh(&en).unwrap_or_default().to_string();
+            for text in [en, zh] {
+                for family in [FontFamily::Proportional, crate::theme::bold()] {
+                    let font = FontId::new(14.0, family);
+                    for c in text.chars().filter(|c| !c.is_control()) {
+                        if !ctx.fonts(|f| f.has_glyph(&font, c)) {
+                            let at = text.find(c).unwrap_or(0);
+                            let context: String = text[at..].chars().take(40).collect();
+                            missing.entry(c).or_insert(context);
+                        }
+                    }
+                }
+            }
+        }
+        assert!(missing.is_empty(), "no glyph for: {missing:#?}");
     }
 }

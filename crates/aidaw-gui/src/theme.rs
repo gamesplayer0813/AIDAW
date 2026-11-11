@@ -4,7 +4,7 @@
 //! Every colour the editor paints by hand comes from here, so the whole app
 //! can be re-skinned in one place.
 
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 
 use eframe::egui::{
     self, epaint::Shadow, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId,
@@ -87,7 +87,7 @@ pub fn bold_font(size: f32) -> FontId {
 }
 
 /// Some system fonts that carry CJK glyphs beyond the bundled subset
-/// (Inter and egui's own fonts have none).
+/// (Inter and egui's own fonts have none). See [`SystemFont`].
 const CJK_CANDIDATES: &[&str] = &[
     r"C:\Windows\Fonts\msyh.ttc",
     r"C:\Windows\Fonts\msyh.ttf",
@@ -97,7 +97,9 @@ const CJK_CANDIDATES: &[&str] = &[
     "/System/Library/Fonts/PingFang.ttc",
 ];
 
-fn install_fonts(ctx: &egui::Context) {
+/// The fonts: Inter, the bundled Chinese subset and egui's own fonts (for
+/// emoji and symbols), plus a system CJK font once it has been read.
+pub fn font_definitions(system_cjk: Option<Vec<u8>>) -> FontDefinitions {
     let mut fonts = FontDefinitions::default();
     fonts.font_data.insert(
         "inter".into(),
@@ -135,9 +137,7 @@ fn install_fonts(ctx: &egui::Context) {
             .or_default()
             .insert(1, "noto-sc".into());
     }
-    // A system CJK font, if there is one, covers the rarer characters people
-    // type into track and clip names.
-    if let Some(bytes) = CJK_CANDIDATES.iter().find_map(|p| std::fs::read(p).ok()) {
+    if let Some(bytes) = system_cjk {
         fonts
             .font_data
             .insert("cjk".into(), Arc::new(FontData::from_owned(bytes)));
@@ -145,14 +145,74 @@ fn install_fonts(ctx: &egui::Context) {
             fonts.families.entry(family).or_default().push("cjk".into());
         }
     }
-    ctx.set_fonts(fonts);
+    fonts
+}
+
+/// A system CJK font for the rarer characters people type into track and
+/// clip names; the bundled fonts cover the interface and everyday Chinese.
+/// Reading one takes a while (Microsoft YaHei is about 20 MB), so it is
+/// only read, on a background thread, once some text needs it.
+#[derive(Default)]
+pub struct SystemFont(FontState);
+
+#[derive(Default)]
+enum FontState {
+    #[default]
+    NotNeeded,
+    Loading(mpsc::Receiver<Option<Vec<u8>>>),
+    Done,
+}
+
+impl SystemFont {
+    /// Start reading the font if one of `texts` has a character that no
+    /// font in use has. Does nothing once it was started.
+    pub fn want_for<'a>(&mut self, ctx: &egui::Context, texts: impl IntoIterator<Item = &'a str>) {
+        if !matches!(self.0, FontState::NotNeeded) {
+            return;
+        }
+        let font = FontId::proportional(14.0);
+        let missing = ctx.fonts(|f| {
+            texts
+                .into_iter()
+                .flat_map(str::chars)
+                .any(|c| !c.is_control() && !f.has_glyph(&font, c))
+        });
+        if !missing {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let bytes = CJK_CANDIDATES.iter().find_map(|p| std::fs::read(p).ok());
+            let _ = tx.send(bytes);
+            ctx.request_repaint();
+        });
+        self.0 = FontState::Loading(rx);
+    }
+
+    /// Put the font to use once it has been read.
+    pub fn poll(&mut self, ctx: &egui::Context) {
+        let FontState::Loading(rx) = &self.0 else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(bytes) => {
+                if let Some(bytes) = bytes {
+                    ctx.set_fonts(font_definitions(Some(bytes)));
+                }
+                self.0 = FontState::Done;
+            }
+            Err(mpsc::TryRecvError::Disconnected) => self.0 = FontState::Done,
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+    }
 }
 
 // ---- style --------------------------------------------------------------------
 
 /// Install fonts and the AIDAW style. Call once at start-up.
 pub fn install(ctx: &egui::Context) {
-    install_fonts(ctx);
+    ctx.set_fonts(font_definitions(None));
     ctx.set_visuals(visuals());
     ctx.style_mut(|s| {
         s.text_styles = [
