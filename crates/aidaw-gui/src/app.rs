@@ -230,6 +230,34 @@ pub fn clip_notes<'a>(project: &'a Project, clip_id: &str) -> &'a [Note] {
     project.clip(clip_id).map_or(&[], |(_, c)| &c.notes)
 }
 
+/// The song to start with: the file asked for when it opens (or a new song
+/// that will be saved there when there is no such file yet), else the
+/// starter song with no file, so a file that failed to open is never
+/// autosaved over.
+fn first_song(path: Option<PathBuf>) -> (Project, Option<PathBuf>, String) {
+    match path {
+        Some(p) if p.exists() => match pio::load(&p) {
+            Ok(project) => {
+                let status = trf("Opened {}", &[&p.display()]);
+                (project, Some(p), status)
+            }
+            Err(e) => {
+                let status = trf("Failed to open: {}", &[&format!("{e:#}")]);
+                (starter_project(), None, status)
+            }
+        },
+        Some(p) => {
+            let status = trf("New project, will save to {}", &[&p.display()]);
+            (starter_project(), Some(p), status)
+        }
+        None => (
+            starter_project(),
+            None,
+            tr("Welcome! Not sure where to start? Open ❓ Help › Tutorial.").into(),
+        ),
+    }
+}
+
 fn mtime(path: &std::path::Path) -> Option<SystemTime> {
     pio::modified(path)
 }
@@ -245,31 +273,21 @@ impl App {
     pub fn new(path: Option<PathBuf>) -> Self {
         let settings = Settings::load();
         i18n::set(settings.lang.unwrap_or_else(i18n::system));
-        let mut path = path;
-        let (project, status) = match &path {
-            Some(p) if p.exists() => match pio::load(p) {
-                Ok(proj) => (proj, trf("Opened {}", &[&p.display()])),
-                Err(e) => {
-                    // Never autosave over a file we could not read.
-                    path = None;
-                    (
-                        starter_project(),
-                        trf("Failed to open: {}", &[&format!("{e:#}")]),
-                    )
-                }
-            },
-            Some(p) => (
-                starter_project(),
-                trf("New project, will save to {}", &[&p.display()]),
-            ),
-            None => (
-                starter_project(),
-                tr("Welcome! Not sure where to start? Open ❓ Help › Tutorial.").into(),
-            ),
-        };
-        let show_welcome = path.is_none() && settings.show_welcome;
+        let (project, path, status) = first_song(path);
         let opened = Engine::new(&project).map_err(|e| format!("{e:#}"));
         crate::sound::log_engine(&opened);
+        App::with(project, path, settings, opened, status)
+    }
+
+    /// The app around a song, with whatever sound device could be opened.
+    fn with(
+        project: Project,
+        path: Option<PathBuf>,
+        settings: Settings,
+        opened: Result<Engine, String>,
+        status: String,
+    ) -> Self {
+        let show_welcome = path.is_none() && settings.show_welcome;
         let (engine, engine_error) = match opened {
             Ok(e) => (Some(e), None),
             Err(e) => (None, Some(e)),
@@ -2224,5 +2242,379 @@ impl App {
         track.clips.push(copy);
         track.clips.sort_by(|a, b| a.start.total_cmp(&b.start));
         Some(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aidaw_core::model::FORMAT_VERSION;
+    use std::fs;
+
+    /// The app around a song, without a window, sound device or settings file.
+    fn app(project: Project, path: Option<PathBuf>) -> App {
+        let no_sound = Err("no sound device in tests".to_string());
+        App::with(project, path, Settings::default(), no_sound, String::new())
+    }
+
+    /// The starter song with these (pitch, start) notes in its piano clip
+    /// `c1`; `c2` is the drum clip.
+    fn song(notes: &[(u8, f64)]) -> Project {
+        let mut p = starter_project();
+        p.clip_mut("c1").unwrap().notes = notes
+            .iter()
+            .map(|&(pitch, start)| Note {
+                pitch,
+                start,
+                duration: 1.0,
+                velocity: 100,
+            })
+            .collect();
+        p
+    }
+
+    fn notes(a: &App) -> Vec<(u8, f64)> {
+        clip_notes(&a.project, "c1")
+            .iter()
+            .map(|n| (n.pitch, n.start))
+            .collect()
+    }
+
+    fn sel(i: &[usize]) -> BTreeSet<usize> {
+        i.iter().copied().collect()
+    }
+
+    /// One frame: `edit` changes things the way the panels would, then the
+    /// app looks for edits, as at the end of `update`.
+    fn frame(
+        a: &mut App,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+        edit: impl FnOnce(&mut App, &egui::Context),
+    ) {
+        let mut edit = Some(edit);
+        let input = egui::RawInput {
+            events,
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            if let Some(edit) = edit.take() {
+                edit(a, ctx);
+            }
+            a.commit_edits(ctx);
+        });
+    }
+
+    fn button(down: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos: egui::pos2(100.0, 100.0),
+            button: egui::PointerButton::Primary,
+            pressed: down,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    fn moved() -> egui::Event {
+        egui::Event::PointerMoved(egui::pos2(120.0, 100.0))
+    }
+
+    fn key(key: Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    /// A fresh folder for files, removed again when the test is done.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(name: &str) -> TempDir {
+            let dir = std::env::temp_dir().join(format!("aidaw-gui-{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Write `text` the way another program would, with a later file time
+    /// than anything written before, however coarse the file system's clock.
+    fn write_later(path: &std::path::Path, text: &str) {
+        fs::write(path, text).unwrap();
+        let later = SystemTime::now() + Duration::from_secs(5);
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+    }
+
+    fn poll_now(a: &mut App) {
+        a.last_poll = Instant::now().checked_sub(POLL_INTERVAL).unwrap();
+        a.poll_disk();
+    }
+
+    #[test]
+    fn the_starter_song_is_ready_to_draw_in() {
+        let p = starter_project();
+        let drums: Vec<bool> = p.tracks.iter().map(|t| t.instrument.is_drums()).collect();
+        assert_eq!(drums, [false, true], "keys, then drums");
+        for t in &p.tracks {
+            assert_eq!(t.clips.len(), 1);
+            let c = &t.clips[0];
+            assert_eq!((c.start, c.length), (0.0, 16.0), "4 bars from the start");
+            assert!(c.notes.is_empty());
+        }
+        let a = app(p, None);
+        assert_eq!(a.selected_track.as_deref(), Some("t1"));
+        assert_eq!(
+            a.selected_clip.as_deref(),
+            Some("c1"),
+            "the piano part is open"
+        );
+        assert!(!a.history.can_undo());
+    }
+
+    #[test]
+    fn easy_mode_draws_on_sixteenths_and_pro_on_the_chosen_grid() {
+        let mut a = app(song(&[]), None);
+        a.snap = 1.0;
+        assert_eq!(a.grid(), 0.25, "Easy mode hides the grid picker");
+        assert_eq!((a.snap_beat(1.13), a.snap_floor(1.24)), (1.25, 1.0));
+        a.settings.pro = true;
+        assert_eq!(a.grid(), 1.0);
+        assert_eq!((a.snap_beat(1.6), a.snap_floor(1.6)), (2.0, 1.0));
+        a.snap = 1.0 / 3.0;
+        assert!((a.snap_beat(0.7) - 2.0 / 3.0).abs() < 1e-12, "triplets");
+    }
+
+    #[test]
+    fn notes_stay_in_key_except_on_drums() {
+        let mut a = app(song(&[]), None); // C major, Stay in key on
+        assert_eq!(a.fit_pitch(0, 61), 60, "C# is not in C major: down to C");
+        assert_eq!(a.fit_pitch(0, 62), 62);
+        assert_eq!(a.fit_pitch(1, 61), 61, "drums: every row is a drum");
+        a.scale_lock = false;
+        assert_eq!(a.fit_pitch(0, 61), 60, "Easy mode always stays in key");
+        a.settings.pro = true;
+        assert_eq!(a.fit_pitch(0, 61), 61, "Pro: only with Stay in key on");
+        a.scale_lock = true;
+        a.scale = Scale::Off;
+        assert_eq!(a.fit_pitch(0, 61), 61);
+        a.scale = Scale::Minor;
+        a.scale_root = 9; // A minor
+        assert_eq!(a.fit_pitch(0, 66), 65, "F# down to F");
+    }
+
+    #[test]
+    fn a_drag_is_one_undo_step_and_the_notes_are_sorted_when_it_ends() {
+        let mut a = app(song(&[(60, 0.0), (64, 1.0), (67, 2.0)]), None);
+        let ctx = egui::Context::default();
+        a.selected_notes = sel(&[0]);
+        frame(&mut a, &ctx, vec![button(true)], |_, _| {});
+        // C4 is dragged to beat 3, a beat per frame.
+        for beat in [1.0, 2.0, 3.0] {
+            frame(&mut a, &ctx, vec![moved()], |a, _| {
+                a.project.clip_mut("c1").unwrap().notes[0].start = beat;
+            });
+        }
+        assert!(!a.history.can_undo(), "not while the mouse is held");
+        assert_eq!(notes(&a)[0], (60, 3.0), "no sorting under a drag");
+        frame(&mut a, &ctx, vec![button(false)], |_, _| {});
+        assert_eq!(notes(&a), [(64, 1.0), (67, 2.0), (60, 3.0)]);
+        assert_eq!(a.selected_notes, sel(&[2]), "still the dragged note");
+
+        a.undo();
+        assert_eq!(notes(&a), [(60, 0.0), (64, 1.0), (67, 2.0)]);
+        assert_eq!(a.selected_notes, sel(&[0]));
+        assert!(!a.history.can_undo(), "the whole drag was one step");
+        a.redo();
+        assert_eq!(notes(&a), [(64, 1.0), (67, 2.0), (60, 3.0)]);
+        assert_eq!(a.selected_notes, sel(&[2]));
+    }
+
+    #[test]
+    fn deleted_notes_come_back_selected() {
+        let mut a = app(song(&[(60, 0.0), (64, 1.0), (67, 2.0)]), None);
+        let ctx = egui::Context::default();
+        // Selected in one frame (a click), deleted in the next.
+        frame(&mut a, &ctx, vec![button(false)], |a, _| {
+            a.selected_notes = sel(&[0, 2])
+        });
+        frame(&mut a, &ctx, vec![key(Key::Delete)], |a, ctx| {
+            a.edit_shortcuts(ctx)
+        });
+        assert_eq!(notes(&a), [(64, 1.0)]);
+        assert!(a.selected_notes.is_empty());
+        a.undo();
+        assert_eq!(notes(&a).len(), 3);
+        assert_eq!(a.selected_notes, sel(&[0, 2]));
+    }
+
+    #[test]
+    fn pasted_notes_land_in_order_and_selected() {
+        let mut a = app(song(&[(60, 0.0), (64, 4.0)]), None);
+        let ctx = egui::Context::default();
+        let chat = r#"Here you go: [{"pitch": "G4", "start": 1, "duration": 1}]"#;
+        let paste = egui::Event::Paste(chat.into());
+        frame(&mut a, &ctx, vec![paste], |a, ctx| a.edit_shortcuts(ctx));
+        assert_eq!(notes(&a), [(60, 0.0), (67, 1.0), (64, 4.0)]);
+        assert_eq!(a.selected_notes, sel(&[1]), "the pasted G4");
+        a.undo();
+        assert_eq!(notes(&a), [(60, 0.0), (64, 4.0)]);
+    }
+
+    #[test]
+    fn frames_without_clicks_or_keys_look_for_edits_only_now_and_then() {
+        let mut a = app(song(&[]), None);
+        let ctx = egui::Context::default();
+        a.last_check = Instant::now() + Duration::from_secs(3600);
+        frame(&mut a, &ctx, vec![moved()], |a, _| a.project.bpm = 130.0);
+        assert!(!a.history.can_undo(), "the mouse only passed over");
+        frame(&mut a, &ctx, vec![key(Key::Escape)], |_, _| {});
+        assert!(a.history.can_undo(), "a key press looks");
+        // Playback: no input at all, but the song is still looked at.
+        a.last_check = Instant::now().checked_sub(CHECK_INTERVAL).unwrap();
+        frame(&mut a, &ctx, vec![], |a, _| a.project.bpm = 90.0);
+        assert_eq!(a.history.take_undo().unwrap().project.bpm, 130.0);
+    }
+
+    #[test]
+    fn the_ai_s_changes_load_keep_the_selection_and_can_be_undone() {
+        let dir = TempDir::new("reload");
+        let path = dir.0.join("song.aidaw.json");
+        let mine = song(&[(60, 0.0), (64, 1.0), (67, 2.0)]);
+        pio::save(&mine, &path).unwrap();
+        let mut a = app(mine.clone(), Some(path.clone()));
+        a.selected_notes = sel(&[1]); // E4
+                                      // The AI adds a note in front of the others.
+        let mut theirs = mine.clone();
+        theirs.clip_mut("c1").unwrap().notes.insert(
+            0,
+            Note {
+                pitch: 55,
+                start: 0.0,
+                duration: 0.5,
+                velocity: 90,
+            },
+        );
+        write_later(&path, &serde_json::to_string(&theirs).unwrap());
+        poll_now(&mut a);
+        assert_eq!(a.project, theirs);
+        assert_eq!(a.selected_notes, sel(&[2]), "still E4");
+        assert!(a.save_at.is_none(), "the file holds this version already");
+
+        a.undo();
+        assert_eq!(a.project, mine);
+        assert_eq!(a.selected_notes, sel(&[1]));
+        a.save_now();
+        assert_eq!(
+            pio::load(&path).unwrap(),
+            mine,
+            "undo saves the old version"
+        );
+    }
+
+    #[test]
+    fn a_save_keeps_the_human_s_version_and_the_ai_s_one_on_the_undo_stack() {
+        let dir = TempDir::new("conflict");
+        let path = dir.0.join("song.aidaw.json");
+        let start = song(&[(60, 0.0)]);
+        pio::save(&start, &path).unwrap();
+        let mut a = app(start.clone(), Some(path.clone()));
+        let ctx = egui::Context::default();
+        frame(&mut a, &ctx, vec![key(Key::Escape)], |a, _| {
+            a.project.bpm = 140.0
+        });
+        // The AI writes between two polls.
+        let mut theirs = start.clone();
+        theirs.bpm = 90.0;
+        write_later(&path, &serde_json::to_string(&theirs).unwrap());
+        a.save_now();
+        assert_eq!(
+            pio::load(&path).unwrap().bpm,
+            140.0,
+            "the human's edit is saved"
+        );
+        a.undo();
+        assert_eq!(a.project.bpm, 90.0, "Ctrl+Z shows the AI's version");
+        a.undo();
+        assert_eq!(a.project.bpm, start.bpm);
+    }
+
+    #[test]
+    fn a_file_from_a_newer_aidaw_is_never_overwritten() {
+        let dir = TempDir::new("newer");
+        let path = dir.0.join("song.aidaw.json");
+        let mine = song(&[(60, 0.0)]);
+        pio::save(&mine, &path).unwrap();
+        let mut a = app(mine.clone(), Some(path.clone()));
+        let newer = format!(
+            r#"{{"version": {}, "name": "x", "bpm": 100, "tracks": [], "new_thing": 1}}"#,
+            FORMAT_VERSION + 1
+        );
+        write_later(&path, &newer);
+        poll_now(&mut a);
+        assert!(a.newer_on_disk.is_some());
+        assert_eq!(a.project, mine, "nothing was half-read");
+        a.project.bpm = 120.0;
+        a.save_now();
+        assert_eq!(fs::read_to_string(&path).unwrap(), newer);
+    }
+
+    #[test]
+    fn another_file_starts_a_fresh_undo_history() {
+        let dir = TempDir::new("history");
+        let other = dir.0.join("other.aidaw.json");
+        let mut a = app(song(&[]), None);
+        let ctx = egui::Context::default();
+        frame(&mut a, &ctx, vec![key(Key::Escape)], |a, _| {
+            a.project.bpm = 140.0
+        });
+        // The demo replaces a song that has no file: Ctrl+Z brings it back.
+        a.load_project(song(&[(60, 0.0)]), None, "");
+        assert!(a.history.can_undo());
+        // A song from a file: undoing into the old song would save it there.
+        a.load_project(song(&[(62, 0.0)]), Some(other), "");
+        assert!(!a.history.can_undo() && !a.history.can_redo());
+        assert_eq!(notes(&a), [(62, 0.0)]);
+    }
+
+    #[test]
+    fn a_file_that_fails_to_open_is_never_autosaved_over() {
+        let dir = TempDir::new("first");
+        let broken = dir.0.join("broken.aidaw.json");
+        fs::write(&broken, "{ this is not a song").unwrap();
+        let (p, path, _) = first_song(Some(broken.clone()));
+        assert_eq!(path, None, "no file to save to");
+        assert_eq!(p.tracks.len(), 2, "the starter song instead");
+
+        let new = dir.0.join("new.aidaw.json");
+        let (p, path, _) = first_song(Some(new.clone()));
+        assert_eq!(path.as_deref(), Some(new.as_path()));
+        let a = app(p, path);
+        assert!(a.save_at.is_some(), "a new file is written right away");
+
+        let good = dir.0.join("good.aidaw.json");
+        let s = song(&[(64, 1.0), (60, 0.0)]);
+        pio::save(&s, &good).unwrap();
+        let (p, path, _) = first_song(Some(good.clone()));
+        assert_eq!(path, Some(good));
+        assert_eq!(
+            p.clip("c1").unwrap().1.notes[0].pitch,
+            60,
+            "loaded in order"
+        );
+        assert_eq!(fs::read_to_string(&broken).unwrap(), "{ this is not a song");
     }
 }
