@@ -508,12 +508,16 @@ impl IComponentHandlerTrait for ComponentHandler {
     }
 
     unsafe fn endEdit(&self, _id: ParamID) -> tresult {
-        let _ = self
-            .edits
-            .gestures
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |g| {
-                Some((g - 1).max(0))
-            });
+        // One gesture fewer, never below none (some plugins end more than
+        // they begin).
+        let gestures = &self.edits.gestures;
+        let mut g = gestures.load(Ordering::Acquire);
+        while g > 0 {
+            match gestures.compare_exchange_weak(g, g - 1, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => break,
+                Err(now) => g = now,
+            }
+        }
         self.edits.dirty.store(true, Ordering::Release);
         kResultOk
     }
@@ -939,5 +943,36 @@ mod tests {
             host.getName(&mut name);
             assert_eq!(util::from_utf16(&name), "AIDAW");
         }
+    }
+
+    #[test]
+    fn knob_drags_are_counted_and_never_go_below_none() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        let edits = Arc::new(Edits {
+            to_processor: tx,
+            dirty: AtomicBool::new(false),
+            gestures: AtomicI32::new(0),
+            restart: AtomicI32::new(0),
+            open_editor: AtomicBool::new(false),
+        });
+        let handler = ComponentHandler {
+            edits: edits.clone(),
+        };
+        let drags = || edits.gestures.load(Ordering::Acquire);
+        unsafe {
+            handler.beginEdit(3);
+            handler.beginEdit(4);
+            assert_eq!(handler.performEdit(3, 0.25), kResultOk);
+            handler.endEdit(3);
+            assert_eq!(drags(), 1, "one knob still held");
+            handler.endEdit(4);
+            // A plugin that ends more drags than it began.
+            handler.endEdit(4);
+            assert_eq!(drags(), 0);
+            handler.beginEdit(5);
+            assert_eq!(drags(), 1, "the next drag still counts");
+        }
+        assert!(edits.dirty.load(Ordering::Acquire));
+        assert_eq!(rx.try_recv(), Ok((3, 0.25)));
     }
 }
