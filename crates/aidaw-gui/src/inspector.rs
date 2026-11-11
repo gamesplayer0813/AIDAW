@@ -470,5 +470,6 @@ fn sound_section(ui: &mut egui::Ui, app: &mut App) {
             }
             ui.weak(tr("Each row in the piano roll is a different drum: Kick, Snare, Clap, Hi-hats, Toms, cymbals and percussion (cowbell, shaker, congas...) are labelled on the keyboard."));
         }
+        Instrument::Vst3(_) => {}
     }
 }

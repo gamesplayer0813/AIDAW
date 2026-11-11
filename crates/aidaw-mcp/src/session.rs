@@ -1853,6 +1853,7 @@ fn instrument_label(inst: &Instrument) -> String {
     match inst {
         Instrument::Drums { kit } => format!("drums ({} kit)", kit.label()),
         Instrument::Synth(s) => format!("custom {} synth", s.waveform.label()),
+        Instrument::Vst3(p) => format!("plugin {}", p.name),
     }
 }
 
